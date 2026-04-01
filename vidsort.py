@@ -804,11 +804,12 @@ class VidSort(tk.Tk):
 
         # ── LLM 설정 ──────────────────────────────
         self._llm_token    = cfg.get('llm_token', '')
-        self._llm_model    = cfg.get('llm_model', 'claude-sonnet-4-5')
+        self._llm_model    = cfg.get('llm_model', 'claude-sonnet-4.5')
         self._llm_endpoint = cfg.get('llm_endpoint',
-                                     'https://models.inference.ai.azure.com')
+                                     'https://api.githubcopilot.com')
         self._llm_tag_pool = cfg.get('llm_tag_pool',
                                      ['애니', '영화', '드라마', '예능', '다큐', '기타'])
+        self._llm_prompt   = cfg.get('llm_prompt', '')  # 비어 있으면 llm_api 기본값 사용
         self._llm_stop     = threading.Event()
 
         # 포맷 체크박스 변수 (설정에서 복원)
@@ -1079,6 +1080,8 @@ class VidSort(tk.Tk):
                    command=self._llm_tag_pool_dlg).pack(fill='x',pady=1)
         ttk.Button(ai_f,text='▶ AI 자동 태그',style='Acc.TButton',
                    command=self._llm_auto_tag_dlg).pack(fill='x',pady=(4,1))
+        ttk.Button(ai_f,text='🔍 패턴 분석 → 태그',
+                   command=self._llm_pattern_dlg).pack(fill='x',pady=1)
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):
@@ -1922,6 +1925,7 @@ class VidSort(tk.Tk):
         cfg['llm_model']    = self._llm_model
         cfg['llm_endpoint'] = self._llm_endpoint
         cfg['llm_tag_pool'] = self._llm_tag_pool
+        cfg['llm_prompt']   = self._llm_prompt
         save_cfg(cfg)
 
     def _get_llm_client(self):
@@ -1944,50 +1948,73 @@ class VidSort(tk.Tk):
 
     # ── AI 설정 다이얼로그 ───────────────────────
     def _llm_settings_dlg(self):
+        from llm_api import DEFAULT_SYSTEM_PROMPT
         win = tk.Toplevel(self)
-        win.title('🤖 AI 설정 — GitHub Copilot / GitHub Models')
+        win.title('🤖 AI 설정 — GitHub Copilot')
         win.configure(bg='#0d0d14')
-        win.geometry('540x290')
-        win.resizable(False, False)
+        win.geometry('560x560')
+        win.resizable(False, True)
         win.grab_set()
 
         tk.Label(win, text='GitHub Copilot API 설정',
                  bg='#0d0d14', fg='#dcdcf0',
-                 font=('Consolas', 12, 'bold')).pack(pady=(16, 10))
+                 font=('Consolas', 12, 'bold')).pack(pady=(16, 8))
 
         def _row(label, val, hint='', show=''):
             f = tk.Frame(win, bg='#0d0d14'); f.pack(fill='x', padx=20, pady=3)
             tk.Label(f, text=label, bg='#0d0d14', fg='#888',
                      font=('Consolas', 9), width=14, anchor='e').pack(side='left')
             var = tk.StringVar(value=val)
-            e = ttk.Entry(f, textvariable=var, font=('Consolas', 10), width=32,
-                          show=show)
-            e.pack(side='left', padx=6)
+            ttk.Entry(f, textvariable=var, font=('Consolas', 10),
+                      width=32, show=show).pack(side='left', padx=6)
             if hint:
                 tk.Label(f, text=hint, bg='#0d0d14', fg='#444',
                          font=('Consolas', 7)).pack(side='left')
             return var
 
-        v_token    = _row('GitHub 토큰:',  self._llm_token,    '(PAT)', show='*')
-        v_model    = _row('모델:',         self._llm_model,    '예) claude-sonnet-4-5')
-        v_endpoint = _row('엔드포인트:',   self._llm_endpoint, '')
+        v_token    = _row('GitHub 토큰:', self._llm_token,    '(PAT)', show='*')
+        v_model    = _row('모델:',        self._llm_model,    '예) claude-sonnet-4.5')
+        v_endpoint = _row('엔드포인트:',  self._llm_endpoint, '')
 
-        tk.Label(win,
-                 text='GitHub Models: https://models.inference.ai.azure.com\n'
-                      'GitHub Copilot: https://api.githubcopilot.com',
-                 bg='#0d0d14', fg='#3a3a5c',
-                 font=('Consolas', 7)).pack(pady=(4, 0))
+        tk.Label(win, text='엔드포인트: https://api.githubcopilot.com',
+                 bg='#0d0d14', fg='#3a3a5c', font=('Consolas', 7)).pack()
+
+        ttk.Separator(win).pack(fill='x', padx=16, pady=10)
+
+        # ── 태그 분류 프롬프트 편집 ───────────────
+        ph = tk.Frame(win, bg='#0d0d14'); ph.pack(fill='x', padx=20)
+        tk.Label(ph, text='태그 분류 프롬프트 (비워두면 기본값 사용):',
+                 bg='#0d0d14', fg='#888', font=('Consolas', 9)).pack(side='left')
+        ttk.Button(ph, text='기본값으로',
+                   command=lambda: (prompt_txt.delete('1.0', 'end'),
+                                    prompt_txt.insert('1.0', DEFAULT_SYSTEM_PROMPT))
+                   ).pack(side='right')
+
+        pf = tk.Frame(win, bg='#0d0d14')
+        pf.pack(fill='both', expand=True, padx=20, pady=(4, 0))
+        prompt_txt = tk.Text(pf, bg='#1a1a28', fg='#dcdcf0',
+                             insertbackground='#dcdcf0',
+                             font=('Consolas', 9), height=10,
+                             borderwidth=0, wrap='word')
+        psb = ttk.Scrollbar(pf, orient='vertical', command=prompt_txt.yview)
+        prompt_txt.configure(yscrollcommand=psb.set)
+        psb.pack(side='right', fill='y')
+        prompt_txt.pack(fill='both', expand=True)
+        prompt_txt.insert('1.0', self._llm_prompt or DEFAULT_SYSTEM_PROMPT)
 
         def save():
             self._llm_token    = v_token.get().strip()
-            self._llm_model    = v_model.get().strip() or 'claude-sonnet-4-5'
+            self._llm_model    = v_model.get().strip() or 'claude-sonnet-4.5'
             self._llm_endpoint = (v_endpoint.get().strip()
-                                  or 'https://models.inference.ai.azure.com')
+                                  or 'https://api.githubcopilot.com')
+            entered = prompt_txt.get('1.0', 'end').strip()
+            # 기본값과 동일하면 빈 문자열 저장 (항상 최신 기본값 따라가게)
+            self._llm_prompt = '' if entered == DEFAULT_SYSTEM_PROMPT else entered
             self._save_llm_cfg()
             win.destroy()
             messagebox.showinfo('저장', 'AI 설정이 저장되었습니다.')
 
-        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=10)
         ttk.Button(bf, text='💾 저장', style='Acc.TButton',
                    command=save).pack(side='left', padx=4)
         ttk.Button(bf, text='취소', command=win.destroy).pack(side='left', padx=4)
@@ -2215,6 +2242,183 @@ class VidSort(tk.Tk):
             return
         self._llm_run_batch(paths, self._llm_tag_pool)
 
+    # ── 패턴 분석 → 태그 지정 ───────────────────
+    def _llm_pattern_dlg(self):
+        """
+        파일명에서 공통 패턴(접두어·괄호어)을 추출해 보여주고,
+        각 패턴에 태그를 지정하면 해당 파일 전체에 일괄 적용.
+
+        예) 'PPV'로 시작하는 파일 38개 발견 → 태그: [   ]
+        """
+        self._set_status('패턴 분석 중...')
+        threading.Thread(target=self._run_pattern_analysis, daemon=True).start()
+
+    def _run_pattern_analysis(self):
+        import re
+        rows = self.db.conn.execute(
+            "SELECT path, name FROM files").fetchall()
+
+        # ── 패턴 추출 ─────────────────────────────
+        # 1) 대괄호/소괄호 안 단어: [PPV], (HD) 등
+        # 2) 언더스코어·하이픈·공백 앞 첫 토큰 (3글자 이상)
+        pattern_paths = defaultdict(set)
+
+        bracket_re = re.compile(r'[\[\(]([A-Za-z0-9\-_\.]+)[\]\)]')
+        prefix_re  = re.compile(r'^([A-Za-z0-9]{3,})')  # 파일명 맨 앞 영숫자
+
+        for path, name in rows:
+            stem = Path(name).stem
+
+            # 괄호 안 키워드
+            for m in bracket_re.finditer(stem):
+                kw = m.group(1).upper()
+                if len(kw) >= 2:
+                    pattern_paths[kw].add(path)
+
+            # 앞쪽 접두어 (구분자 전까지)
+            clean = re.split(r'[-_\s]', stem)[0]
+            if prefix_re.match(clean) and 2 <= len(clean) <= 16:
+                pattern_paths[clean.upper()].add(path)
+
+        # 3개 이상 파일에 등장한 패턴만
+        MIN_FILES = 3
+        candidates = sorted(
+            [(kw, paths) for kw, paths in pattern_paths.items()
+             if len(paths) >= MIN_FILES],
+            key=lambda x: -len(x[1]))[:100]
+
+        self.after(0, lambda: (
+            self._set_status('패턴 분석 완료'),
+            self._show_pattern_dlg(candidates)))
+
+    def _show_pattern_dlg(self, candidates):
+        if not candidates:
+            messagebox.showinfo('패턴 분석',
+                f'공통 패턴(3개 파일 이상)을 찾지 못했습니다.')
+            return
+
+        existing_tags = self.db.all_tags()
+
+        win = tk.Toplevel(self)
+        win.title('🔍 패턴 분석 → 태그 일괄 지정')
+        win.configure(bg='#0d0d14')
+        win.geometry('620x640')
+        win.grab_set()
+
+        tk.Label(win, text='파일명 패턴 → 태그 일괄 지정',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(14, 2))
+        tk.Label(win,
+                 text='패턴별로 태그를 입력하세요. 비워두면 해당 패턴은 건너뜁니다.',
+                 bg='#0d0d14', fg='#555', font=('Consolas', 8)).pack(pady=(0, 6))
+
+        # ── 검색 필터 ─────────────────────────────
+        sf = tk.Frame(win, bg='#0d0d14'); sf.pack(fill='x', padx=16, pady=(0, 4))
+        tk.Label(sf, text='필터:', bg='#0d0d14', fg='#666',
+                 font=('Consolas', 9)).pack(side='left')
+        fvar = tk.StringVar()
+        ttk.Entry(sf, textvariable=fvar, width=18,
+                  font=('Consolas', 9)).pack(side='left', padx=6)
+
+        # ── 스크롤 패턴 목록 ──────────────────────
+        outer = tk.Frame(win, bg='#0d0d14')
+        outer.pack(fill='both', expand=True, padx=14)
+        cv = tk.Canvas(outer, bg='#0d0d14', highlightthickness=0)
+        sb = ttk.Scrollbar(outer, orient='vertical', command=cv.yview)
+        cv.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        cv.pack(fill='both', expand=True)
+        inner = tk.Frame(cv, bg='#0d0d14')
+        cv.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind('<Configure>',
+                   lambda e: cv.configure(scrollregion=cv.bbox('all')))
+        cv.bind('<MouseWheel>',
+                lambda e: cv.yview_scroll(-1*(e.delta//120), 'units'))
+
+        # 패턴당 (체크변수, 태그변수) 저장
+        row_vars = {}  # kw → (BooleanVar, StringVar, paths)
+
+        def build_list(q=''):
+            for w in inner.winfo_children():
+                w.destroy()
+            row_vars.clear()
+
+            # 헤더
+            hf = tk.Frame(inner, bg='#1a1a28')
+            hf.pack(fill='x', pady=(0, 2))
+            for text, w in [('✓', 3), ('패턴', 12), ('파일수', 6), ('지정 태그', 22)]:
+                tk.Label(hf, text=text, bg='#1a1a28', fg='#555',
+                         font=('Consolas', 8), width=w,
+                         anchor='w').pack(side='left', padx=3)
+
+            for kw, paths in candidates:
+                if q and q.upper() not in kw:
+                    continue
+                chk_var = tk.BooleanVar(value=True)
+                tag_var = tk.StringVar()
+
+                rf = tk.Frame(inner, bg='#0d0d14')
+                rf.pack(fill='x', pady=1)
+
+                tk.Checkbutton(rf, variable=chk_var, bg='#0d0d14',
+                               selectcolor='#0d0d14', cursor='hand2',
+                               activebackground='#0d0d14').pack(side='left')
+                tk.Label(rf, text=kw, bg='#0d0d14', fg='#dcdcf0',
+                         font=('Consolas', 10), width=12,
+                         anchor='w').pack(side='left', padx=4)
+                tk.Label(rf, text=f'{len(paths)}개', bg='#0d0d14',
+                         fg='#7c6ff7', font=('Consolas', 9),
+                         width=5).pack(side='left')
+
+                tag_e = ttk.Entry(rf, textvariable=tag_var,
+                                  font=('Consolas', 9), width=18)
+                tag_e.pack(side='left', padx=4)
+
+                # 기존 태그 빠른 선택 버튼 (최대 4개)
+                for et in existing_tags[:4]:
+                    t = et
+                    tk.Button(rf, text=t, bg='#1a1a28', fg='#aaa',
+                              font=('Consolas', 7), bd=0, padx=4,
+                              cursor='hand2',
+                              command=lambda tv=tag_var, tg=t: tv.set(tg)
+                              ).pack(side='left', padx=1)
+
+                row_vars[kw] = (chk_var, tag_var, paths)
+
+        build_list()
+        fvar.trace_add('write', lambda *_: build_list(fvar.get()))
+
+        # ── 하단 버튼 ─────────────────────────────
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(fill='x', padx=14, pady=8)
+
+        def apply_all():
+            applied_files = 0; applied_tags = 0
+            for kw, (chk_var, tag_var, paths) in row_vars.items():
+                if not chk_var.get():
+                    continue
+                tag = tag_var.get().strip()
+                if not tag:
+                    continue
+                for p in paths:
+                    self.db.add_tag(p, tag)
+                    applied_tags += 1
+                applied_files += len(paths)
+            win.destroy()
+            self._reload_sidebar()
+            self._reload()
+            messagebox.showinfo('적용 완료',
+                f'패턴 태그 적용 완료\n'
+                f'파일: {applied_files}개  태그: {applied_tags}건')
+
+        ttk.Button(bf, text='✅ 선택 패턴 태그 적용',
+                   style='Acc.TButton',
+                   command=apply_all).pack(side='left', padx=4)
+        ttk.Button(bf, text='취소',
+                   command=win.destroy).pack(side='left', padx=4)
+        tk.Label(bf, text=f'총 {len(candidates)}개 패턴 발견',
+                 bg='#0d0d14', fg='#444',
+                 font=('Consolas', 8)).pack(side='right', padx=8)
+
     # ── AI 배치 태그 실행 ────────────────────────
     def _llm_run_batch(self, paths, tag_pool):
         """백그라운드 배치 태그 실행 + 진행 팝업"""
@@ -2260,7 +2464,8 @@ class VidSort(tk.Tk):
         def worker():
             try:
                 tags_list = client.analyze_and_tag(
-                    filenames, tag_pool, on_progress)
+                    filenames, tag_pool, on_progress,
+                    custom_prompt=self._llm_prompt)
             except Exception as e:
                 popup.after(0, lambda: (
                     popup.destroy(),

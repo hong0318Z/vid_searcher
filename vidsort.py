@@ -808,8 +808,6 @@ class VidSort(tk.Tk):
         self._llm_model    = cfg.get('llm_model', 'claude-sonnet-4.5')
         self._llm_endpoint = cfg.get('llm_endpoint',
                                      'https://api.githubcopilot.com')
-        self._llm_tag_pool = cfg.get('llm_tag_pool',
-                                     ['애니', '영화', '드라마', '예능', '다큐', '기타'])
         self._llm_prompt   = cfg.get('llm_prompt', '')  # 비어 있으면 llm_api 기본값 사용
         self._llm_stop     = threading.Event()
 
@@ -1002,6 +1000,7 @@ class VidSort(tk.Tk):
                            borderwidth=0,highlightthickness=0,activestyle='none')
         self.fl.pack(fill='both',expand=True,padx=4)
         self.fl.bind('<<ListboxSelect>>',self._sb_folder)
+        self.fl.bind('<Button-3>', self._fl_ctx)
 
         bf=tk.Frame(self.sidebar,bg='#0a0a12'); bf.pack(fill='x',padx=6,pady=4)
         ttk.Button(bf,text='➕',command=self._add_folder).pack(side='left',fill='x',expand=True,padx=2)
@@ -1077,8 +1076,6 @@ class VidSort(tk.Tk):
                    command=self._llm_settings_dlg).pack(fill='x',pady=1)
         ttk.Button(ai_f,text='🔌 연결 테스트',
                    command=self._llm_test_dlg).pack(fill='x',pady=1)
-        ttk.Button(ai_f,text='🏷 태그 풀 관리',
-                   command=self._llm_tag_pool_dlg).pack(fill='x',pady=1)
         ttk.Button(ai_f,text='▶ AI 자동 태그',style='Acc.TButton',
                    command=self._llm_auto_tag_dlg).pack(fill='x',pady=(4,1))
         ttk.Button(ai_f,text='🔍 패턴 분석 → 태그',
@@ -2007,7 +2004,6 @@ class VidSort(tk.Tk):
         cfg['llm_token']    = self._llm_token
         cfg['llm_model']    = self._llm_model
         cfg['llm_endpoint'] = self._llm_endpoint
-        cfg['llm_tag_pool'] = self._llm_tag_pool
         cfg['llm_prompt']   = self._llm_prompt
         save_cfg(cfg)
 
@@ -2152,82 +2148,164 @@ class VidSort(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     # ── 태그 풀 관리 ─────────────────────────────
-    def _llm_tag_pool_dlg(self):
-        win = tk.Toplevel(self)
-        win.title('🏷 AI 태그 풀 관리')
-        win.configure(bg='#0d0d14')
-        win.geometry('400x460')
-        win.resizable(False, False)
-        win.grab_set()
+    # ── 폴더 우클릭 컨텍스트 메뉴 ──────────────────
+    def _fl_ctx(self, e):
+        idx = self.fl.nearest(e.y)
+        if idx < 0 or idx >= len(self._folder_paths): return
+        self.fl.selection_clear(0, 'end')
+        self.fl.selection_set(idx)
+        folder = self._folder_paths[idx]
+        m = tk.Menu(self, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                    activebackground='#7c6ff7', activeforeground='#fff',
+                    font=('Consolas', 9))
+        m.add_command(label='🤖  AI 태그 추천',
+                      command=lambda: self._llm_folder_recommend_dlg(folder))
+        m.tk_popup(e.x_root, e.y_root)
 
-        tk.Label(win, text='AI 태그 풀',
+    # ── 폴더 AI 태그 추천 ───────────────────────
+    def _llm_folder_recommend_dlg(self, folder):
+        """폴더 내 파일을 LLM이 분석해 태그를 추천, 사용자 확인 후 적용"""
+        tag_pool = self.db.all_tags()
+        if not tag_pool:
+            messagebox.showwarning('AI 태그 추천',
+                '등록된 태그가 없습니다.\n먼저 파일에 태그를 하나 이상 추가하세요.')
+            return
+        client = self._get_llm_client()
+        if not client: return
+
+        rows  = self.db.get_all_for_thumbs(folder=folder)
+        paths = [r['path'] for r in rows]
+        if not paths:
+            messagebox.showinfo('AI 태그 추천', '폴더에 등록된 파일이 없습니다.')
+            return
+
+        # ── 진행 팝업 ──
+        prog = tk.Toplevel(self)
+        prog.title('🤖 AI 태그 추천 분석 중')
+        prog.configure(bg='#0d0d14'); prog.geometry('400x140')
+        prog.resizable(False, False); prog.attributes('-topmost', True)
+        tk.Label(prog, text='파일 분석 중...',
                  bg='#0d0d14', fg='#dcdcf0',
-                 font=('Consolas', 12, 'bold')).pack(pady=(16, 4))
-        tk.Label(win, text='LLM이 파일을 분류할 때 이 태그들 중에서만 선택합니다.',
-                 bg='#0d0d14', fg='#555', font=('Consolas', 8)).pack()
+                 font=('Consolas', 10, 'bold')).pack(pady=(20, 6))
+        pb = ttk.Progressbar(prog, length=340, mode='determinate',
+                             maximum=max(len(paths), 1))
+        pb.pack(padx=24)
+        lbl_p = tk.Label(prog, text=f'0 / {len(paths)}',
+                         bg='#0d0d14', fg='#7c6ff7', font=('Consolas', 9))
+        lbl_p.pack(pady=4)
 
-        # 태그 리스트박스
-        lf = tk.Frame(win, bg='#0d0d14')
-        lf.pack(fill='both', expand=True, padx=16, pady=8)
-        lb = tk.Listbox(lf, bg='#1a1a28', fg='#dcdcf0',
-                        selectbackground='#7c6ff7',
-                        font=('Consolas', 11), borderwidth=0,
-                        highlightthickness=0, activestyle='none')
-        vsb = ttk.Scrollbar(lf, orient='vertical', command=lb.yview)
-        lb.configure(yscrollcommand=vsb.set)
+        filenames = [Path(p).name for p in paths]
+
+        def on_progress(done, tot):
+            prog.after(0, lambda: (pb.configure(value=done),
+                                   lbl_p.config(text=f'{done} / {tot}')))
+
+        def worker():
+            try:
+                tags_list = client.analyze_and_tag(
+                    filenames, tag_pool, on_progress,
+                    custom_prompt=self._llm_prompt)
+            except Exception as e:
+                err_msg = str(e)
+                prog.after(0, lambda msg=err_msg: (
+                    prog.destroy(),
+                    messagebox.showerror('AI 오류', msg)))
+                return
+
+            # 추천 결과: 태그 있는 것만
+            results = [(p, fn, tgs)
+                       for p, fn, tgs in zip(paths, filenames, tags_list) if tgs]
+
+            def show_confirm():
+                try: prog.destroy()
+                except Exception: pass
+                if not results:
+                    messagebox.showinfo('AI 태그 추천', '추천할 태그가 없습니다.')
+                    return
+                self._llm_recommend_confirm_dlg(results)
+
+            prog.after(0, show_confirm)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _llm_recommend_confirm_dlg(self, results):
+        """AI 추천 태그 확인 → 선택 후 적용"""
+        win = tk.Toplevel(self)
+        win.title('🤖 AI 태그 추천 결과')
+        win.configure(bg='#0d0d14'); win.geometry('560x520')
+        win.resizable(True, True); win.minsize(480, 400); win.grab_set()
+
+        tk.Label(win, text=f'AI 태그 추천 — {len(results)}개 파일',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(12, 2))
+        tk.Label(win, text='적용할 항목을 체크하고 "적용" 버튼을 누르세요.',
+                 bg='#0d0d14', fg='#555', font=('Consolas', 8)).pack(pady=(0, 6))
+
+        # 스크롤 목록
+        frm = tk.Frame(win, bg='#0d0d14')
+        frm.pack(fill='both', expand=True, padx=12, pady=4)
+        vsb = ttk.Scrollbar(frm, orient='vertical')
+        cv  = tk.Canvas(frm, bg='#0d0d14', highlightthickness=0,
+                        yscrollcommand=vsb.set)
+        vsb.configure(command=cv.yview)
         vsb.pack(side='right', fill='y')
-        lb.pack(fill='both', expand=True)
-        for t in self._llm_tag_pool:
-            lb.insert('end', t)
+        cv.pack(fill='both', expand=True)
+        inner = tk.Frame(cv, bg='#0d0d14')
+        cv.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind('<Configure>',
+                   lambda e: cv.configure(scrollregion=cv.bbox('all')))
+        cv.bind('<MouseWheel>',
+                lambda e: cv.yview_scroll(-1*(e.delta//120), 'units'))
 
-        # 추가/삭제
-        af = tk.Frame(win, bg='#0d0d14'); af.pack(fill='x', padx=16, pady=(0, 4))
-        add_var = tk.StringVar()
-        add_e = ttk.Entry(af, textvariable=add_var,
-                          font=('Consolas', 10), width=20)
-        add_e.pack(side='left', padx=(0, 6))
+        chk_vars = []
+        for path, fname, tags in results:
+            var = tk.BooleanVar(value=True)
+            chk_vars.append((var, path, tags))
+            row = tk.Frame(inner, bg='#1a1a28')
+            row.pack(fill='x', pady=1, padx=2)
+            tk.Checkbutton(row, variable=var, bg='#1a1a28',
+                           activebackground='#1a1a28',
+                           selectcolor='#1a1a28').pack(side='left')
+            tk.Label(row, text=fname, bg='#1a1a28', fg='#ccc',
+                     font=('Consolas', 8), anchor='w', width=38
+                     ).pack(side='left', padx=(0, 6))
+            tag_str = '  '.join(f'[{t}]' for t in tags)
+            tk.Label(row, text=tag_str, bg='#1a1a28', fg='#7c6ff7',
+                     font=('Consolas', 8)).pack(side='left')
 
-        def _add():
-            t = add_var.get().strip()
-            if t and t not in lb.get(0, 'end'):
-                lb.insert('end', t)
-            add_var.set(''); add_e.focus_set()
+        # 전체 선택/해제
+        sel_f = tk.Frame(win, bg='#0d0d14'); sel_f.pack(pady=(4, 0))
+        ttk.Button(sel_f, text='전체 선택',
+                   command=lambda: [v.set(True)  for v, *_ in chk_vars]
+                   ).pack(side='left', padx=4)
+        ttk.Button(sel_f, text='전체 해제',
+                   command=lambda: [v.set(False) for v, *_ in chk_vars]
+                   ).pack(side='left', padx=4)
 
-        def _del():
-            sel = lb.curselection()
-            if sel: lb.delete(sel[0])
-
-        add_e.bind('<Return>', lambda e: _add())
-        ttk.Button(af, text='추가', command=_add).pack(side='left')
-        ttk.Button(af, text='삭제', command=_del).pack(side='left', padx=4)
-
-        def _defaults():
-            lb.delete(0, 'end')
-            for t in ['애니', '영화', '드라마', '예능', '다큐', '성인', '기타']:
-                lb.insert('end', t)
-
-        ttk.Button(win, text='기본값으로 초기화',
-                   command=_defaults).pack(pady=(0, 4))
-
-        def save():
-            self._llm_tag_pool = list(lb.get(0, 'end'))
-            self._save_llm_cfg()
+        def apply():
+            applied = 0
+            for var, path, tags in chk_vars:
+                if var.get():
+                    for t in tags:
+                        self.db.add_tag(path, t)
+                        applied += 1
             win.destroy()
-            messagebox.showinfo('저장',
-                f'태그 풀 {len(self._llm_tag_pool)}개 저장됨')
+            self._reload_sidebar(); self._reload()
+            messagebox.showinfo('적용 완료', f'{applied}건의 태그가 적용되었습니다.')
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=8)
-        ttk.Button(bf, text='💾 저장', style='Acc.TButton',
-                   command=save).pack(side='left', padx=4)
+        ttk.Button(bf, text='✅ 적용', style='Acc.TButton',
+                   command=apply).pack(side='left', padx=4)
         ttk.Button(bf, text='취소', command=win.destroy).pack(side='left', padx=4)
 
     # ── AI 자동 태그 다이얼로그 ──────────────────
     def _llm_auto_tag_dlg(self):
         """폴더/현재 필터 대상으로 AI 자동 태그 실행 설정"""
-        if not self._llm_tag_pool:
+        tag_pool = self.db.all_tags()
+        if not tag_pool:
             messagebox.showwarning('AI 태그',
-                '태그 풀이 비어 있습니다.\n'
-                '사이드바 → 🏷 태그 풀 관리 에서 먼저 설정하세요.')
+                '등록된 태그가 없습니다.\n'
+                '먼저 파일에 태그를 하나 이상 추가하세요.')
             return
 
         folders = self.db.all_folders()
@@ -2270,11 +2348,11 @@ class VidSort(tk.Tk):
 
         ttk.Separator(win).pack(fill='x', padx=16, pady=8)
 
-        # 태그 풀 미리보기
-        tk.Label(win, text=f'태그 풀 ({len(self._llm_tag_pool)}개):',
+        # 태그 풀 미리보기 (DB 태그 전체)
+        tk.Label(win, text=f'사용할 태그 ({len(tag_pool)}개 — DB 전체 태그):',
                  bg='#0d0d14', fg='#888',
                  font=('Consolas', 9)).pack(anchor='w', padx=20)
-        tk.Label(win, text=' · '.join(self._llm_tag_pool),
+        tk.Label(win, text=' · '.join(tag_pool),
                  bg='#0d0d14', fg='#7c6ff7',
                  font=('Consolas', 9), wraplength=460).pack(padx=20, pady=2)
 
@@ -2311,7 +2389,7 @@ class VidSort(tk.Tk):
                 return
 
             win.destroy()
-            self._llm_run_batch(paths, self._llm_tag_pool)
+            self._llm_run_batch(paths, tag_pool)
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
         ttk.Button(bf, text='▶ 시작', style='Acc.TButton',
@@ -2321,12 +2399,12 @@ class VidSort(tk.Tk):
 
     def _llm_auto_tag_paths(self, paths):
         """우클릭 → 선택 파일 AI 자동 태그"""
-        if not self._llm_tag_pool:
+        tag_pool = self.db.all_tags()
+        if not tag_pool:
             messagebox.showwarning('AI 태그',
-                '태그 풀이 비어 있습니다.\n'
-                '사이드바 → 🏷 태그 풀 관리 에서 먼저 설정하세요.')
+                '등록된 태그가 없습니다.\n먼저 파일에 태그를 하나 이상 추가하세요.')
             return
-        self._llm_run_batch(paths, self._llm_tag_pool)
+        self._llm_run_batch(paths, tag_pool)
 
     # ── 패턴 분석 → 태그 지정 ───────────────────
     def _llm_pattern_dlg(self):
@@ -2574,8 +2652,7 @@ class VidSort(tk.Tk):
                 messagebox.showinfo(
                     'AI 태그 완료',
                     f'처리 완료: {len(paths)}개 파일\n'
-                    f'적용된 태그: {applied}건\n'
-                    f'태그 풀: {" / ".join(tag_pool)}')
+                    f'적용된 태그: {applied}건')
 
             popup.after(0, done)
 

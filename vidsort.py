@@ -791,6 +791,7 @@ class VidSort(tk.Tk):
         self._stop       = self._scan_stop    # 하위 호환용 alias
         self._clipboard= []
         self._sel      = set()
+        self._anchor   = None     # shift+click 범위선택 기준점
         self._videos   = []       # 현재 페이지 데이터
         self._total    = 0        # 현재 필터 전체 카운트
         self._offset   = 0
@@ -1156,7 +1157,7 @@ class VidSort(tk.Tk):
         self._total         = len(rows)
         self._tags_map      = tags_map
         self._offset        = 0
-        self._sel.clear()
+        self._sel.clear(); self._anchor = None
         self._daily_pick_mode = True   # 플래그 ON
         self.fl.selection_clear(0,'end')
         self.lbl_stats.config(text=f'🎲 오늘의 추천  {len(rows)}개')
@@ -1211,7 +1212,7 @@ class VidSort(tk.Tk):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
-        self._sel.clear()
+        self._sel.clear(); self._anchor = None
 
         self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개')
         self._set_status(f'{total}개 중 {self._offset+1}~{min(self._offset+PAGE_SIZE,total)}번째')
@@ -1288,7 +1289,7 @@ class VidSort(tk.Tk):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
-        self._sel.clear()
+        self._sel.clear(); self._anchor = None
 
         self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개')
         self._set_status(f'새로고침 완료 — {total}개 중 {len(rows)}개')
@@ -1595,8 +1596,21 @@ class VidSort(tk.Tk):
         ctrl=(e.state&0x0004)!=0; shift=(e.state&0x0001)!=0
         if ctrl:
             self._sel.discard(path) if path in self._sel else self._sel.add(path)
-        elif shift: self._sel.add(path)
-        else:       self._sel={path}
+            self._anchor = path
+        elif shift and self._anchor:
+            # 앵커 ~ 현재 사이 범위 전체 선택
+            all_paths = [v['path'] for v in self._videos]
+            try:
+                a = all_paths.index(self._anchor)
+                b = all_paths.index(path)
+                lo, hi = min(a,b), max(a,b)
+                self._sel = set(all_paths[lo:hi+1])
+            except ValueError:
+                self._sel = {path}
+                self._anchor = path
+        else:
+            self._sel   = {path}
+            self._anchor = path
         self.grid_widget.update_sel(self._sel)
 
     # ── CONTEXT MENU ────────────────────────────

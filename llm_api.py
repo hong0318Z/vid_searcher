@@ -1,14 +1,15 @@
 """
 GitHub Copilot API 래퍼
-OpenAI 호환 엔드포인트 (openai 패키지 사용)
+httpx 직접 호출 (openai 패키지 불필요 — EXE 크기 절감)
 
 연결 방법:
-  base_url = https://api.githubcopilot.com
+  endpoint = https://api.githubcopilot.com
   api_key  = GitHub Personal Access Token (PAT)
   필수 헤더 4개 포함 (없으면 401/403)
 """
 
 import json
+import httpx
 
 GITHUB_COPILOT_ENDPOINT = "https://api.githubcopilot.com"
 DEFAULT_MODEL            = "claude-sonnet-4.5"
@@ -33,29 +34,39 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 class LLMClient:
-    """GitHub Copilot API 클라이언트 (OpenAI SDK 사용)"""
+    """GitHub Copilot API 클라이언트 (httpx 직접 호출)"""
 
     def __init__(self, token: str,
                  model: str    = DEFAULT_MODEL,
                  endpoint: str = GITHUB_COPILOT_ENDPOINT):
-        from openai import OpenAI  # 지연 임포트 — openai 미설치 시 에러 명확화
-        self.model    = model
-        self._client  = OpenAI(
-            base_url        = endpoint,
-            api_key         = token,
-            default_headers = _COPILOT_HEADERS,   # ← 필수
-        )
+        self.model     = model
+        self._endpoint = endpoint.rstrip('/')
+        self._headers  = {
+            **_COPILOT_HEADERS,
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        }
+
+    # ── 내부 호출 ────────────────────────────────
+    def _chat(self, messages: list, max_tokens: int = 100) -> str:
+        url     = f"{self._endpoint}/chat/completions"
+        payload = {
+            "model":      self.model,
+            "messages":   messages,
+            "max_tokens": max_tokens,
+        }
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(url, json=payload, headers=self._headers)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
 
     # ── 연결 테스트 ──────────────────────────────
     def test_connection(self) -> str:
         """'2+2는 뭔가요?' 로 API 동작 확인"""
-        resp = self._client.chat.completions.create(
-            model    = self.model,
-            messages = [{"role": "user",
-                         "content": "2+2는 뭔가요? 한 줄로 간단히 답해주세요."}],
-            max_tokens = 100,
+        return self._chat(
+            [{"role": "user",
+              "content": "2+2는 뭔가요? 한 줄로 간단히 답해주세요."}]
         )
-        return resp.choices[0].message.content.strip()
 
     # ── 배치 자동 태그 ───────────────────────────
     def analyze_and_tag(self, filenames: list, tag_pool: list,
@@ -104,15 +115,13 @@ class LLMClient:
         )
 
         try:
-            resp = self._client.chat.completions.create(
-                model      = self.model,
-                messages   = [
+            raw = self._chat(
+                messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
                 ],
-                max_tokens = MAX_OUTPUT_TOKENS,
+                max_tokens=MAX_OUTPUT_TOKENS,
             )
-            raw = resp.choices[0].message.content.strip()
 
             # ```json ... ``` 블록 제거
             if raw.startswith("```"):

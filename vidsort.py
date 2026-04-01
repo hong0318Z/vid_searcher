@@ -802,6 +802,15 @@ class VidSort(tk.Tk):
         # 설정 로드
         cfg = load_cfg()
 
+        # ── LLM 설정 ──────────────────────────────
+        self._llm_token    = cfg.get('llm_token', '')
+        self._llm_model    = cfg.get('llm_model', 'claude-sonnet-4-5')
+        self._llm_endpoint = cfg.get('llm_endpoint',
+                                     'https://models.inference.ai.azure.com')
+        self._llm_tag_pool = cfg.get('llm_tag_pool',
+                                     ['애니', '영화', '드라마', '예능', '다큐', '기타'])
+        self._llm_stop     = threading.Event()
+
         # 포맷 체크박스 변수 (설정에서 복원)
         self._fmt_vars = {}
         saved_fmts = cfg.get('formats', {})
@@ -1054,6 +1063,22 @@ class VidSort(tk.Tk):
         # 적용 버튼
         ttk.Button(self.sidebar,text='✅  포맷 적용',style='Acc.TButton',
                    command=self._apply_format).pack(fill='x',padx=6,pady=(4,8))
+
+        ttk.Separator(self.sidebar).pack(fill='x',padx=8,pady=6)
+
+        # ── AI 태그 섹션 ──────────────────────────
+        tk.Label(self.sidebar,text='🤖  AI 태그',bg='#0a0a12',fg='#555',
+                 font=('Consolas',9,'bold')).pack(anchor='w',padx=10,pady=(0,4))
+        ai_f=tk.Frame(self.sidebar,bg='#0a0a12')
+        ai_f.pack(fill='x',padx=6,pady=(0,4))
+        ttk.Button(ai_f,text='⚙ 설정 / 토큰',
+                   command=self._llm_settings_dlg).pack(fill='x',pady=1)
+        ttk.Button(ai_f,text='🔌 연결 테스트',
+                   command=self._llm_test_dlg).pack(fill='x',pady=1)
+        ttk.Button(ai_f,text='🏷 태그 풀 관리',
+                   command=self._llm_tag_pool_dlg).pack(fill='x',pady=1)
+        ttk.Button(ai_f,text='▶ AI 자동 태그',style='Acc.TButton',
+                   command=self._llm_auto_tag_dlg).pack(fill='x',pady=(4,1))
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):
@@ -1583,6 +1608,7 @@ class VidSort(tk.Tk):
         m.add_separator()
         m.add_command(label='✏  별칭 편집',        command=lambda:self._alias_dlg(path))
         m.add_command(label='🏷  태그 편집',        command=lambda:self._tag_dlg(paths))
+        m.add_command(label='🤖  AI 자동 태그',    command=lambda:self._llm_auto_tag_paths(paths))
         m.add_separator()
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))
         m.add_command(label='📋  복사',             command=lambda:self._clipop('copy',paths))
@@ -1888,6 +1914,380 @@ class VidSort(tk.Tk):
             messagebox.showinfo('완료',f'{len(sel)}개 키워드, {total_t}건 태그 적용')
         ttk.Button(win,text='✅ 선택 항목 태그 적용',
                    style='Acc.TButton',command=apply).pack(pady=10)
+
+    # ── LLM / AI 태그 ───────────────────────────
+    def _save_llm_cfg(self):
+        cfg = load_cfg()
+        cfg['llm_token']    = self._llm_token
+        cfg['llm_model']    = self._llm_model
+        cfg['llm_endpoint'] = self._llm_endpoint
+        cfg['llm_tag_pool'] = self._llm_tag_pool
+        save_cfg(cfg)
+
+    def _get_llm_client(self):
+        """LLMClient 인스턴스 반환. 설정/패키지 오류 시 None."""
+        if not self._llm_token:
+            messagebox.showwarning('AI 설정',
+                'GitHub 토큰이 설정되지 않았습니다.\n'
+                '사이드바 → ⚙ 설정 / 토큰 에서 입력하세요.')
+            return None
+        try:
+            from llm_api import LLMClient
+            return LLMClient(self._llm_token, self._llm_model, self._llm_endpoint)
+        except ImportError:
+            messagebox.showerror('패키지 없음',
+                'openai 패키지가 필요합니다.\n터미널에서:\n  pip install openai')
+            return None
+        except Exception as e:
+            messagebox.showerror('LLM 오류', str(e))
+            return None
+
+    # ── AI 설정 다이얼로그 ───────────────────────
+    def _llm_settings_dlg(self):
+        win = tk.Toplevel(self)
+        win.title('🤖 AI 설정 — GitHub Copilot / GitHub Models')
+        win.configure(bg='#0d0d14')
+        win.geometry('540x290')
+        win.resizable(False, False)
+        win.grab_set()
+
+        tk.Label(win, text='GitHub Copilot API 설정',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(16, 10))
+
+        def _row(label, val, hint='', show=''):
+            f = tk.Frame(win, bg='#0d0d14'); f.pack(fill='x', padx=20, pady=3)
+            tk.Label(f, text=label, bg='#0d0d14', fg='#888',
+                     font=('Consolas', 9), width=14, anchor='e').pack(side='left')
+            var = tk.StringVar(value=val)
+            e = ttk.Entry(f, textvariable=var, font=('Consolas', 10), width=32,
+                          show=show)
+            e.pack(side='left', padx=6)
+            if hint:
+                tk.Label(f, text=hint, bg='#0d0d14', fg='#444',
+                         font=('Consolas', 7)).pack(side='left')
+            return var
+
+        v_token    = _row('GitHub 토큰:',  self._llm_token,    '(PAT)', show='*')
+        v_model    = _row('모델:',         self._llm_model,    '예) claude-sonnet-4-5')
+        v_endpoint = _row('엔드포인트:',   self._llm_endpoint, '')
+
+        tk.Label(win,
+                 text='GitHub Models: https://models.inference.ai.azure.com\n'
+                      'GitHub Copilot: https://api.githubcopilot.com',
+                 bg='#0d0d14', fg='#3a3a5c',
+                 font=('Consolas', 7)).pack(pady=(4, 0))
+
+        def save():
+            self._llm_token    = v_token.get().strip()
+            self._llm_model    = v_model.get().strip() or 'claude-sonnet-4-5'
+            self._llm_endpoint = (v_endpoint.get().strip()
+                                  or 'https://models.inference.ai.azure.com')
+            self._save_llm_cfg()
+            win.destroy()
+            messagebox.showinfo('저장', 'AI 설정이 저장되었습니다.')
+
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
+        ttk.Button(bf, text='💾 저장', style='Acc.TButton',
+                   command=save).pack(side='left', padx=4)
+        ttk.Button(bf, text='취소', command=win.destroy).pack(side='left', padx=4)
+
+    # ── 연결 테스트 ──────────────────────────────
+    def _llm_test_dlg(self):
+        client = self._get_llm_client()
+        if not client: return
+
+        win = tk.Toplevel(self)
+        win.title('🔌 AI 연결 테스트')
+        win.configure(bg='#0d0d14')
+        win.geometry('440x230')
+        win.resizable(False, False)
+        win.grab_set()
+
+        tk.Label(win, text='AI 연결 테스트',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(18, 4))
+        tk.Label(win, text=f'모델: {self._llm_model}',
+                 bg='#0d0d14', fg='#555', font=('Consolas', 9)).pack()
+        tk.Label(win, text='질문: "2+2는 뭔가요?"',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 9)).pack(pady=(4, 0))
+
+        lbl_res = tk.Label(win, text='요청 중...', bg='#0d0d14', fg='#7c6ff7',
+                           font=('Consolas', 10), wraplength=400)
+        lbl_res.pack(pady=10, padx=20)
+
+        pb = ttk.Progressbar(win, mode='indeterminate', length=380)
+        pb.pack(pady=4); pb.start(10)
+
+        def run():
+            try:
+                ans = client.test_connection()
+                def _ok():
+                    pb.stop(); pb.destroy()
+                    lbl_res.config(text=f'✅  {ans}', fg='#4dffb4')
+                    ttk.Button(win, text='닫기',
+                               command=win.destroy).pack(pady=8)
+                win.after(0, _ok)
+            except Exception as e:
+                def _err():
+                    pb.stop(); pb.destroy()
+                    lbl_res.config(text=f'❌  오류: {e}', fg='#ff6b6b')
+                    ttk.Button(win, text='닫기',
+                               command=win.destroy).pack(pady=8)
+                win.after(0, _err)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── 태그 풀 관리 ─────────────────────────────
+    def _llm_tag_pool_dlg(self):
+        win = tk.Toplevel(self)
+        win.title('🏷 AI 태그 풀 관리')
+        win.configure(bg='#0d0d14')
+        win.geometry('400x460')
+        win.resizable(False, False)
+        win.grab_set()
+
+        tk.Label(win, text='AI 태그 풀',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(16, 4))
+        tk.Label(win, text='LLM이 파일을 분류할 때 이 태그들 중에서만 선택합니다.',
+                 bg='#0d0d14', fg='#555', font=('Consolas', 8)).pack()
+
+        # 태그 리스트박스
+        lf = tk.Frame(win, bg='#0d0d14')
+        lf.pack(fill='both', expand=True, padx=16, pady=8)
+        lb = tk.Listbox(lf, bg='#1a1a28', fg='#dcdcf0',
+                        selectbackground='#7c6ff7',
+                        font=('Consolas', 11), borderwidth=0,
+                        highlightthickness=0, activestyle='none')
+        vsb = ttk.Scrollbar(lf, orient='vertical', command=lb.yview)
+        lb.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        lb.pack(fill='both', expand=True)
+        for t in self._llm_tag_pool:
+            lb.insert('end', t)
+
+        # 추가/삭제
+        af = tk.Frame(win, bg='#0d0d14'); af.pack(fill='x', padx=16, pady=(0, 4))
+        add_var = tk.StringVar()
+        add_e = ttk.Entry(af, textvariable=add_var,
+                          font=('Consolas', 10), width=20)
+        add_e.pack(side='left', padx=(0, 6))
+
+        def _add():
+            t = add_var.get().strip()
+            if t and t not in lb.get(0, 'end'):
+                lb.insert('end', t)
+            add_var.set(''); add_e.focus_set()
+
+        def _del():
+            sel = lb.curselection()
+            if sel: lb.delete(sel[0])
+
+        add_e.bind('<Return>', lambda e: _add())
+        ttk.Button(af, text='추가', command=_add).pack(side='left')
+        ttk.Button(af, text='삭제', command=_del).pack(side='left', padx=4)
+
+        def _defaults():
+            lb.delete(0, 'end')
+            for t in ['애니', '영화', '드라마', '예능', '다큐', '성인', '기타']:
+                lb.insert('end', t)
+
+        ttk.Button(win, text='기본값으로 초기화',
+                   command=_defaults).pack(pady=(0, 4))
+
+        def save():
+            self._llm_tag_pool = list(lb.get(0, 'end'))
+            self._save_llm_cfg()
+            win.destroy()
+            messagebox.showinfo('저장',
+                f'태그 풀 {len(self._llm_tag_pool)}개 저장됨')
+
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=8)
+        ttk.Button(bf, text='💾 저장', style='Acc.TButton',
+                   command=save).pack(side='left', padx=4)
+        ttk.Button(bf, text='취소', command=win.destroy).pack(side='left', padx=4)
+
+    # ── AI 자동 태그 다이얼로그 ──────────────────
+    def _llm_auto_tag_dlg(self):
+        """폴더/현재 필터 대상으로 AI 자동 태그 실행 설정"""
+        if not self._llm_tag_pool:
+            messagebox.showwarning('AI 태그',
+                '태그 풀이 비어 있습니다.\n'
+                '사이드바 → 🏷 태그 풀 관리 에서 먼저 설정하세요.')
+            return
+
+        folders = self.db.all_folders()
+
+        win = tk.Toplevel(self)
+        win.title('▶ AI 자동 태그')
+        win.configure(bg='#0d0d14')
+        win.geometry('500x400')
+        win.resizable(False, False)
+        win.grab_set()
+
+        tk.Label(win, text='AI 자동 태그',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(16, 4))
+
+        # 대상 선택
+        tk.Label(win, text='처리 대상:',
+                 bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=20)
+
+        scope_var  = tk.StringVar(value='current')
+        folder_var = tk.StringVar(value=folders[0] if folders else '')
+
+        rb_f = tk.Frame(win, bg='#0d0d14'); rb_f.pack(fill='x', padx=20, pady=4)
+
+        tk.Radiobutton(rb_f,
+                       text=f'현재 화면 파일 ({len(self._videos)}개)',
+                       variable=scope_var, value='current',
+                       bg='#0d0d14', fg='#dcdcf0', selectcolor='#0d0d14',
+                       font=('Consolas', 9), cursor='hand2').pack(anchor='w')
+
+        tk.Radiobutton(rb_f, text='특정 폴더 전체:',
+                       variable=scope_var, value='folder',
+                       bg='#0d0d14', fg='#dcdcf0', selectcolor='#0d0d14',
+                       font=('Consolas', 9), cursor='hand2').pack(anchor='w')
+
+        ttk.Combobox(rb_f, textvariable=folder_var, values=folders,
+                     state='readonly', font=('Consolas', 8),
+                     width=50).pack(anchor='w', padx=20, pady=2)
+
+        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
+
+        # 태그 풀 미리보기
+        tk.Label(win, text=f'태그 풀 ({len(self._llm_tag_pool)}개):',
+                 bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=20)
+        tk.Label(win, text=' · '.join(self._llm_tag_pool),
+                 bg='#0d0d14', fg='#7c6ff7',
+                 font=('Consolas', 9), wraplength=460).pack(padx=20, pady=2)
+
+        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
+
+        # 옵션
+        skip_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(win, text='이미 태그된 파일은 건너뜀 (권장)',
+                       variable=skip_var,
+                       bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
+                       font=('Consolas', 9)).pack(anchor='w', padx=20)
+
+        def start():
+            scope = scope_var.get()
+            if scope == 'current':
+                paths = [v['path'] for v in self._videos]
+            else:
+                folder = folder_var.get()
+                if not folder:
+                    messagebox.showwarning('알림', '폴더를 선택해주세요.',
+                                           parent=win)
+                    return
+                rows  = self.db.get_all_for_thumbs(folder=folder)
+                paths = [r['path'] for r in rows]
+
+            if skip_var.get():
+                tmap = self.db.get_tags_for_paths(paths)
+                paths = [p for p in paths if not tmap.get(p)]
+
+            if not paths:
+                messagebox.showinfo('알림', '처리할 파일이 없습니다.\n'
+                    '(이미 태그된 파일만 있거나 목록이 비어 있습니다.)',
+                    parent=win)
+                return
+
+            win.destroy()
+            self._llm_run_batch(paths, self._llm_tag_pool)
+
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
+        ttk.Button(bf, text='▶ 시작', style='Acc.TButton',
+                   command=start).pack(side='left', padx=4)
+        ttk.Button(bf, text='취소',
+                   command=win.destroy).pack(side='left', padx=4)
+
+    def _llm_auto_tag_paths(self, paths):
+        """우클릭 → 선택 파일 AI 자동 태그"""
+        if not self._llm_tag_pool:
+            messagebox.showwarning('AI 태그',
+                '태그 풀이 비어 있습니다.\n'
+                '사이드바 → 🏷 태그 풀 관리 에서 먼저 설정하세요.')
+            return
+        self._llm_run_batch(paths, self._llm_tag_pool)
+
+    # ── AI 배치 태그 실행 ────────────────────────
+    def _llm_run_batch(self, paths, tag_pool):
+        """백그라운드 배치 태그 실행 + 진행 팝업"""
+        client = self._get_llm_client()
+        if not client: return
+
+        filenames = [Path(p).name for p in paths]
+        total     = len(paths)
+
+        # 진행 팝업
+        popup = tk.Toplevel(self)
+        popup.title('🤖 AI 자동 태그 진행 중')
+        popup.configure(bg='#0d0d14')
+        popup.geometry('460x210')
+        popup.resizable(False, False)
+        popup.attributes('-topmost', True)
+
+        tk.Label(popup, text='🤖  AI 자동 태그 처리 중',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(16, 4))
+        lbl_p = tk.Label(popup, text=f'0 / {total}',
+                         bg='#0d0d14', fg='#7c6ff7',
+                         font=('Consolas', 10))
+        lbl_p.pack()
+        pb = ttk.Progressbar(popup, length=400, mode='determinate',
+                             maximum=max(total, 1))
+        pb.pack(pady=8, padx=24)
+        lbl_n = tk.Label(popup, text='LLM 요청 중...',
+                         bg='#0d0d14', fg='#555', font=('Consolas', 8))
+        lbl_n.pack()
+        ttk.Button(popup, text='백그라운드로',
+                   command=popup.withdraw).pack(pady=4)
+
+        self._llm_stop.clear()
+
+        def on_progress(done, tot):
+            def _ui():
+                pb['value'] = done
+                lbl_p.config(text=f'{done} / {tot}')
+                lbl_n.config(text=f'배치 처리 중 ({done}/{tot})')
+            popup.after(0, _ui)
+
+        def worker():
+            try:
+                tags_list = client.analyze_and_tag(
+                    filenames, tag_pool, on_progress)
+            except Exception as e:
+                popup.after(0, lambda: (
+                    popup.destroy(),
+                    messagebox.showerror('AI 오류', str(e))))
+                return
+
+            # 태그 DB 적용
+            applied = 0
+            for path, tags in zip(paths, tags_list):
+                for tag in tags:
+                    self.db.add_tag(path, tag)
+                    applied += 1
+
+            def done():
+                try: popup.destroy()
+                except Exception: pass
+                self._reload_sidebar()
+                self._reload()
+                messagebox.showinfo(
+                    'AI 태그 완료',
+                    f'처리 완료: {len(paths)}개 파일\n'
+                    f'적용된 태그: {applied}건\n'
+                    f'태그 풀: {" / ".join(tag_pool)}')
+
+            popup.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── MISC ────────────────────────────────────
     def _check_ffmpeg(self):

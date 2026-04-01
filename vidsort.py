@@ -2049,16 +2049,19 @@ class VidSort(tk.Tk):
         def run():
             try:
                 ans = client.test_connection()
-                def _ok():
+                def _ok(msg=ans):
                     pb.stop(); pb.destroy()
-                    lbl_res.config(text=f'✅  {ans}', fg='#4dffb4')
+                    lbl_res.config(text=f'✅  {msg}', fg='#4dffb4')
                     ttk.Button(win, text='닫기',
                                command=win.destroy).pack(pady=8)
                 win.after(0, _ok)
             except Exception as e:
-                def _err():
+                # Python 3.11+: except절 종료 시 e가 삭제되므로 str로 미리 캡처
+                err_msg = str(e)
+                def _err(msg=err_msg):
                     pb.stop(); pb.destroy()
-                    lbl_res.config(text=f'❌  오류: {e}', fg='#ff6b6b')
+                    lbl_res.config(text=f'❌  {msg}', fg='#ff6b6b',
+                                   wraplength=400, justify='left')
                     ttk.Button(win, text='닫기',
                                command=win.destroy).pack(pady=8)
                 win.after(0, _err)
@@ -2467,9 +2470,10 @@ class VidSort(tk.Tk):
                     filenames, tag_pool, on_progress,
                     custom_prompt=self._llm_prompt)
             except Exception as e:
-                popup.after(0, lambda: (
+                err_msg = str(e)
+                popup.after(0, lambda msg=err_msg: (
                     popup.destroy(),
-                    messagebox.showerror('AI 오류', str(e))))
+                    messagebox.showerror('AI 오류', msg)))
                 return
 
             # 태그 DB 적용

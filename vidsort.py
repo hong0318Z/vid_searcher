@@ -791,6 +791,7 @@ class VidSort(tk.Tk):
         self._stop       = self._scan_stop    # 하위 호환용 alias
         self._clipboard= []
         self._sel      = set()
+        self._anchor   = None     # shift+click 범위선택 기준점
         self._videos   = []       # 현재 페이지 데이터
         self._total    = 0        # 현재 필터 전체 카운트
         self._offset   = 0
@@ -1156,7 +1157,7 @@ class VidSort(tk.Tk):
         self._total         = len(rows)
         self._tags_map      = tags_map
         self._offset        = 0
-        self._sel.clear()
+        self._sel.clear(); self._anchor = None
         self._daily_pick_mode = True   # 플래그 ON
         self.fl.selection_clear(0,'end')
         self.lbl_stats.config(text=f'🎲 오늘의 추천  {len(rows)}개')
@@ -1211,7 +1212,7 @@ class VidSort(tk.Tk):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
-        self._sel.clear()
+        self._sel.clear(); self._anchor = None
 
         self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개')
         self._set_status(f'{total}개 중 {self._offset+1}~{min(self._offset+PAGE_SIZE,total)}번째')
@@ -1288,7 +1289,7 @@ class VidSort(tk.Tk):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
-        self._sel.clear()
+        self._sel.clear(); self._anchor = None
 
         self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개')
         self._set_status(f'새로고침 완료 — {total}개 중 {len(rows)}개')
@@ -1595,8 +1596,21 @@ class VidSort(tk.Tk):
         ctrl=(e.state&0x0004)!=0; shift=(e.state&0x0001)!=0
         if ctrl:
             self._sel.discard(path) if path in self._sel else self._sel.add(path)
-        elif shift: self._sel.add(path)
-        else:       self._sel={path}
+            self._anchor = path
+        elif shift and self._anchor:
+            # 앵커 ~ 현재 사이 범위 전체 선택
+            all_paths = [v['path'] for v in self._videos]
+            try:
+                a = all_paths.index(self._anchor)
+                b = all_paths.index(path)
+                lo, hi = min(a,b), max(a,b)
+                self._sel = set(all_paths[lo:hi+1])
+            except ValueError:
+                self._sel = {path}
+                self._anchor = path
+        else:
+            self._sel   = {path}
+            self._anchor = path
         self.grid_widget.update_sel(self._sel)
 
     # ── CONTEXT MENU ────────────────────────────
@@ -1644,60 +1658,129 @@ class VidSort(tk.Tk):
         ttk.Button(bf,text='취소',command=win.destroy).pack(side='left',padx=4)
 
     # ── TAG EDITOR ──────────────────────────────
-    def _tag_dlg(self,paths):
-        win=tk.Toplevel(self); win.title('태그 편집')
-        win.configure(bg='#0d0d14'); win.geometry('380x420')
-        win.resizable(False,False); win.grab_set()
-        tk.Label(win,text=f'{len(paths)}개 파일 — 태그 편집',
-                 bg='#0d0d14',fg='#dcdcf0',font=('Consolas',11,'bold')).pack(pady=12)
-        tk.Label(win,text='현재 태그:',bg='#0d0d14',fg='#666',font=('Consolas',9)
-                 ).pack(anchor='w',padx=16)
-        cur_f=tk.Frame(win,bg='#0d0d14'); cur_f.pack(fill='x',padx=12,pady=4)
+    def _tag_dlg(self, paths):
+        win = tk.Toplevel(self); win.title('태그 편집')
+        win.configure(bg='#0d0d14'); win.geometry('520x580')
+        win.resizable(True, True); win.minsize(420, 480); win.grab_set()
+
+        tk.Label(win, text=f'{len(paths)}개 파일 — 태그 편집',
+                 bg='#0d0d14', fg='#dcdcf0', font=('Consolas', 11, 'bold')
+                 ).pack(pady=(12, 4))
+
+        # ── 현재 선택된 태그 ────────────────────────
+        tk.Label(win, text='현재 선택된 태그', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=16)
+
+        cur_cv  = tk.Canvas(win, bg='#1a1a28', height=48,
+                            highlightthickness=1, highlightbackground='#2a2a3d')
+        cur_hsb = ttk.Scrollbar(win, orient='horizontal', command=cur_cv.xview)
+        cur_cv.configure(xscrollcommand=cur_hsb.set)
+        cur_cv.pack(fill='x', padx=12, pady=(2, 0))
+        cur_hsb.pack(fill='x', padx=12)
+
+        cur_inner = tk.Frame(cur_cv, bg='#1a1a28')
+        cur_win   = cur_cv.create_window((0, 0), window=cur_inner, anchor='nw')
+
+        def _sync_cur(e=None):
+            cur_cv.configure(scrollregion=cur_cv.bbox('all'))
+            # 프레임 높이를 캔버스에 맞춤
+            cur_cv.itemconfig(cur_win, height=cur_cv.winfo_height())
+        cur_inner.bind('<Configure>', _sync_cur)
 
         def refresh():
-            for w in cur_f.winfo_children(): w.destroy()
-            t_now=self.db.get_tags(paths[0]) if len(paths)==1 else []
+            for w in cur_inner.winfo_children(): w.destroy()
+            if len(paths) == 1:
+                t_now = self.db.get_tags(paths[0])
+            else:
+                sets = [set(self.db.get_tags(p)) for p in paths]
+                t_now = sorted(set.intersection(*sets)) if sets else []
+            if not t_now:
+                tk.Label(cur_inner, text='(태그 없음)', bg='#1a1a28', fg='#444',
+                         font=('Consolas', 9)).pack(side='left', padx=12, pady=10)
+                return
             for t in t_now:
-                tf2=tk.Frame(cur_f,bg='#7c6ff7'); tf2.pack(side='left',padx=2,pady=2)
-                tk.Label(tf2,text=t,bg='#7c6ff7',fg='#fff',
-                         font=('Consolas',9),padx=6,pady=2).pack(side='left')
-                tk.Button(tf2,text='✕',bg='#7c6ff7',fg='#fff',font=('Consolas',7),
-                          bd=0,cursor='hand2',
-                          command=lambda tg=t:(
-                              [self.db.remove_tag(p,tg) for p in paths],refresh())
-                          ).pack(side='left')
+                chip = tk.Frame(cur_inner, bg='#7c6ff7')
+                chip.pack(side='left', padx=3, pady=8)
+                tk.Label(chip, text=t, bg='#7c6ff7', fg='#fff',
+                         font=('Consolas', 9), padx=7, pady=3).pack(side='left')
+                tk.Button(chip, text='✕', bg='#5a54d4', fg='#fff',
+                          font=('Consolas', 7), bd=0, cursor='hand2', padx=3,
+                          command=lambda tg=t: (
+                              [self.db.remove_tag(p, tg) for p in paths], refresh())
+                          ).pack(side='left', padx=(0, 3))
         refresh()
-        ttk.Separator(win).pack(fill='x',padx=12,pady=6)
 
-        existing=self.db.all_tags()
-        if existing:
-            tk.Label(win,text='기존 태그:',bg='#0d0d14',fg='#666',font=('Consolas',9)
-                     ).pack(anchor='w',padx=16)
-            ef=tk.Frame(win,bg='#0d0d14'); ef.pack(fill='x',padx=12,pady=4)
-            for t in existing[:16]:
-                tk.Button(ef,text=t,bg='#1a1a28',fg='#aaa',font=('Consolas',8),
-                          bd=0,padx=8,pady=3,cursor='hand2',
-                          command=lambda tg=t:(
-                              [self.db.add_tag(p,tg) for p in paths],refresh())
-                          ).pack(side='left',padx=2,pady=2)
+        ttk.Separator(win).pack(fill='x', padx=12, pady=6)
 
-        ttk.Separator(win).pack(fill='x',padx=12,pady=6)
-        tk.Label(win,text='새 태그 입력:',bg='#0d0d14',fg='#666',font=('Consolas',9)
-                 ).pack(anchor='w',padx=16)
-        nf=tk.Frame(win,bg='#0d0d14'); nf.pack(padx=12,pady=4,fill='x')
-        nv=tk.StringVar()
-        ne=ttk.Entry(nf,textvariable=nv,font=('Consolas',10),width=22)
-        ne.pack(side='left'); ne.focus_set()
+        # ── 기존 태그 검색 ───────────────────────────
+        tk.Label(win, text='기존 태그 검색', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=16)
+
+        sv = tk.StringVar()
+        ttk.Entry(win, textvariable=sv, font=('Consolas', 10)
+                  ).pack(fill='x', padx=12, pady=(2, 4))
+
+        all_tags = self.db.all_tags()
+
+        lbf = tk.Frame(win, bg='#0d0d14')
+        lbf.pack(fill='both', expand=True, padx=12, pady=(0, 4))
+        lb_sb = ttk.Scrollbar(lbf, orient='vertical')
+        lb = tk.Listbox(lbf, bg='#1a1a28', fg='#ccc', font=('Consolas', 10),
+                        selectbackground='#7c6ff7', selectforeground='#fff',
+                        relief='flat', bd=0, highlightthickness=0,
+                        yscrollcommand=lb_sb.set, activestyle='none')
+        lb_sb.configure(command=lb.yview)
+        lb_sb.pack(side='right', fill='y')
+        lb.pack(side='left', fill='both', expand=True)
+
+        def fill_list(q=''):
+            lb.delete(0, 'end')
+            for t in all_tags:
+                if q.lower() in t.lower():
+                    lb.insert('end', '  ' + t)
+
+        fill_list()
+        sv.trace_add('write', lambda *_: fill_list(sv.get()))
+
+        def add_selected(e=None):
+            sel = lb.curselection()
+            if not sel: return
+            t = lb.get(sel[0]).strip()
+            [self.db.add_tag(p, t) for p in paths]
+            refresh(); self._reload_sidebar()
+
+        lb.bind('<Double-Button-1>', add_selected)
+        lb.bind('<Return>', add_selected)
+        tk.Label(win, text='↑ 더블클릭 또는 Enter 로 태그 추가',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 8)
+                 ).pack(anchor='e', padx=14)
+
+        ttk.Separator(win).pack(fill='x', padx=12, pady=4)
+
+        # ── 새 태그 입력 ─────────────────────────────
+        tk.Label(win, text='새 태그 입력', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=16)
+        nf = tk.Frame(win, bg='#0d0d14')
+        nf.pack(padx=12, pady=(2, 8), fill='x')
+        nv = tk.StringVar()
+        ne = ttk.Entry(nf, textvariable=nv, font=('Consolas', 10))
+        ne.pack(side='left', fill='x', expand=True); ne.focus_set()
+
         def add_new():
-            t=nv.get().strip()
+            t = nv.get().strip()
             if not t: return
-            [self.db.add_tag(p,t) for p in paths]
-            nv.set(''); refresh(); self._reload_sidebar()
-        ne.bind('<Return>',lambda e:add_new())
-        ttk.Button(nf,text='추가',command=add_new).pack(side='left',padx=6)
-        ttk.Button(win,text='완료',style='Acc.TButton',
-                   command=lambda:(win.destroy(),self._reload_sidebar(),self._reload())
-                   ).pack(pady=10)
+            [self.db.add_tag(p, t) for p in paths]
+            nv.set('')
+            nonlocal all_tags
+            all_tags = self.db.all_tags()
+            fill_list(sv.get()); refresh(); self._reload_sidebar()
+
+        ne.bind('<Return>', lambda e: add_new())
+        ttk.Button(nf, text='추가', command=add_new).pack(side='left', padx=6)
+
+        ttk.Button(win, text='완료', style='Acc.TButton',
+                   command=lambda: (win.destroy(), self._reload_sidebar(), self._reload())
+                   ).pack(pady=8)
 
     # ── FILE OPS ────────────────────────────────
     def _open(self,path):

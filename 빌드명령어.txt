@@ -1,0 +1,55 @@
+═══════════════════════════════════════════════
+  VidSort — EXE 빌드 명령어 메모
+═══════════════════════════════════════════════
+
+■ 기본 빌드 (spec 파일 사용, 권장)
+─────────────────────────────────────────────
+  pyinstaller VidSort.spec
+
+  → dist\VidSort.exe 생성
+  → 단일 exe 파일 (--onefile 모드)
+
+
+■ spec 없이 직접 빌드
+─────────────────────────────────────────────
+  pyinstaller --onefile --windowed --name VidSort vidsort.py
+
+  옵션 설명:
+    --onefile    : 단일 .exe 파일로 묶기
+    --windowed   : 콘솔 창 숨김 (GUI 앱)
+    --name       : 출력 파일명
+
+
+■ openai 패키지 포함 빌드 (AI 태그 기능 사용 시)
+─────────────────────────────────────────────
+  pyinstaller --onefile --windowed --name VidSort ^
+    --hidden-import openai ^
+    --hidden-import httpx ^
+    vidsort.py
+
+  또는 spec 파일의 hiddenimports 항목에 추가:
+    hiddenimports=['openai', 'httpx'],
+
+
+■ 빌드 전 체크리스트
+─────────────────────────────────────────────
+  1. pip install pyinstaller pillow openai
+  2. ffmpeg.exe / ffprobe.exe 를 dist 폴더에 같이 넣기
+     (또는 시스템 PATH에 등록)
+  3. vidsort.db, vidsort_cfg.json 은 exe 와 같은 폴더에 두기
+     (.thumbs 폴더도 같은 위치)
+
+
+■ 출력 위치
+─────────────────────────────────────────────
+  dist\VidSort.exe   ← 이게 배포용 파일
+  build\             ← 중간 파일 (삭제해도 됨)
+  __pycache__\       ← 삭제해도 됨
+
+
+■ 빌드 환경
+─────────────────────────────────────────────
+  Python 3.x (64bit 권장)
+  pyinstaller 설치: pip install pyinstaller
+
+═══════════════════════════════════════════════

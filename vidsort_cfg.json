@@ -1,0 +1,18 @@
+{
+  "formats": {
+    ".mp4": true,
+    ".mkv": true,
+    ".avi": true,
+    ".mov": true,
+    ".wmv": true,
+    ".webm": false,
+    ".flv": true,
+    ".m4v": true,
+    ".ts": false,
+    ".mts": true,
+    ".vob": true,
+    ".rmvb": true,
+    ".3gp": true,
+    ".divx": true
+  }
+}

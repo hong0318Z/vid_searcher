@@ -600,7 +600,7 @@ def index():
     PER   = 40
     vids, total = _query_videos(offset=(pg-1)*PER, limit=PER)
     tags        = _get_tags_with_stats()
-    tag_groups  = _get_tag_groups(limit_tags=6, vids_per_tag=2)
+    tag_groups  = _get_tag_groups(limit_tags=2, vids_per_tag=4)
     c           = _conn()
     for v in vids:
         v['id']      = _vid_id(v['path'])

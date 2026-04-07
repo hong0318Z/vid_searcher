@@ -3664,7 +3664,7 @@ class VidSort(tk.Tk):
                     raw, tok_in, tok_out = client._chat_tracked(
                         [{"role": "system", "content": sys_msg},
                          {"role": "user",   "content": user_msg}],
-                        max_tokens=min(4000, max(800, len(batch) * 350))
+                        max_tokens=max(800, len(batch) * 350)
                     )
                     _log['calls'] += 1
                     _log['tok_in']  += tok_in

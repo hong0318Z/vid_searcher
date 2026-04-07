@@ -13,8 +13,8 @@ import httpx
 
 GITHUB_COPILOT_ENDPOINT = "https://api.githubcopilot.com"
 DEFAULT_MODEL            = "claude-sonnet-4.5"
-BATCH_SIZE               = 50    # 한 번에 LLM에 보낼 파일 수
-MAX_OUTPUT_TOKENS        = 4096  # 응답용 최대 토큰
+BATCH_SIZE               = 50      # 한 번에 LLM에 보낼 파일 수
+MAX_OUTPUT_TOKENS        = 64000   # claude-sonnet-4.5 최대 출력 토큰
 
 # GitHub Copilot API 필수 헤더 — 없으면 401/403
 _COPILOT_HEADERS = {

@@ -277,9 +277,9 @@ a{color:inherit;text-decoration:none}
     <button type="submit">검색</button>
   </form>
   <nav id="hdr-nav">
-    <a href="/" class="{{ 'act' if page=='home' else '' }}">홈</a>
-    <a href="/tags" class="{{ 'act' if page=='tags' else '' }}">카테고리</a>
-    <a href="/search" class="{{ 'act' if page=='search' else '' }}">검색</a>
+    <a href="/" class="{{ 'act' if nav=='home' else '' }}">홈</a>
+    <a href="/tags" class="{{ 'act' if nav=='tags' else '' }}">카테고리</a>
+    <a href="/search" class="{{ 'act' if nav=='search' else '' }}">검색</a>
   </nav>
 </header>
 {% block body %}{% endblock %}
@@ -526,7 +526,7 @@ def _render(template, **ctx):
         return Markup(html)
 
     ctx.setdefault('q', '')
-    ctx.setdefault('page_name', 'home')
+    ctx.setdefault('nav', 'home')
     ctx['_vid_card'] = _vid_card
     ctx['_pager']    = _pager
     ctx['urlencode'] = quote
@@ -549,13 +549,13 @@ def index():
         v['tags']    = [x[0] for x in c.execute(
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
-    return _render(_HOME, page='home', videos=vids, tags=tags,
+    return _render(_HOME, nav='home', videos=vids, tags=tags,
                    total=total, pg=pg, pages=(total+PER-1)//PER)
 
 @app.route('/tags')
 def tags_page():
     tags = _get_tags_with_stats()
-    return _render(_TAGS, page='tags', tags=tags)
+    return _render(_TAGS, nav='tags', tags=tags)
 
 @app.route('/tag/<tagname>')
 def tag_page(tagname):
@@ -571,7 +571,7 @@ def tag_page(tagname):
         v['tags']    = [x[0] for x in c.execute(
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
-    return _render(_TAG_PAGE, page='tags', tag=tagname, desc=desc,
+    return _render(_TAG_PAGE, nav='tags', tag=tagname, desc=desc,
                    videos=vids, total=total,
                    page=pg, pages=(total+PER-1)//PER)
 
@@ -589,7 +589,7 @@ def search_page():
         v['tags']    = [x[0] for x in c.execute(
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
-    return _render(_SEARCH, page='search', q=q, videos=vids,
+    return _render(_SEARCH, nav='search', q=q, videos=vids,
                    total=total, page=pg, pages=(total+PER-1)//PER)
 
 @app.route('/video/<vid_id>')
@@ -597,7 +597,7 @@ def video_page(vid_id):
     v = _get_video(vid_id)
     if not v: abort(404)
     related = _get_related(vid_id, limit=16)
-    return _render(_VIDEO, page='', v=v, related=related)
+    return _render(_VIDEO, nav='', v=v, related=related)
 
 @app.route('/open/<vid_id>')
 def open_native(vid_id):

@@ -1347,13 +1347,20 @@ class VidSort(tk.Tk):
 
     # ── 갤러리 뷰 (웹 브라우저) ──────────────────
     def _gallery_view(self):
+        # EXE(frozen) 실행 시 exe 폴더를 sys.path에 추가해 web_gallery.py 탐색
+        exe_dir = str(Path(sys.executable).parent
+                      if getattr(sys, 'frozen', False)
+                      else Path(__file__).parent)
+        if exe_dir not in sys.path:
+            sys.path.insert(0, exe_dir)
         try:
-            import web_gallery
+            import importlib, web_gallery
+            importlib.reload(web_gallery)   # 재실행 시 최신 반영
             web_gallery.start(DB_PATH, THUMB_DIR, port=8765)
         except ImportError:
             messagebox.showerror('오류',
-                'web_gallery 모듈을 찾을 수 없습니다.\n'
-                'web_gallery.py 가 같은 폴더에 있는지 확인하세요.')
+                'web_gallery.py 를 찾을 수 없습니다.\n'
+                f'아래 경로에 파일을 넣어주세요:\n{exe_dir}')
         except Exception as e:
             messagebox.showerror('웹 갤러리 오류', str(e))
 

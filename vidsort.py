@@ -3727,9 +3727,9 @@ class VidSort(tk.Tk):
                     # 배우 (LLM 번역 우선, 없으면 원문)
                     for a in (actresses_ko or meta.get('actresses', []))[:4]:
                         if a: self.db.add_tag(path, a)
-                    # 장르: genres_ko + 원문 genres 모두 _GENRE_MAP 통과
+                    # 장르: genres_ko + 원문 genres 모두 _GENRE_MAP 통과 (배우 제외, 개수 제한 없음)
                     raw_genres = genres_ko if genres_ko else meta.get('genres', [])
-                    for g in raw_genres[:4]:
+                    for g in raw_genres:
                         mapped = self._GENRE_MAP.get(g, g)
                         if mapped: self.db.add_tag(path, mapped)
 

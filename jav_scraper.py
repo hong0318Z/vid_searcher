@@ -66,8 +66,16 @@ _CODE_RE = re.compile(
     r'(?<![A-Z0-9])([A-Z]{2,8})-?(\d{2,6})(?![A-Z0-9])', re.IGNORECASE)
 
 def extract_code(filename: str) -> str | None:
-    """파일명에서 AV 코드 추출.  예: SSIS-001, IPX123 → SSIS-001 / IPX-123"""
+    """파일명에서 AV 코드 추출.
+    예: SSIS-001, IPX123 → SSIS-001 / IPX-123
+        FC2-PPV-1234567, FC2PPV1234567 → FC2-PPV-1234567"""
     stem = Path(filename).stem.upper()
+
+    # FC2-PPV 우선 처리 (숫자 6-8자리)
+    fc2 = re.search(r'FC2[-_]?PPV[-_]?(\d{4,8})', stem)
+    if fc2:
+        return f'FC2-PPV-{fc2.group(1)}'
+
     # 괄호 안 코드 우선
     m = re.search(r'[\[\(]([A-Z]{2,8}-?\d{2,6})[\]\)]', stem)
     if m:
@@ -560,11 +568,22 @@ def fetch_meta_verbose(code: str) -> tuple:
     """(meta_dict | None, error_str). 최종 실패 원인 포함.
 
     조회 순서:
+      0) FC2-PPV 코드이면 바로 fallback 메타 반환 (외부 DB 미지원)
       1) 오프라인 JSON  (jav_offline.json)
       2) R18.dev JSON API  (FANZA 공식, 빠르고 안정적)
       3) JavDB 스크래핑
       4) Javbus 스크래핑
     """
+    # 0) FC2-PPV — R18/JavDB/Javbus 모두 인덱스 없음 → 최소 메타 즉시 반환
+    if code.upper().startswith('FC2-PPV-'):
+        return {
+            'code':      code.upper(),
+            'title':     code.upper(),
+            'actresses': [],
+            'genres':    ['FC2', 'FC2-PPV', '아마추어'],
+            'source':    'fc2-fallback',
+        }, ''
+
     # 1) 오프라인 덤프
     meta, err0 = _lookup_offline(code)
     if meta:

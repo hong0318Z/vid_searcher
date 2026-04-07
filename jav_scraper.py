@@ -1,9 +1,26 @@
 """
 JavDB / Javbus 스크래퍼
 AV 코드 → 제목·배우·장르·설명 조회
+
+조회 순서:
+  1. 로컬 오프라인 JSON 덤프  (jav_offline.json)
+  2. JavDB 라이브 스크래핑
+  3. Javbus 라이브 스크래핑 (fallback)
+
+오프라인 JSON 형식 (코드는 대문자, 하이픈 포함):
+{
+  "PRED-123": {
+    "title": "원제",
+    "actresses": ["배우1", "배우2"],
+    "genres":    ["장르1", "장르2"],
+    "studio":    "스튜디오명",
+    "date":      "2024-01-01"
+  },
+  ...
+}
 """
 
-import re, time
+import re, time, random, json
 from pathlib import Path
 
 try:
@@ -18,13 +35,22 @@ try:
 except ImportError:
     _HAS_BS4 = False
 
+# 브라우저에 최대한 가깝게 — Cloudflare 봇 차단 우회
 _HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) '
         'Chrome/124.0.0.0 Safari/537.36'),
-    'Accept-Language': 'ja,ko;q=0.9,en-US;q=0.8',
-    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ja,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection':      'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest':  'document',
+    'Sec-Fetch-Mode':  'navigate',
+    'Sec-Fetch-Site':  'none',
+    'Sec-Fetch-User':  '?1',
+    'Cache-Control':   'max-age=0',
 }
 
 # ─────────────────────────────────────────────────
@@ -55,28 +81,54 @@ def extract_code(filename: str) -> str | None:
     return f'{letters}-{digits}'
 
 # ─────────────────────────────────────────────────
-#  HTTP
+#  HTTP  (재시도 + verify=False로 TLS 지문 문제 우회)
 # ─────────────────────────────────────────────────
-def _get(url: str, timeout: int = 15, cookies: dict | None = None):
-    if _HAS_HTTPX:
-        with httpx.Client(timeout=timeout, follow_redirects=True,
-                          headers=_HEADERS, cookies=cookies or {}) as c:
-            r = c.get(url)
-            r.status = r.status_code
-            return r
-    import urllib.request, urllib.parse
-    req = urllib.request.Request(url, headers=_HEADERS)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            class _R:
-                status = resp.status
-                text   = resp.read().decode('utf-8', errors='replace')
-            return _R()
-    except Exception as e:
-        class _Err:
-            status = 0
-            text   = ''
-        return _Err()
+def _get(url: str, timeout: int = 20, cookies: dict | None = None,
+         referer: str = ''):
+    headers = dict(_HEADERS)
+    if referer:
+        headers['Referer'] = referer
+
+    last_exc = None
+    for attempt in range(3):
+        if attempt:
+            wait = 2 ** attempt + random.uniform(0, 1)
+            print(f'[_get] 재시도 {attempt}/2 ({wait:.1f}s 후) {url}', flush=True)
+            time.sleep(wait)
+        try:
+            if _HAS_HTTPX:
+                with httpx.Client(
+                        timeout=timeout,
+                        follow_redirects=True,
+                        headers=headers,
+                        cookies=cookies or {},
+                        verify=False,          # Cloudflare TLS 지문 차단 우회
+                ) as c:
+                    r = c.get(url)
+                    r.status = r.status_code
+                    return r
+            else:
+                import urllib.request, ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode    = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                    class _R:
+                        status = resp.status
+                        text   = resp.read().decode('utf-8', errors='replace')
+                    return _R()
+        except Exception as e:
+            last_exc = e
+            print(f'[_get] 시도{attempt+1} 실패: {type(e).__name__}: {e}', flush=True)
+
+    # 모든 재시도 실패
+    class _Err:
+        status = 0
+        text   = ''
+        _err   = last_exc
+    print(f'[_get] 최종 실패: {last_exc}', flush=True)
+    return _Err()
 
 def _soup(html: str):
     return BeautifulSoup(html, 'html.parser')
@@ -192,25 +244,25 @@ def _fetch_javbus(code: str) -> tuple:
     try:
         url_direct = f'{JAVBUS_BASE}/{code}'
         print(f'[Javbus] GET {url_direct}', flush=True)
-        r = _get(url_direct)
+        r = _get(url_direct, referer=JAVBUS_BASE)
         print(f'[Javbus] status={r.status}', flush=True)
         if r.status != 200:
             # 검색 시도
             url_search = f'{JAVBUS_BASE}/search/{code}'
             print(f'[Javbus] 검색 GET {url_search}', flush=True)
-            r = _get(url_search)
+            r = _get(url_search, referer=JAVBUS_BASE)
             print(f'[Javbus] 검색 status={r.status}', flush=True)
             if r.status != 200:
-                return None, f'Javbus HTTP {r.status}'
+                return None, f'Javbus HTTP {r.status} (Cloudflare 차단 가능성)'
             s    = _soup(r.text)
             a    = s.select_one('.movie-box')
             if not a:
-                return None
+                return None, 'Javbus 검색결과 파싱 실패'
             href = a.get('href', '')
-            time.sleep(0.5)
-            r    = _get(href)
+            time.sleep(0.8)
+            r    = _get(href, referer=url_search)
             if r.status != 200:
-                return None
+                return None, f'Javbus 상세페이지 HTTP {r.status}'
 
         s = _soup(r.text)
         result = {'code': code, 'source': 'javbus'}
@@ -261,23 +313,201 @@ def _fetch_javbus(code: str) -> tuple:
         return None, msg
 
 # ─────────────────────────────────────────────────
+#  오프라인 JSON 덤프
+#  파일명: jav_offline.json  (스크립트와 같은 폴더)
+# ─────────────────────────────────────────────────
+_OFFLINE_DB: dict = {}
+_OFFLINE_LOADED: bool = False
+
+def _load_offline():
+    global _OFFLINE_DB, _OFFLINE_LOADED
+    if _OFFLINE_LOADED:
+        return
+    _OFFLINE_LOADED = True
+    candidates = [
+        Path(__file__).parent / 'jav_offline.json',
+        Path('jav_offline.json'),
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                raw = json.loads(p.read_text(encoding='utf-8'))
+                # 키를 대문자+하이픈 정규화
+                for k, v in raw.items():
+                    norm = _normalize_key(k)
+                    _OFFLINE_DB[norm] = v
+                print(f'[jav_scraper] 오프라인 DB 로드: {p}  ({len(_OFFLINE_DB)}개)', flush=True)
+                return
+            except Exception as e:
+                print(f'[jav_scraper] 오프라인 DB 로드 실패: {e}', flush=True)
+    print('[jav_scraper] jav_offline.json 없음 → 라이브 스크래핑만 사용', flush=True)
+
+def _normalize_key(code: str) -> str:
+    """코드를 대문자+하이픈 형식으로 정규화  예) pred123 → PRED-123"""
+    code = code.upper().strip()
+    m = re.match(r'([A-Z]+)-?(\d+)', code)
+    if not m:
+        return code
+    return f'{m.group(1)}-{m.group(2).zfill(3)}'
+
+def _lookup_offline(code: str) -> tuple:
+    """오프라인 DB에서 조회. (meta | None, error_str)"""
+    _load_offline()
+    if not _OFFLINE_DB:
+        return None, '오프라인 DB 없음'
+    norm = _normalize_key(code)
+    row  = _OFFLINE_DB.get(norm)
+    if not row:
+        return None, f'오프라인 DB에 {norm} 없음'
+    meta = {
+        'code':      norm,
+        'source':    'offline',
+        'title':     row.get('title', ''),
+        'actresses': row.get('actresses', []),
+        'genres':    row.get('genres', []),
+        'studio':    row.get('studio', ''),
+        'date':      row.get('date', ''),
+        'cover_url': row.get('cover_url', ''),
+    }
+    if not meta['title']:
+        return None, f'오프라인 DB에 {norm} 있으나 title 없음'
+    print(f'[offline] HIT {norm}: {meta["title"]}', flush=True)
+    return meta, ''
+
+# ─────────────────────────────────────────────────
+#  R18.dev  (FANZA 공식 JSON API — 스크래핑 없음)
+# ─────────────────────────────────────────────────
+R18_BASE = 'https://r18.dev/videos/vod/movies/detail/-/dvd_id={}/json/'
+
+def _fetch_r18(code: str) -> tuple:
+    """(meta_dict | None, error_str) 반환.
+    R18.dev 공식 JSON API — Cloudflare 없음, HTML 파싱 없음."""
+    try:
+        url = R18_BASE.format(code)
+        print(f'[R18.dev] GET {url}', flush=True)
+
+        if _HAS_HTTPX:
+            with httpx.Client(timeout=15, follow_redirects=True, verify=False) as c:
+                resp = c.get(url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                })
+            status = resp.status_code
+            if status != 200:
+                print(f'[R18.dev] HTTP {status}', flush=True)
+                return None, f'R18.dev HTTP {status}'
+            data = resp.json()
+        else:
+            import urllib.request, ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode    = ssl.CERT_NONE
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0',
+                                                        'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+                status = r.status
+                if status != 200:
+                    return None, f'R18.dev HTTP {status}'
+                data = json.loads(r.read().decode('utf-8'))
+
+        # ── 파싱 ──
+        # 배우: name_romaji(영문) 또는 name(일본어) 사용
+        actresses = []
+        for a in (data.get('actresses') or []):
+            name = (a.get('name_romaji') or a.get('name') or '').strip()
+            if name:
+                actresses.append(name)
+
+        # 장르/카테고리
+        genres = []
+        for c in (data.get('categories') or []):
+            g = (c.get('name') or '').strip()
+            if g:
+                genres.append(g)
+
+        # 제목: title_ja(일본어 원제) 우선, 없으면 title(영문)
+        title = (data.get('title_ja') or data.get('title') or '').strip()
+
+        # 스튜디오/메이커
+        maker = data.get('maker') or {}
+        studio = (maker.get('name') or '').strip()
+
+        # 커버 이미지
+        images = data.get('images') or {}
+        jacket = images.get('jacket_image') or {}
+        cover_url = jacket.get('large') or jacket.get('small') or ''
+
+        release_date = (data.get('release_date') or '')[:10]
+
+        print(f'[R18.dev] 제목="{title}" 배우={actresses[:3]} 장르={genres[:3]}', flush=True)
+
+        if not title:
+            return None, 'R18.dev 응답에 제목 없음 (미등록 코드)'
+
+        return {
+            'code':      code,
+            'source':    'r18dev',
+            'title':     title,
+            'actresses': actresses,
+            'genres':    genres,
+            'studio':    studio,
+            'date':      release_date,
+            'cover_url': cover_url,
+        }, ''
+
+    except Exception as e:
+        import traceback
+        msg = f'R18.dev 예외: {e}'
+        print(f'[jav_scraper] {msg}\n{traceback.format_exc()}', flush=True)
+        return None, msg
+
+# ─────────────────────────────────────────────────
 #  공개 API
 # ─────────────────────────────────────────────────
 def fetch_meta(code: str) -> dict | None:
-    """JavDB → Javbus 순서로 메타데이터 조회. 실패 시 None."""
+    """오프라인 → R18.dev → JavDB → Javbus 순서로 조회. 실패 시 None."""
     meta, _ = fetch_meta_verbose(code)
     return meta
 
 def fetch_meta_verbose(code: str) -> tuple:
-    """(meta_dict | None, error_str) 반환. error_str은 최종 실패 원인."""
-    meta, err1 = _fetch_javdb(code)
+    """(meta_dict | None, error_str). 최종 실패 원인 포함.
+
+    조회 순서:
+      1) 오프라인 JSON  (jav_offline.json)
+      2) R18.dev JSON API  (FANZA 공식, 빠르고 안정적)
+      3) JavDB 스크래핑
+      4) Javbus 스크래핑
+    """
+    # 1) 오프라인 덤프
+    meta, err0 = _lookup_offline(code)
     if meta:
         return meta, ''
-    meta, err2 = _fetch_javbus(code)
+
+    # 2) R18.dev 공식 API
+    meta, err1 = _fetch_r18(code)
     if meta:
         return meta, ''
-    combined = f'JavDB: {err1} / Javbus: {err2}'
+
+    # 3) JavDB 스크래핑
+    meta, err2 = _fetch_javdb(code)
+    if meta:
+        return meta, ''
+
+    # 4) Javbus 스크래핑
+    meta, err3 = _fetch_javbus(code)
+    if meta:
+        return meta, ''
+
+    combined = (f'오프라인: {err0} / R18: {err1} / '
+                f'JavDB: {err2} / Javbus: {err3}')
     return None, combined
+
+def offline_db_stats() -> str:
+    """오프라인 DB 현황 문자열 반환 (UI 표시용)"""
+    _load_offline()
+    if _OFFLINE_DB:
+        return f'오프라인 DB: {len(_OFFLINE_DB):,}개 코드'
+    return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
 
 def check_deps() -> list[str]:
     """누락 의존성 목록 반환"""

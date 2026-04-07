@@ -439,6 +439,15 @@ class DB:
                 (tag, desc))
             self.conn.commit()
 
+    def rename_tag(self, old_tag: str, new_tag: str):
+        """태그명 일괄 변경 (모든 파일의 태그 + tag_meta)"""
+        with self.lock:
+            self.conn.execute(
+                "UPDATE tags SET tag=? WHERE tag=?", (new_tag, old_tag))
+            self.conn.execute(
+                "UPDATE tag_meta SET tag=? WHERE tag=?", (new_tag, old_tag))
+            self.conn.commit()
+
     def get_random_path_for_tag(self, tag):
         r = self.conn.execute(
             "SELECT f.path FROM files f JOIN tags t ON f.path=t.path "
@@ -477,6 +486,13 @@ class DB:
     def remove_tag(self,path,tag):
         with self.lock:
             self.conn.execute("DELETE FROM tags WHERE path=? AND tag=?",(path,tag))
+            self.conn.commit()
+
+    def delete_tag(self, tag: str):
+        """태그명을 모든 파일에서 완전 삭제 + tag_meta 제거"""
+        with self.lock:
+            self.conn.execute("DELETE FROM tags WHERE tag=?", (tag,))
+            self.conn.execute("DELETE FROM tag_meta WHERE tag=?", (tag,))
             self.conn.commit()
 
     def get_all_for_thumbs(self, folder=None):
@@ -1422,10 +1438,108 @@ class VidSort(tk.Tk):
         lb.bind('<<ListboxSelect>>', on_select)
         save_btn.config(command=save_desc)
 
+        def delete_tag():
+            if cur[0] is None: return
+            tag, _ = tags_data[cur[0]]
+            cnt = len(self.db.conn.execute(
+                "SELECT path FROM tags WHERE tag=?", (tag,)).fetchall())
+            if not messagebox.askyesno('태그 삭제',
+                    f'"{tag}" 태그를 삭제합니까?\n'
+                    f'({cnt}개 파일에서 제거됩니다)'):
+                return
+            self.db.delete_tag(tag)
+            idx = cur[0]
+            tags_data.pop(idx)
+            lb.delete(idx)
+            cur[0] = None
+            lbl_tag.config(text='—')
+            desc_txt.delete('1.0', 'end')
+            save_btn.config(state='disabled')
+
+        del_btn = ttk.Button(right_f, text='🗑 태그 삭제', command=delete_tag,
+                             style='TButton')
+        del_btn.pack(anchor='e', pady=(0, 4))
+
+        # ── LLM 태그 번역 ──
+        def _llm_translate_tags():
+            client = self._get_llm_client()
+            if not client: return
+
+            # 일본어가 포함된 태그만 대상 (또는 전체 선택)
+            import re as _re
+            def has_jp(t):
+                return bool(_re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', t))
+
+            to_translate = [(i, tag) for i, (tag, _) in enumerate(tags_data) if has_jp(tag)]
+            if not to_translate:
+                messagebox.showinfo('태그 번역', '번역할 일본어 태그가 없습니다.')
+                return
+            if not messagebox.askyesno('태그 번역',
+                    f'일본어 태그 {len(to_translate)}개를 LLM으로 번역합니까?\n'
+                    '(원래 태그명이 새 이름으로 변경됩니다)'):
+                return
+
+            prog_win = tk.Toplevel(win); prog_win.title('태그 번역 중')
+            prog_win.configure(bg='#0d0d14'); prog_win.geometry('400x140')
+            prog_win.grab_set()
+            tk.Label(prog_win, text='LLM으로 태그 번역 중...',
+                     bg='#0d0d14', fg='#7c6ff7',
+                     font=('Consolas', 10, 'bold')).pack(pady=(18, 6))
+            lbl_pr = tk.Label(prog_win, text='', bg='#0d0d14', fg='#aaa',
+                              font=('Consolas', 9))
+            lbl_pr.pack()
+            pb = ttk.Progressbar(prog_win, maximum=len(to_translate))
+            pb.pack(fill='x', padx=20, pady=8)
+
+            def worker():
+                done = 0
+                BATCH = 30
+                for i in range(0, len(to_translate), BATCH):
+                    batch = to_translate[i:i + BATCH]
+                    tags_str = '\n'.join(f'{j+1}. {t}' for j, (_, t) in enumerate(batch))
+                    prompt = (
+                        '아래 일본어/영어 태그를 한국어로 번역하세요.\n'
+                        '반드시 JSON 형식으로만 응답 {"1":"번역","2":"번역",...}\n\n'
+                        + tags_str
+                    )
+                    try:
+                        raw = client._chat([{"role":"user","content":prompt}],
+                                           max_tokens=400)
+                        if raw.startswith('```'):
+                            raw = raw.split('```')[1].lstrip('json').strip()
+                        result = json.loads(raw.strip())
+                    except Exception:
+                        done += len(batch)
+                        prog_win.after(0, lambda d=done: pb.config(value=d))
+                        continue
+
+                    for j, (lb_idx, old_tag) in enumerate(batch):
+                        new_tag = result.get(str(j + 1), '').strip()
+                        if new_tag and new_tag != old_tag:
+                            self.db.rename_tag(old_tag, new_tag)
+                            tags_data[lb_idx] = (new_tag, tags_data[lb_idx][1])
+                            def _upd(i=lb_idx, nt=new_tag):
+                                lb.delete(i); lb.insert(i, '  ' + nt)
+                            prog_win.after(0, _upd)
+                        done += 1
+                        prog_win.after(0, lambda d=done, t=old_tag, n=new_tag:
+                                       lbl_pr.config(text=f'{t} → {n}'))
+                        prog_win.after(0, lambda d=done: pb.config(value=d))
+
+                prog_win.after(0, prog_win.destroy)
+                prog_win.after(0, lambda: messagebox.showinfo(
+                    '태그 번역 완료', f'{done}개 태그 처리 완료'))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_f = tk.Frame(win, bg='#0d0d14'); btn_f.pack(pady=4)
+        ttk.Button(btn_f, text='🌐 LLM 태그 번역 (일본어→한국어)',
+                   command=_llm_translate_tags).pack(side='left', padx=6)
+        ttk.Button(btn_f, text='닫기', command=win.destroy).pack(side='left', padx=6)
+
         tk.Label(win, text=f'총 {len(tags_data)}개 태그',
                  bg='#0d0d14', fg='#444', font=('Consolas', 8)
                  ).pack(anchor='e', padx=14)
-        ttk.Button(win, text='닫기', command=win.destroy).pack(pady=8)
 
     # ── 갤러리 뷰 (웹 브라우저) ──────────────────
     def _gallery_view(self):
@@ -2718,6 +2832,11 @@ class VidSort(tk.Tk):
                        variable=skip_var,
                        bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
                        font=('Consolas', 9)).pack(anchor='w', padx=20)
+        name_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(win, text='제목 기반 한글 이름 + 설명 자동 생성 (5글자↑ 파일만)',
+                       variable=name_var,
+                       bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
+                       font=('Consolas', 9)).pack(anchor='w', padx=20)
 
         ttk.Separator(win).pack(fill='x', padx=16, pady=6)
 
@@ -2756,8 +2875,10 @@ class VidSort(tk.Tk):
                 return
 
             win.destroy()
-            extra = extra_var.get().strip()
-            self._llm_run_batch(paths, tag_pool, extra_prompt=extra)
+            extra     = extra_var.get().strip()
+            add_names = name_var.get()
+            self._llm_run_batch(paths, tag_pool, extra_prompt=extra,
+                                add_names=add_names)
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
         ttk.Button(bf, text='▶ 시작', style='Acc.TButton',
@@ -2952,7 +3073,7 @@ class VidSort(tk.Tk):
                  font=('Consolas', 8)).pack(side='right', padx=8)
 
     # ── AI 배치 태그 실행 ────────────────────────
-    def _llm_run_batch(self, paths, tag_pool, extra_prompt=''):
+    def _llm_run_batch(self, paths, tag_pool, extra_prompt='', add_names=False):
         """백그라운드 배치 태그 실행 + 진행 팝업"""
         client = self._get_llm_client()
         if not client: return
@@ -3015,15 +3136,31 @@ class VidSort(tk.Tk):
                     self.db.add_tag(path, tag)
                     applied += 1
 
+            # 한글 이름 + 설명 생성 (옵션)
+            named = 0
+            if add_names:
+                try:
+                    name_list = client.analyze_and_name(filenames)
+                    for path, entry in zip(paths, name_list):
+                        alias = entry.get('alias', '').strip()
+                        desc  = entry.get('description', '').strip()
+                        if alias:
+                            self.db.set_alias(path, alias)
+                            named += 1
+                        if desc:
+                            self.db.set_description(path, desc)
+                except Exception:
+                    pass
+
             def done():
                 try: popup.destroy()
                 except Exception: pass
                 self._reload_sidebar()
                 self._reload()
-                messagebox.showinfo(
-                    'AI 태그 완료',
-                    f'처리 완료: {len(paths)}개 파일\n'
-                    f'적용된 태그: {applied}건')
+                msg = f'처리 완료: {len(paths)}개 파일\n적용된 태그: {applied}건'
+                if add_names:
+                    msg += f'\n한글 이름 생성: {named}건'
+                messagebox.showinfo('AI 태그 완료', msg)
 
             popup.after(0, done)
 
@@ -3141,6 +3278,27 @@ class VidSort(tk.Tk):
                           borderwidth=0, highlightthickness=0, yscrollcommand=s_vsb.set)
         s_lb.pack(fill='both', expand=True)
         s_vsb.config(command=s_lb.yview)
+
+        def _s_lb_rclick(e):
+            s_lb.selection_clear(0, 'end')
+            s_lb.selection_set(s_lb.nearest(e.y))
+            sel = s_lb.curselection()
+            if not sel: return
+            m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                        activebackground='#7c6ff7', activeforeground='#fff')
+            m.add_command(label='🚫  JAV 처리 제외', command=lambda: _exclude_s_sel())
+            m.tk_popup(e.x_root, e.y_root)
+
+        def _exclude_s_sel():
+            for idx in reversed(sorted(s_lb.curselection())):
+                if idx < len(_scrape_candidates):
+                    path, name, code = _scrape_candidates[idx]
+                    self.db.set_jav_done(path)
+                    _scrape_candidates.pop(idx)
+                    s_lb.delete(idx)
+            lbl_s_count.config(
+                text=f'미처리: {len(_scrape_candidates)}개  │  제외 처리됨')
+        s_lb.bind('<Button-3>', _s_lb_rclick)
 
         sc_f = tk.Frame(tab1, bg='#0d0d14'); sc_f.pack(fill='x', padx=10, pady=4)
         tk.Label(sc_f, text='스크래핑 개수:', bg='#0d0d14', fg='#aaa',

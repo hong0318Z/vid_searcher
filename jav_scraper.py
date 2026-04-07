@@ -94,6 +94,9 @@ def _get(url: str, timeout: int = 20, cookies: dict | None = None,
     headers = dict(_HEADERS)
     if referer:
         headers['Referer'] = referer
+    # curl_cffi cookies 파라미터가 무시되는 경우 대비 — Cookie 헤더에도 직접 삽입
+    if cookies:
+        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
 
     last_exc = None
     for attempt in range(3):
@@ -286,11 +289,35 @@ def _fetch_javbus(code: str) -> tuple:
 
         s = _soup(r.text)
 
-        # 연령확인 페이지 감지
-        if s.select_one('#age-check, .age-check, form[action*="age"]') or \
-           '연령' in (s.title.string or '') if s.title else False:
-            print(f'[Javbus] 연령확인 페이지 감지됨 (쿠키 미적용)', flush=True)
-            return None, 'Javbus 연령확인 페이지 (over18 쿠키 미적용)'
+        # 연령확인 페이지 감지 → 확인 링크 클릭 후 재시도
+        is_age_gate = (
+            s.select_one('#age-check, .age-check, form[action*="age"]') or
+            'Age Verification' in r.text or
+            ('연령' in (s.title.string or '') if s.title else False)
+        )
+        if is_age_gate:
+            print(f'[Javbus] 연령확인 페이지 감지 → 확인 링크 추적', flush=True)
+            # "ENTER" 또는 "YES" 등 확인 링크 찾기
+            confirm = (
+                s.select_one('a[href*="age"], a.btn-default, '
+                             'a[href*="confirm"], a[href*="enter"]')
+            )
+            if confirm:
+                href = confirm.get('href', '')
+                if href and not href.startswith('http'):
+                    href = JAVBUS_BASE + href
+                if href:
+                    print(f'[Javbus] age-confirm → {href}', flush=True)
+                    time.sleep(0.5)
+                    r2 = _get(href, referer=url_direct, cookies=_JAVBUS_COOKIES)
+                    # 확인 후 원래 URL 재요청
+                    time.sleep(0.5)
+                    r = _get(url_direct, referer=href, cookies=_JAVBUS_COOKIES)
+                    s = _soup(r.text)
+            # 여전히 age gate면 실패
+            if 'Age Verification' in r.text:
+                print(f'[Javbus] 연령확인 우회 실패', flush=True)
+                return None, 'Javbus 연령확인 우회 실패 (VPN 필요)'
 
         result = {'code': code, 'source': 'javbus'}
 

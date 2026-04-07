@@ -49,6 +49,11 @@ class LLMClient:
 
     # ── 내부 호출 ────────────────────────────────
     def _chat(self, messages: list, max_tokens: int = 100) -> str:
+        content, _, _ = self._chat_tracked(messages, max_tokens)
+        return content
+
+    def _chat_tracked(self, messages: list, max_tokens: int = 100) -> tuple:
+        """(content, prompt_tokens, completion_tokens) 반환"""
         url     = f"{self._endpoint}/chat/completions"
         payload = {
             "model":      self.model,
@@ -58,7 +63,12 @@ class LLMClient:
         with httpx.Client(timeout=60) as client:
             resp = client.post(url, json=payload, headers=self._headers)
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            body    = resp.json()
+            content = body["choices"][0]["message"]["content"].strip()
+            usage   = body.get("usage", {})
+            return (content,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0))
 
     # ── 연결 테스트 ──────────────────────────────
     def test_connection(self) -> str:

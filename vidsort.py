@@ -175,6 +175,9 @@ class DB:
         if 'jav_done' not in cols:
             self.conn.execute("ALTER TABLE files ADD COLUMN jav_done INTEGER DEFAULT 0")
             self.conn.commit()
+        if 'jav_raw' not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN jav_raw TEXT DEFAULT ''")
+            self.conn.commit()
 
         # ext 인덱스 (컬럼 확보 후 생성)
         self.conn.execute(
@@ -341,13 +344,31 @@ class DB:
             self.conn.execute("UPDATE files SET jav_done=1 WHERE path=?", (path,))
             self.conn.commit()
 
+    def set_jav_raw(self, path, raw_json: str):
+        """스크래핑 결과 JSON 저장 (LLM 처리 전 중간 상태)"""
+        with self.lock:
+            self.conn.execute("UPDATE files SET jav_raw=? WHERE path=?", (raw_json, path))
+            self.conn.commit()
+
     def get_pending_jav(self, limit=50):
-        """alias='' AND 태그 없음 AND jav_done=0 인 파일"""
+        """alias='' AND 태그 없음 AND jav_done=0 AND jav_raw='' 인 파일 (미스크래핑)"""
         rows = self.conn.execute("""
             SELECT f.* FROM files f
             WHERE (f.alias IS NULL OR f.alias='')
               AND f.jav_done = 0
+              AND (f.jav_raw IS NULL OR f.jav_raw='')
               AND f.path NOT IN (SELECT DISTINCT path FROM tags)
+            ORDER BY f.name
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return self._dicts(rows)
+
+    def get_scraped_pending_jav(self, limit=200):
+        """jav_raw 있고 jav_done=0 인 파일 (스크래핑 완료, LLM 대기)"""
+        rows = self.conn.execute("""
+            SELECT f.* FROM files f
+            WHERE f.jav_done = 0
+              AND f.jav_raw IS NOT NULL AND f.jav_raw != ''
             ORDER BY f.name
             LIMIT ?
         """, (limit,)).fetchall()
@@ -358,7 +379,15 @@ class DB:
             SELECT COUNT(*) FROM files f
             WHERE (f.alias IS NULL OR f.alias='')
               AND f.jav_done = 0
+              AND (f.jav_raw IS NULL OR f.jav_raw='')
               AND f.path NOT IN (SELECT DISTINCT path FROM tags)
+        """).fetchone()[0]
+
+    def count_scraped_pending_jav(self):
+        return self.conn.execute("""
+            SELECT COUNT(*) FROM files f
+            WHERE f.jav_done = 0
+              AND f.jav_raw IS NOT NULL AND f.jav_raw != ''
         """).fetchone()[0]
 
     def remove(self,path):
@@ -837,18 +866,33 @@ class CanvasGrid(tk.Frame):
         p=self._path_at(e.x,e.y)
         if p:
             v=next((x for x in self._videos if x['path']==p),None)
-            if v: self._show_tip(e.x_root,e.y_root,v['name']); return
+            if v:
+                desc = v.get('description','') or ''
+                self._show_tip(e.x_root, e.y_root, v['name'], desc)
+                return
         self._hide_tip()
 
-    def _show_tip(self,rx,ry,text):
+    def _show_tip(self, rx, ry, name, desc=''):
+        text = name
+        if desc:
+            # 설명 최대 120자 표시
+            short_desc = desc[:120] + ('…' if len(desc) > 120 else '')
+            text = f"{name}\n{'─'*30}\n{short_desc}"
         if self._tip_win:
-            try: self._tip_win.wm_geometry(f'+{rx+12}+{ry+16}'); return
-            except: pass
-        self._tip_win=tk.Toplevel(self)
+            try:
+                self._tip_win.wm_geometry(f'+{rx+12}+{ry+16}')
+                # 텍스트도 갱신
+                for w in self._tip_win.winfo_children():
+                    w.config(text=text)
+                return
+            except:
+                pass
+        self._tip_win = tk.Toplevel(self)
         self._tip_win.wm_overrideredirect(True)
         self._tip_win.wm_geometry(f'+{rx+12}+{ry+16}')
-        tk.Label(self._tip_win,text=text,bg='#1a1a28',fg='#ddd',
-                 font=('Consolas',8),padx=8,pady=4,relief='solid',bd=1).pack()
+        tk.Label(self._tip_win, text=text, bg='#1a1a28', fg='#ddd',
+                 font=('Consolas', 8), padx=8, pady=4, relief='solid',
+                 bd=1, justify='left', wraplength=360).pack()
 
     def _hide_tip(self,e=None):
         if self._tip_win:
@@ -1891,6 +1935,8 @@ class VidSort(tk.Tk):
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))
         m.add_command(label='📋  복사',             command=lambda:self._clipop('copy',paths))
         m.add_separator()
+        m.add_command(label='🚫  JAV 처리 제외',
+                      command=lambda: self._jav_exclude(paths))
         m.add_command(label='🗑  DB에서 제거',      command=lambda:self._rm_db(paths))
         m.tk_popup(e.x_root,e.y_root)
 
@@ -2621,7 +2667,7 @@ class VidSort(tk.Tk):
         win = tk.Toplevel(self)
         win.title('▶ AI 자동 태그')
         win.configure(bg='#0d0d14')
-        win.geometry('500x400')
+        win.geometry('500x500')
         win.resizable(False, False)
         win.grab_set()
 
@@ -2673,6 +2719,19 @@ class VidSort(tk.Tk):
                        bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
                        font=('Consolas', 9)).pack(anchor='w', padx=20)
 
+        ttk.Separator(win).pack(fill='x', padx=16, pady=6)
+
+        tk.Label(win, text='추가 지시사항 (선택):',
+                 bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=20)
+        tk.Label(win, text='예) 이 폴더 영상엔 "액션" 태그를 반드시 포함하세요.',
+                 bg='#0d0d14', fg='#333', font=('Consolas', 7)).pack(anchor='w', padx=20)
+        extra_f = tk.Frame(win, bg='#0d0d14')
+        extra_f.pack(fill='x', padx=20, pady=(2, 0))
+        extra_var = tk.StringVar()
+        ttk.Entry(extra_f, textvariable=extra_var,
+                  font=('Consolas', 9), width=54).pack(fill='x')
+
         def start():
             scope = scope_var.get()
             if scope == 'current':
@@ -2697,7 +2756,8 @@ class VidSort(tk.Tk):
                 return
 
             win.destroy()
-            self._llm_run_batch(paths, tag_pool)
+            extra = extra_var.get().strip()
+            self._llm_run_batch(paths, tag_pool, extra_prompt=extra)
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
         ttk.Button(bf, text='▶ 시작', style='Acc.TButton',
@@ -2892,7 +2952,7 @@ class VidSort(tk.Tk):
                  font=('Consolas', 8)).pack(side='right', padx=8)
 
     # ── AI 배치 태그 실행 ────────────────────────
-    def _llm_run_batch(self, paths, tag_pool):
+    def _llm_run_batch(self, paths, tag_pool, extra_prompt=''):
         """백그라운드 배치 태그 실행 + 진행 팝업"""
         client = self._get_llm_client()
         if not client: return
@@ -2935,9 +2995,12 @@ class VidSort(tk.Tk):
 
         def worker():
             try:
+                combined_prompt = self._llm_prompt or ''
+                if extra_prompt:
+                    combined_prompt = (combined_prompt + '\n\n추가 지시사항: ' + extra_prompt).strip()
                 tags_list = client.analyze_and_tag(
                     filenames, tag_pool, on_progress,
-                    custom_prompt=self._llm_prompt)
+                    custom_prompt=combined_prompt)
             except Exception as e:
                 err_msg = str(e)
                 popup.after(0, lambda msg=err_msg: (
@@ -2966,9 +3029,40 @@ class VidSort(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _jav_exclude(self, paths):
+        """선택 파일을 JAV 처리 대상에서 제외 (jav_done=1)"""
+        for p in paths:
+            self.db.set_jav_done(p)
+        messagebox.showinfo('JAV 제외', f'{len(paths)}개 파일을 JAV 처리 대상에서 제외했습니다.')
+
     # ── JAV 처리 ────────────────────────────────
+    # 장르 정적 번역 테이블 (LLM 불필요)
+    _GENRE_MAP = {
+        # 일본어
+        '巨乳':'거유','貧乳':'빈유','美乳':'미유','天然':'천연','爆乳':'폭유',
+        '中出し':'질내사정','フェラ':'펠라','クンニ':'쿤니','アナル':'항문',
+        'ハメ撮り':'POV','手コキ':'핸드잡','パイズリ':'파이즈리',
+        '顔射':'얼굴사정','潮吹き':'스쿼팅','オナニー':'자위',
+        '3P':'3P','乱交':'난교','レズ':'레즈','SM':'SM','調教':'조교',
+        '女優':'여배우','素人':'아마추어','人妻':'유부녀','熟女':'성숙녀',
+        '美少女':'미소녀','ギャル':'갸루','制服':'교복','コスプレ':'코스프레',
+        'ナース':'간호사','OL':'OL','教師':'교사','お姉さん':'누나',
+        '近親相姦':'근친','寝取られ':'네토라레','催眠':'최면',
+        '痴漢':'치한','野外':'야외','車':'차안','温泉':'온천',
+        '4K':'4K','高画質':'고화질','VR':'VR','独占':'독점',
+        # 영어
+        'Creampie':'질내사정','Blowjob':'펠라','Handjob':'핸드잡',
+        'Lesbian':'레즈','Anal':'항문','Squirting':'스쿼팅',
+        'Big Tits':'거유','Tiny Tits':'빈유','Amateur':'아마추어',
+        'Mature':'성숙녀','Milf':'밀프','Cosplay':'코스프레',
+        'Uniform':'교복','Nurse':'간호사','Office Lady':'OL',
+        'Threesome':'3P','Orgy':'난교','Outdoor':'야외',
+        'POV':'POV','Uncensored':'무수정','Censored':'검열',
+        'HD':'HD','4K':'4K','VR':'VR',
+    }
+
     def _jav_process_dlg(self):
-        """JAV 메타데이터 자동 처리 다이얼로그"""
+        """JAV 메타데이터 자동 처리 — 2단계 분리 (스크래핑 / LLM 일괄번역)"""
         try:
             import jav_scraper
             missing = jav_scraper.check_deps()
@@ -2980,253 +3074,380 @@ class VidSort(tk.Tk):
             messagebox.showerror('오류', 'jav_scraper.py 를 찾을 수 없습니다.')
             return
 
-        client = self._get_llm_client()
-        if not client: return
-
         win = tk.Toplevel(self)
         win.title('🎬 JAV 메타데이터 처리')
         win.configure(bg='#0d0d14')
-        win.geometry('560x620')
+        win.geometry('580x680')
         win.resizable(True, True)
         win.grab_set()
 
-        # ── 상단 헤더 ──
-        tk.Label(win, text='🎬  JAV 자동 처리',
+        # ── 상단 상태 바 ──
+        info_f = tk.Frame(win, bg='#0d0d14'); info_f.pack(fill='x', padx=14, pady=(10, 0))
+        tk.Label(info_f, text='🎬  JAV 자동 처리',
                  bg='#0d0d14', fg='#dcdcf0',
-                 font=('Consolas', 12, 'bold')).pack(pady=(14, 2))
-
-        # 오프라인 DB + 엔진 상태
-        offline_stat = jav_scraper.offline_db_stats()
-        offline_color = '#4dffb4' if '없음' not in offline_stat else '#555'
-        tk.Label(win, text=offline_stat,
-                 bg='#0d0d14', fg=offline_color,
-                 font=('Consolas', 8)).pack(pady=(0, 2))
-        engine_stat = jav_scraper.scraper_engine()
+                 font=('Consolas', 11, 'bold')).pack(side='left')
+        engine_stat  = jav_scraper.scraper_engine()
         engine_color = '#4dffb4' if 'curl_cffi' in engine_stat else '#ffd166'
-        tk.Label(win, text=f'HTTP 엔진: {engine_stat}',
+        tk.Label(info_f, text=f'  [{engine_stat}]',
                  bg='#0d0d14', fg=engine_color,
-                 font=('Consolas', 8)).pack(pady=(0, 4))
-        tk.Label(win,
-                 text='조회 순서: ① 오프라인 JSON  ② R18.dev API  ③ JavDB  ④ Javbus',
-                 bg='#0d0d14', fg='#333', font=('Consolas', 7)).pack()
+                 font=('Consolas', 7)).pack(side='left')
 
-        # ── 발견된 파일 목록 섹션 ──
-        hdr_f = tk.Frame(win, bg='#0d0d14'); hdr_f.pack(fill='x', padx=16, pady=(6, 2))
-        lbl_found = tk.Label(hdr_f, text='스캔 중...', bg='#0d0d14', fg='#7c6ff7',
-                             font=('Consolas', 9, 'bold'))
-        lbl_found.pack(side='left')
-        tk.Label(hdr_f, text='(AV 코드 추출 가능한 미처리 파일)',
-                 bg='#0d0d14', fg='#444', font=('Consolas', 8)).pack(side='left', padx=6)
+        # ── Notebook 탭 ──
+        nb = ttk.Notebook(win)
+        nb.pack(fill='both', expand=True, padx=10, pady=6)
 
-        list_f = tk.Frame(win, bg='#0d0d14'); list_f.pack(fill='both', expand=True, padx=16, pady=(0, 4))
-        lb_vsb = ttk.Scrollbar(list_f, orient='vertical')
-        lb_vsb.pack(side='right', fill='y')
-        lb = tk.Listbox(list_f, bg='#0d0d12', fg='#bbb', font=('Consolas', 9),
-                        selectbackground='#7c6ff7', activestyle='none',
-                        borderwidth=0, highlightthickness=1, highlightcolor='#2a2a3d',
-                        yscrollcommand=lb_vsb.set)
-        lb.pack(fill='both', expand=True)
-        lb_vsb.config(command=lb.yview)
+        tab1 = tk.Frame(nb, bg='#0d0d14')
+        tab2 = tk.Frame(nb, bg='#0d0d14')
+        nb.add(tab1, text=' 1️⃣  스크래핑 해오기 ')
+        nb.add(tab2, text=' 2️⃣  LLM 일괄 번역 ')
 
-        # ── 처리 개수 + 시작 ──
-        ctrl_f = tk.Frame(win, bg='#0d0d14'); ctrl_f.pack(fill='x', padx=16, pady=4)
-        tk.Label(ctrl_f, text='처리할 개수:', bg='#0d0d14', fg='#aaa',
+        # ── 공용 작업 로그 ──
+        ttk.Separator(win).pack(fill='x', padx=10)
+        log_hdr = tk.Frame(win, bg='#0d0d14'); log_hdr.pack(fill='x', padx=14, pady=(4, 0))
+        tk.Label(log_hdr, text='📊 작업 로그', bg='#0d0d14', fg='#555',
+                 font=('Consolas', 8, 'bold')).pack(side='left')
+        lbl_log = tk.Label(win,
+                           text='LLM 호출: 0회  │  입력: 0 토큰  │  출력: 0 토큰  │  처리: 0건',
+                           bg='#111118', fg='#7c6ff7',
+                           font=('Consolas', 8), anchor='w', padx=10, pady=4)
+        lbl_log.pack(fill='x', padx=10)
+        ttk.Button(win, text='닫기', command=win.destroy).pack(pady=(4, 8))
+
+        # 공용 카운터
+        _log = {'calls': 0, 'tok_in': 0, 'tok_out': 0, 'done': 0}
+
+        def _refresh_log():
+            lbl_log.config(
+                text=f"LLM 호출: {_log['calls']}회  │  "
+                     f"입력: {_log['tok_in']:,} 토큰  │  "
+                     f"출력: {_log['tok_out']:,} 토큰  │  "
+                     f"처리: {_log['done']}건")
+
+        # ══════════════════════════════════════════
+        # TAB 1 — 스크래핑
+        # ══════════════════════════════════════════
+        hdr1 = tk.Frame(tab1, bg='#0d0d14'); hdr1.pack(fill='x', padx=10, pady=(8, 2))
+        lbl_s_count = tk.Label(hdr1, text='스캔 중...', bg='#0d0d14', fg='#7c6ff7',
+                               font=('Consolas', 9, 'bold'))
+        lbl_s_count.pack(side='left')
+        tk.Label(hdr1, text=' ← AV 코드 추출 가능 / 미처리',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 7)).pack(side='left')
+
+        sf = tk.Frame(tab1, bg='#0d0d14'); sf.pack(fill='both', expand=True, padx=10, pady=2)
+        s_vsb = ttk.Scrollbar(sf, orient='vertical')
+        s_vsb.pack(side='right', fill='y')
+        s_lb = tk.Listbox(sf, bg='#0a0a12', fg='#bbb', font=('Consolas', 8),
+                          selectbackground='#7c6ff7', activestyle='none',
+                          borderwidth=0, highlightthickness=0, yscrollcommand=s_vsb.set)
+        s_lb.pack(fill='both', expand=True)
+        s_vsb.config(command=s_lb.yview)
+
+        sc_f = tk.Frame(tab1, bg='#0d0d14'); sc_f.pack(fill='x', padx=10, pady=4)
+        tk.Label(sc_f, text='스크래핑 개수:', bg='#0d0d14', fg='#aaa',
                  font=('Consolas', 9)).pack(side='left')
-        batch_var = tk.StringVar(value='10')
-        ttk.Spinbox(ctrl_f, from_=1, to=999, textvariable=batch_var,
+        s_batch = tk.StringVar(value='50')
+        ttk.Spinbox(sc_f, from_=1, to=999, textvariable=s_batch,
                     width=5, font=('Consolas', 9)).pack(side='left', padx=6)
-        tk.Label(ctrl_f, text='개  (스크래핑+LLM 각 ~5초, 10개≈50초)',
+        tk.Label(sc_f, text='개  (LLM 없음, 빠름)',
                  bg='#0d0d14', fg='#444', font=('Consolas', 8)).pack(side='left')
+        s_btn = ttk.Button(sc_f, text='▶ 스크래핑', style='Acc.TButton')
+        s_btn.pack(side='right')
 
-        start_btn = ttk.Button(ctrl_f, text='▶ 시작', style='Acc.TButton')
-        start_btn.pack(side='right')
+        s_pb = ttk.Progressbar(tab1, length=540, mode='determinate', maximum=1)
+        s_pb.pack(padx=10, pady=2)
+        s_prog_f = tk.Frame(tab1, bg='#0d0d14'); s_prog_f.pack(fill='x', padx=10)
+        lbl_s_prog = tk.Label(s_prog_f, text='', bg='#0d0d14', fg='#555', font=('Consolas', 8))
+        lbl_s_prog.pack(side='left')
+        lbl_s_cur  = tk.Label(s_prog_f, text='', bg='#0d0d14', fg='#444', font=('Consolas', 8))
+        lbl_s_cur.pack(side='left', padx=8)
 
-        # ── 진행 바 ──
-        ttk.Separator(win).pack(fill='x', padx=12, pady=4)
-        prog_f = tk.Frame(win, bg='#0d0d14'); prog_f.pack(fill='x', padx=16)
-        lbl_prog = tk.Label(prog_f, text='대기 중', bg='#0d0d14', fg='#555',
-                            font=('Consolas', 8))
-        lbl_prog.pack(side='left')
-        lbl_cur = tk.Label(prog_f, text='', bg='#0d0d14', fg='#444',
-                           font=('Consolas', 8))
-        lbl_cur.pack(side='left', padx=8)
-        pb = ttk.Progressbar(win, length=520, mode='determinate', maximum=1)
-        pb.pack(padx=16, pady=2)
+        _scrape_candidates: list = []  # [(path, name, code)]
 
-        # ── 완료 목록 ──
-        ttk.Separator(win).pack(fill='x', padx=12, pady=4)
-        tk.Label(win, text='완료 목록', bg='#0d0d14', fg='#555',
-                 font=('Consolas', 8, 'bold')).pack(anchor='w', padx=16)
-        done_f = tk.Frame(win, bg='#0d0d14'); done_f.pack(fill='both', padx=16, pady=(2, 4))
-        done_vsb = ttk.Scrollbar(done_f, orient='vertical')
-        done_vsb.pack(side='right', fill='y')
-        done_lb = tk.Listbox(done_f, bg='#091209', fg='#4dffb4', font=('Consolas', 8),
-                             height=5, activestyle='none', borderwidth=0,
-                             highlightthickness=1, highlightcolor='#2a2a3d',
-                             yscrollcommand=done_vsb.set)
-        done_lb.pack(fill='both', expand=True)
-        done_vsb.config(command=done_lb.yview)
-
-        # ── 닫기 ──
-        ttk.Button(win, text='닫기', command=win.destroy).pack(pady=(2, 10))
-
-        _stop      = threading.Event()
-        _candidates: list = []   # [(path, name, code), ...]
-
-        # ── 1단계: 스캔 (백그라운드) ──────────────────
-        def scan_worker():
-            rows = self.db.get_pending_jav(limit=9999)
+        def _scan_tab1():
+            rows  = self.db.get_pending_jav(limit=9999)
             found = []
             for row in rows:
                 code = jav_scraper.extract_code(row['name'])
                 if code:
                     found.append((row['path'], row['name'], code))
-            _candidates.clear()
-            _candidates.extend(found)
+            _scrape_candidates.clear()
+            _scrape_candidates.extend(found)
 
-            def _update_list():
-                lb.delete(0, 'end')
+            scraped_cnt = self.db.count_scraped_pending_jav()
+            def _ui():
+                s_lb.delete(0, 'end')
                 for _, name, code in found:
-                    lb.insert('end', f'  {code}  │  {name}')
-                lbl_found.config(text=f'발견된 AV 파일: {len(found)}개')
-                start_btn.config(state='normal' if found else 'disabled')
-            win.after(0, _update_list)
+                    s_lb.insert('end', f'  {code}  │  {name}')
+                lbl_s_count.config(
+                    text=f'미처리: {len(found)}개  │  스크래핑완료(LLM대기): {scraped_cnt}개')
+                s_btn.config(state='normal' if found else 'disabled')
+                # 탭2 카운트도 갱신
+                lbl_llm_count.config(
+                    text=f'스크래핑 완료 (LLM 대기): {scraped_cnt}개  │  '
+                         f'LLM 1회 = {llm_batch.get()}개 처리')
+            win.after(0, _ui)
 
-        start_btn.config(state='disabled')
-        threading.Thread(target=scan_worker, daemon=True).start()
+        s_btn.config(state='disabled')
+        threading.Thread(target=_scan_tab1, daemon=True).start()
 
-        # ── LLM 번역 헬퍼 ─────────────────────────────
-        def _translate(meta: dict):
-            actresses_str = ', '.join(meta.get('actresses', [])[:4]) or '불명'
-            genres_str    = ', '.join(meta.get('genres', [])[:5]) or '불명'
-            code          = meta.get('code', '')
-            orig_title    = meta.get('title', '')
-            studio        = meta.get('studio', '')
-            sys_msg = (
-                "당신은 AV 영상 메타데이터 번역 전문가입니다. "
-                "제목을 자연스러운 한국어로 번역하고, "
-                "배우와 장르를 바탕으로 간략한 설명을 작성하세요. "
-                "반드시 JSON만 출력하세요."
-            )
-            user_msg = (
-                f"다음 AV 메타데이터를 한국어로 처리해주세요.\n"
-                f"코드: {code}\n원제: {orig_title}\n"
-                f"배우: {actresses_str}\n장르: {genres_str}\n스튜디오: {studio}\n\n"
-                "반드시 아래 JSON 형식으로만 응답하세요:\n"
-                '{"title_ko": "한글 제목", "description": "2~3문장 한글 설명"}'
-            )
-            raw = client._chat(
-                [{"role": "system", "content": sys_msg},
-                 {"role": "user",   "content": user_msg}],
-                max_tokens=400
-            )
-            if raw.startswith('```'):
-                parts = raw.split('```')
-                raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
-            data = json.loads(raw.strip())
-            return data.get('title_ko', orig_title), data.get('description', '')
-
-        # ── 2단계: 처리 (백그라운드) ──────────────────
-        def worker():
+        def _scrape_worker():
             try:
-                limit = max(1, int(batch_var.get()))
+                limit = max(1, int(s_batch.get()))
             except ValueError:
-                limit = 10
-            targets = _candidates[:limit]
+                limit = 50
+            targets = _scrape_candidates[:limit]
             total   = len(targets)
             if total == 0:
-                win.after(0, lambda: lbl_prog.config(text='처리할 파일 없음', fg='#ffd166'))
+                win.after(0, lambda: lbl_s_prog.config(text='처리할 파일 없음', fg='#ffd166'))
                 return
-
-            win.after(0, lambda t=total: pb.configure(maximum=max(t, 1)))
-            done_idx = []   # 완료된 candidates 인덱스
-
+            win.after(0, lambda t=total: s_pb.configure(maximum=max(t, 1)))
+            done_idx = []
             for i, (path, name, code) in enumerate(targets):
-                if _stop.is_set():
-                    break
                 n = i + 1
-
                 def _upd(n=n, total=total, name=name):
-                    pb['value'] = n
-                    lbl_prog.config(text=f'{n} / {total}', fg='#7c6ff7')
-                    lbl_cur.config(text=name[:50])
+                    s_pb['value'] = n
+                    lbl_s_prog.config(text=f'{n} / {total}', fg='#7c6ff7')
+                    lbl_s_cur.config(text=name[:55])
                 win.after(0, _upd)
 
-                # 스크래핑
-                meta, scrape_err = jav_scraper.fetch_meta_verbose(code)
-                if not meta or not meta.get('title'):
-                    # 실패 → jav_done 안 찍음, 리스트에 오류 사유 표시
-                    fail_entry = f'  ❌ {code}  {scrape_err}'
-                    def _fail(idx=i, entry=fail_entry):
+                meta, err = jav_scraper.fetch_meta_verbose(code)
+                if meta and meta.get('title'):
+                    self.db.set_jav_raw(path, json.dumps(meta, ensure_ascii=False))
+                    done_idx.append(i)
+                    def _ok(idx=i, code=code):
                         try:
-                            lb.delete(idx)
-                            lb.insert(idx, entry)
-                            lb.itemconfig(idx, fg='#ff6b6b')
-                        except Exception:
-                            pass
+                            s_lb.itemconfig(idx, fg='#4dffb4')
+                        except Exception: pass
+                    win.after(0, _ok)
+                else:
+                    def _fail(idx=i, code=code, e=err):
+                        try:
+                            s_lb.delete(idx)
+                            s_lb.insert(idx, f'  ❌ {code}  {e[:60]}')
+                            s_lb.itemconfig(idx, fg='#ff6b6b')
+                        except Exception: pass
                     win.after(0, _fail)
-                    continue
 
-                # LLM 번역
-                try:
-                    title_ko, description = _translate(meta)
-                except Exception:
-                    title_ko    = meta.get('title', code)
-                    description = ''
-
-                # DB 저장
-                alias = f"{title_ko} [{code}]"
-                self.db.set_alias(path, alias)
-                if description:
-                    self.db.set_description(path, description)
-                self.db.add_tag(path, 'JAV')
-                for actress in meta.get('actresses', [])[:4]:
-                    if actress:
-                        self.db.add_tag(path, actress)
-                for genre in meta.get('genres', [])[:3]:
-                    if genre:
-                        self.db.add_tag(path, genre)
-                self.db.set_jav_done(path)
-
-                done_idx.append(i)
-                ok_entry = f'✅ [{code}]  {title_ko}'
-                def _ok(idx=i, entry=ok_entry):
-                    try:
-                        # 대기 목록에서 시각적으로 회색으로
-                        lb.itemconfig(idx, fg='#3a5a3a')
-                    except Exception:
-                        pass
-                    done_lb.insert('end', entry)
-                    done_lb.see('end')
-                win.after(0, _ok)
-
-            # 완료 후 처리된 항목을 candidates에서 제거
             for idx in sorted(done_idx, reverse=True):
-                if idx < len(_candidates):
-                    _candidates.pop(idx)
+                if idx < len(_scrape_candidates):
+                    _scrape_candidates.pop(idx)
 
             def _finish():
-                try:
-                    # 리스트 갱신 (성공 항목 제거)
-                    lb.delete(0, 'end')
-                    for _, name, code in _candidates:
-                        lb.insert('end', f'  {code}  │  {name}')
-                    lbl_found.config(text=f'발견된 AV 파일: {len(_candidates)}개')
-                    lbl_prog.config(text=f'완료  ✅ {len(done_idx)}건 처리', fg='#4dffb4')
-                    lbl_cur.config(text='')
-                    start_btn.config(state='normal' if _candidates else 'disabled')
-                    self._reload_sidebar()
-                    self._reload()
-                except Exception:
-                    pass
+                scraped_cnt = self.db.count_scraped_pending_jav()
+                lbl_s_count.config(
+                    text=f'미처리: {len(_scrape_candidates)}개  │  스크래핑완료: {scraped_cnt}개')
+                lbl_s_prog.config(text=f'완료  ✅ {len(done_idx)}건 저장', fg='#4dffb4')
+                lbl_s_cur.config(text='')
+                s_btn.config(state='normal' if _scrape_candidates else 'disabled')
+                lbl_llm_count.config(
+                    text=f'스크래핑 완료 (LLM 대기): {scraped_cnt}개  │  '
+                         f'LLM 1회 = {llm_batch.get()}개 처리')
+                _scan_tab2()
             win.after(0, _finish)
 
-        def start():
-            start_btn.config(state='disabled')
-            _stop.clear()
-            threading.Thread(target=worker, daemon=True).start()
+        def _start_scrape():
+            s_btn.config(state='disabled')
+            threading.Thread(target=_scrape_worker, daemon=True).start()
+        s_btn.config(command=_start_scrape)
 
-        start_btn.config(command=start)
+        # ══════════════════════════════════════════
+        # TAB 2 — LLM 일괄 번역
+        # ══════════════════════════════════════════
+        hdr2 = tk.Frame(tab2, bg='#0d0d14'); hdr2.pack(fill='x', padx=10, pady=(8, 2))
+        lbl_llm_count = tk.Label(hdr2,
+                                 text='스캔 중...',
+                                 bg='#0d0d14', fg='#7c6ff7',
+                                 font=('Consolas', 9, 'bold'))
+        lbl_llm_count.pack(side='left')
+
+        lf = tk.Frame(tab2, bg='#0d0d14'); lf.pack(fill='both', expand=True, padx=10, pady=2)
+        l_vsb = ttk.Scrollbar(lf, orient='vertical')
+        l_vsb.pack(side='right', fill='y')
+        l_lb = tk.Listbox(lf, bg='#0a0a12', fg='#bbb', font=('Consolas', 8),
+                          selectbackground='#7c6ff7', activestyle='none',
+                          borderwidth=0, highlightthickness=0, yscrollcommand=l_vsb.set)
+        l_lb.pack(fill='both', expand=True)
+        l_vsb.config(command=l_lb.yview)
+
+        lc_f = tk.Frame(tab2, bg='#0d0d14'); lc_f.pack(fill='x', padx=10, pady=4)
+        tk.Label(lc_f, text='LLM 1회 처리량:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        llm_batch = tk.StringVar(value='20')
+        ttk.Spinbox(lc_f, from_=1, to=100, textvariable=llm_batch,
+                    width=4, font=('Consolas', 9)).pack(side='left', padx=6)
+        tk.Label(lc_f, text='개/회  (전체 일괄 처리)',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 8)).pack(side='left')
+        llm_btn = ttk.Button(lc_f, text='▶ LLM 번역', style='Acc.TButton')
+        llm_btn.pack(side='right')
+
+        l_pb = ttk.Progressbar(tab2, length=540, mode='determinate', maximum=1)
+        l_pb.pack(padx=10, pady=2)
+        l_pf = tk.Frame(tab2, bg='#0d0d14'); l_pf.pack(fill='x', padx=10)
+        lbl_l_prog = tk.Label(l_pf, text='', bg='#0d0d14', fg='#555', font=('Consolas', 8))
+        lbl_l_prog.pack(side='left')
+        lbl_l_cur  = tk.Label(l_pf, text='', bg='#0d0d14', fg='#444', font=('Consolas', 8))
+        lbl_l_cur.pack(side='left', padx=8)
+
+        _llm_rows: list = []  # DB rows with jav_raw
+
+        def _scan_tab2():
+            rows = self.db.get_scraped_pending_jav(limit=9999)
+            _llm_rows.clear(); _llm_rows.extend(rows)
+            def _ui():
+                l_lb.delete(0, 'end')
+                for row in rows:
+                    meta = json.loads(row['jav_raw'])
+                    l_lb.insert('end', f"  {meta.get('code','')}  │  {meta.get('title','')[:50]}")
+                cnt = len(rows)
+                lbl_llm_count.config(
+                    text=f'스크래핑 완료 (LLM 대기): {cnt}개  │  '
+                         f'LLM 1회 = {llm_batch.get()}개 처리')
+                llm_btn.config(state='normal' if rows else 'disabled')
+            win.after(0, _ui)
+
+        llm_btn.config(state='disabled')
+        threading.Thread(target=_scan_tab2, daemon=True).start()
+
+        def _llm_worker():
+            client = self._get_llm_client()
+            if not client:
+                win.after(0, lambda: llm_btn.config(state='normal'))
+                return
+
+            rows  = list(_llm_rows)
+            total = len(rows)
+            if total == 0:
+                win.after(0, lambda: lbl_l_prog.config(text='처리할 항목 없음', fg='#ffd166'))
+                return
+
+            try:
+                per_call = max(1, int(llm_batch.get()))
+            except ValueError:
+                per_call = 20
+
+            existing_tags = self.db.all_tags()
+            existing_str  = ', '.join(f'"{t}"' for t in existing_tags[:60]) or '없음'
+
+            total_batches = (total + per_call - 1) // per_call
+            win.after(0, lambda: l_pb.configure(maximum=max(total, 1)))
+
+            done_count = 0
+
+            for b_idx in range(total_batches):
+                batch = rows[b_idx * per_call: (b_idx + 1) * per_call]
+                b_num = b_idx + 1
+
+                def _upd(b=b_num, tb=total_batches, done=done_count, tot=total):
+                    l_pb['value'] = done
+                    lbl_l_prog.config(text=f'배치 {b}/{tb}  ({done}/{tot}개)', fg='#7c6ff7')
+                    lbl_l_cur.config(text=f'LLM 호출 준비 중...')
+                win.after(0, _upd)
+
+                # 배치 프롬프트 구성
+                items_str = ''
+                for idx, row in enumerate(batch, 1):
+                    m = json.loads(row['jav_raw'])
+                    items_str += (
+                        f"{idx}. 코드:{m.get('code','')}  "
+                        f"원제:{m.get('title','')}  "
+                        f"배우:{','.join(m.get('actresses',[])[:3])}  "
+                        f"장르:{','.join(m.get('genres',[])[:4])}\n"
+                    )
+
+                sys_msg = (
+                    "당신은 AV 메타데이터 번역 전문가입니다. "
+                    "제목은 자연스러운 한국어로, 배우명은 한글 음차로 변환하세요. "
+                    "장르는 한국어로 번역하되, 기존 태그와 유사하면 기존 태그 사용. "
+                    "반드시 JSON만 출력하세요."
+                )
+                user_msg = (
+                    f"기존 태그 목록: [{existing_str}]\n\n"
+                    f"처리 목록 ({len(batch)}개):\n{items_str}\n"
+                    '각 번호에 맞게 응답:\n'
+                    '{"1":{"title_ko":"...","description":"2문장","actresses_ko":[...],"genres_ko":[...]},'
+                    '"2":{...}}'
+                )
+
+                try:
+                    raw, tok_in, tok_out = client._chat_tracked(
+                        [{"role": "system", "content": sys_msg},
+                         {"role": "user",   "content": user_msg}],
+                        max_tokens=600 + len(batch) * 80
+                    )
+                    _log['calls'] += 1
+                    _log['tok_in']  += tok_in
+                    _log['tok_out'] += tok_out
+                    win.after(0, _refresh_log)
+
+                    # JSON 파싱
+                    if raw.startswith('```'):
+                        parts = raw.split('```')
+                        raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
+                    result_map = json.loads(raw.strip())
+                except Exception as e:
+                    err_msg = str(e)
+                    win.after(0, lambda m=err_msg: lbl_l_cur.config(text=f'LLM 오류: {m[:60]}', fg='#ff6b6b'))
+                    continue
+
+                # DB 저장
+                for idx, row in enumerate(batch, 1):
+                    r = result_map.get(str(idx), {})
+                    path      = row['path']
+                    meta      = json.loads(row['jav_raw'])
+                    code      = meta.get('code', '')
+                    title_ko  = r.get('title_ko', meta.get('title', code))
+                    desc      = r.get('description', '')
+                    actresses_ko = r.get('actresses_ko', [])
+                    genres_ko    = r.get('genres_ko', [])
+
+                    self.db.set_alias(path, f"{title_ko} [{code}]")
+                    if desc:
+                        self.db.set_description(path, desc)
+
+                    # 장르: 정적 매핑 우선, LLM 결과 보완
+                    self.db.add_tag(path, 'JAV')
+                    for a in (actresses_ko or meta.get('actresses', []))[:4]:
+                        if a: self.db.add_tag(path, a)
+                    genres_final = []
+                    for g in meta.get('genres', [])[:4]:
+                        mapped = self._GENRE_MAP.get(g)
+                        genres_final.append(mapped if mapped else g)
+                    for g in (genres_ko or genres_final)[:3]:
+                        if g: self.db.add_tag(path, g)
+
+                    self.db.set_jav_done(path)
+                    done_count += 1
+                    _log['done'] += 1
+
+                    ok_entry = f'✅ [{code}]  {title_ko}'
+                    pos = b_idx * per_call + (idx - 1)
+                    def _ok(p=pos, e=ok_entry):
+                        try:
+                            l_lb.itemconfig(p, fg='#4dffb4')
+                            l_lb.delete(p); l_lb.insert(p, e)
+                            l_lb.itemconfig(p, fg='#4dffb4')
+                        except Exception: pass
+                    win.after(0, _ok)
+
+                win.after(0, _refresh_log)
+
+            def _finish():
+                remaining = self.db.count_scraped_pending_jav()
+                lbl_llm_count.config(
+                    text=f'스크래핑 완료 (LLM 대기): {remaining}개')
+                lbl_l_prog.config(text=f'완료  ✅ {done_count}건 처리', fg='#4dffb4')
+                lbl_l_cur.config(text='')
+                llm_btn.config(state='normal' if remaining else 'disabled')
+                _log['done'] = done_count
+                _refresh_log()
+                self._reload_sidebar()
+                self._reload()
+            win.after(0, _finish)
+
+        def _start_llm():
+            llm_btn.config(state='disabled')
+            threading.Thread(target=_llm_worker, daemon=True).start()
+        llm_btn.config(command=_start_llm)
 
     # ── MISC ────────────────────────────────────
     def _check_ffmpeg(self):

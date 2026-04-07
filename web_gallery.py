@@ -65,10 +65,11 @@ def _query_videos(tag=None, search=None, offset=0, limit=40):
     total = c.execute(
         f"SELECT COUNT(*) FROM files f {where}", pa).fetchone()[0]
     rows = c.execute(
-        f"SELECT f.path,f.name,f.alias,f.duration,f.size,f.width,f.height,f.thumb_ok "
+        f"SELECT f.path,f.name,f.alias,f.duration,f.size,f.width,f.height,"
+        f"f.thumb_ok,COALESCE(f.description,'') "
         f"FROM files f {where} ORDER BY RANDOM() LIMIT ? OFFSET ?",
         pa + [limit, offset]).fetchall()
-    cols = ('path','name','alias','duration','size','width','height','thumb_ok')
+    cols = ('path','name','alias','duration','size','width','height','thumb_ok','description')
     return [dict(zip(cols,r)) for r in rows], total
 
 def _get_video(vid_id):
@@ -76,16 +77,44 @@ def _get_video(vid_id):
     if not path: return None
     c = _conn()
     r = c.execute(
-        "SELECT path,name,alias,duration,size,width,height,folder "
+        "SELECT path,name,alias,duration,size,width,height,folder,"
+        "COALESCE(description,'') "
         "FROM files WHERE path=?", (path,)).fetchone()
     if not r: return None
-    v = dict(zip(('path','name','alias','duration','size','width','height','folder'), r))
+    v = dict(zip(('path','name','alias','duration','size','width','height','folder','description'), r))
     v['tags'] = [x[0] for x in c.execute(
         "SELECT tag FROM tags WHERE path=? ORDER BY tag", (path,)).fetchall()]
     v['id']   = vid_id
     v['dur_str']  = _fmt_dur(v['duration'])
     v['size_str'] = _fmt_size(v['size'])
     return v
+
+def _get_tag_groups(limit_tags=6, vids_per_tag=6):
+    """태그별 추천 그룹 — 영상 수 많은 태그 순"""
+    c    = _conn()
+    tags = c.execute(
+        "SELECT tag, COUNT(*) as cnt FROM tags "
+        "GROUP BY tag ORDER BY cnt DESC LIMIT ?", (limit_tags,)).fetchall()
+    groups = []
+    for tag, cnt in tags:
+        rows = c.execute(
+            "SELECT f.path,f.name,f.alias,f.duration,f.thumb_ok,"
+            "COALESCE(f.description,'') "
+            "FROM files f JOIN tags t ON f.path=t.path "
+            "WHERE t.tag=? ORDER BY RANDOM() LIMIT ?",
+            (tag, vids_per_tag)).fetchall()
+        vids = []
+        for r in rows:
+            v = {'path':r[0],'name':r[1],'alias':r[2],'duration':r[3],
+                 'thumb_ok':r[4],'description':r[5]}
+            v['id']      = _vid_id(r[0])
+            v['dur_str'] = _fmt_dur(r[3])
+            v['tags']    = [tag]
+            vids.append(v)
+        if vids:
+            groups.append({'tag': tag, 'cnt': cnt, 'vids': vids})
+    return groups
+
 
 def _get_related(vid_id, limit=16):
     path = _get_path(vid_id)
@@ -214,6 +243,19 @@ a{color:inherit;text-decoration:none}
 .vc-tag{background:#2a2a2a;color:var(--acc);font-size:10px;
   padding:2px 7px;border-radius:3px;cursor:pointer;transition:.15s}
 .vc-tag:hover{background:var(--acc);color:#000}
+.vc-desc{font-size:11px;color:#777;margin-top:5px;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* 태그 그룹 섹션 */
+.tag-group{margin-bottom:40px}
+.tag-group-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px;
+  padding-bottom:8px;border-bottom:2px solid var(--acc)}
+.tag-group-hdr h3{font-size:16px;font-weight:700}
+.tag-group-hdr .tg-cnt{color:var(--sub);font-size:12px}
+.tag-group-hdr a{margin-left:auto;color:var(--acc);font-size:13px}
+/* 플레이어 설명 */
+.player-desc{background:#1a1a1a;border-left:3px solid var(--acc);
+  padding:12px 16px;margin-top:12px;border-radius:0 6px 6px 0;
+  color:#ccc;font-size:14px;line-height:1.7;white-space:pre-wrap}
 .no-thumb{background:#1a1a1a;display:flex;align-items:center;
   justify-content:center;color:#444;font-size:32px}
 /* PAGINATION */
@@ -318,33 +360,27 @@ _HOME = _BASE.replace('__BODY__', """
   </div>
   {% endif %}
 
-  <!-- 영상 -->
+  <!-- 태그 그룹 추천 -->
+  {% for grp in tag_groups %}
+  <div class="tag-group">
+    <div class="tag-group-hdr">
+      <h3>{{ grp.tag }}</h3>
+      <span class="tg-cnt">{{ grp.cnt }}개 영상</span>
+      <a href="/tag/{{ grp.tag|urlencode }}">전체 보기 →</a>
+    </div>
+    <div class="vid-grid">
+    {% for v in grp.vids %}{{ _vid_card(v) }}{% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+
+  <!-- 전체 랜덤 추천 -->
   <div class="section-hdr">
-    <h2>최신 추천</h2>
+    <h2>랜덤 추천</h2>
     <span class="cnt">{{ total }}개 영상</span>
   </div>
   <div class="vid-grid">
-  {% for v in videos %}
-    <a href="/video/{{ v.id }}" class="vid-card">
-      <div class="vc-thumb">
-        {% if v.thumb_ok %}
-        <img src="/thumb/{{ v.id }}" loading="lazy" alt="{{ v.name }}">
-        {% else %}
-        <div class="no-thumb" style="height:100%">🎬</div>
-        {% endif %}
-        {% if v.dur_str %}<span class="vc-dur">{{ v.dur_str }}</span>{% endif %}
-        <div class="vc-play"><div class="vc-play-ico">▶</div></div>
-      </div>
-      <div class="vc-info">
-        <div class="vc-title">{{ v.alias or v.name }}</div>
-        <div class="vc-tags">
-        {% for tg in v.tags[:4] %}
-          <span class="vc-tag">{{ tg }}</span>
-        {% endfor %}
-        </div>
-      </div>
-    </a>
-  {% endfor %}
+  {% for v in videos %}{{ _vid_card(v) }}{% endfor %}
   </div>
   {{ _pager(page, pages, '/') }}
 </div>
@@ -432,6 +468,9 @@ _VIDEO = _BASE.replace('__BODY__', """
           <a href="/tag/{{ tg|urlencode }}" class="tag-pill">{{ tg }}</a>
         {% endfor %}
         </div>
+        {% if v.description %}
+        <div class="player-desc">{{ v.description }}</div>
+        {% endif %}
         <button class="btn-open" onclick="openNative('{{ v.id }}')">
           📂 시스템 플레이어로 열기
         </button>
@@ -482,21 +521,26 @@ def _render(template, **ctx):
     from markupsafe import Markup
 
     def _vid_card(v):
+        from markupsafe import escape
         tags_html = ''.join(
-            f'<span class="vc-tag">{t}</span>'
+            f'<span class="vc-tag">{escape(t)}</span>'
             for t in v.get('tags', [])[:4])
         thumb = (f'<img src="/thumb/{v["id"]}" loading="lazy" alt="">'
                  if v.get('thumb_ok') else
                  '<div class="no-thumb" style="height:100%">🎬</div>')
         dur   = (f'<span class="vc-dur">{v["dur_str"]}</span>'
                  if v.get('dur_str') else '')
+        desc  = v.get('description', '') or ''
+        desc_html = (f'<div class="vc-desc">{escape(desc)}</div>' if desc else '')
+        title = escape(v.get("alias") or v["name"])
         return Markup(f'''
         <a href="/video/{v["id"]}" class="vid-card">
           <div class="vc-thumb">{thumb}{dur}
             <div class="vc-play"><div class="vc-play-ico">▶</div></div>
           </div>
           <div class="vc-info">
-            <div class="vc-title">{v.get("alias") or v["name"]}</div>
+            <div class="vc-title">{title}</div>
+            {desc_html}
             <div class="vc-tags">{tags_html}</div>
           </div>
         </a>''')
@@ -531,9 +575,9 @@ def index():
     pg    = int(request.args.get('page', 1))
     PER   = 40
     vids, total = _query_videos(offset=(pg-1)*PER, limit=PER)
-    tags  = _get_tags_with_stats()
-    c     = _conn()
-    # 각 영상에 태그 붙이기
+    tags        = _get_tags_with_stats()
+    tag_groups  = _get_tag_groups(limit_tags=6, vids_per_tag=6)
+    c           = _conn()
     for v in vids:
         v['id']      = _vid_id(v['path'])
         v['dur_str'] = _fmt_dur(v['duration'])
@@ -541,6 +585,7 @@ def index():
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
     return _render(_HOME, nav='home', videos=vids, tags=tags,
+                   tag_groups=tag_groups,
                    total=total, page=pg, pages=(total+PER-1)//PER)
 
 @app.route('/tags')

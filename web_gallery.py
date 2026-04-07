@@ -134,7 +134,7 @@ _BASE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{% block title %}VidSort{% endblock %}</title>
+<title>VidSort Gallery</title>
 <style>
 :root{--bg:#111;--bg2:#1a1a1a;--bg3:#222;--acc:#ff9000;--acc2:#e07800;
       --txt:#fff;--sub:#aaa;--brd:#333;--card:#1e1e1e}
@@ -267,7 +267,6 @@ a{color:inherit;text-decoration:none}
   .tag-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 }
 </style>
-{% block head %}{% endblock %}
 </head>
 <body>
 <header id="hdr">
@@ -282,18 +281,17 @@ a{color:inherit;text-decoration:none}
     <a href="/search" class="{{ 'act' if nav=='search' else '' }}">검색</a>
   </nav>
 </header>
-{% block body %}{% endblock %}
+__BODY__
 <script>
 function openNative(vid_id){
   fetch('/open/'+vid_id).then(()=>console.log('opened'));
 }
 </script>
-{% block scripts %}{% endblock %}
+__SCRIPTS__
 </body>
 </html>"""
 
-_HOME = _BASE.replace('{% block body %}{% endblock %}', """
-{% block body %}
+_HOME = _BASE.replace('__BODY__', """
 <div class="wrap">
   <!-- 카테고리 -->
   {% if tags %}
@@ -350,10 +348,9 @@ _HOME = _BASE.replace('{% block body %}{% endblock %}', """
   </div>
   {% include '_pager.html' ignore missing %}
 </div>
-{% endblock %}""")
+""").replace('__SCRIPTS__', '')
 
-_TAGS = _BASE.replace('{% block body %}{% endblock %}', """
-{% block body %}
+_TAGS = _BASE.replace('__BODY__', """
 <div class="wrap">
   <div class="section-hdr">
     <h2>카테고리 전체</h2>
@@ -376,10 +373,9 @@ _TAGS = _BASE.replace('{% block body %}{% endblock %}', """
   {% endfor %}
   </div>
 </div>
-{% endblock %}""")
+""").replace('__SCRIPTS__', '')
 
-_TAG_PAGE = _BASE.replace('{% block body %}{% endblock %}', """
-{% block body %}
+_TAG_PAGE = _BASE.replace('__BODY__', """
 <div class="wrap">
   <div class="breadcrumb">
     <a href="/">홈</a> › <a href="/tags">카테고리</a> › {{ tag }}
@@ -394,10 +390,9 @@ _TAG_PAGE = _BASE.replace('{% block body %}{% endblock %}', """
   </div>
   {{ _pager(page, pages, '/tag/'~tag) }}
 </div>
-{% endblock %}""")
+""").replace('__SCRIPTS__', '')
 
-_SEARCH = _BASE.replace('{% block body %}{% endblock %}', """
-{% block body %}
+_SEARCH = _BASE.replace('__BODY__', """
 <div class="wrap">
   {% if q %}
   <div class="section-hdr">
@@ -412,10 +407,9 @@ _SEARCH = _BASE.replace('{% block body %}{% endblock %}', """
   </div>
   {{ _pager(page, pages, '/search', q=q) }}
 </div>
-{% endblock %}""")
+""").replace('__SCRIPTS__', '')
 
-_VIDEO = _BASE.replace('{% block body %}{% endblock %}', """
-{% block body %}
+_VIDEO = _BASE.replace('__BODY__', """
 <div class="wrap">
   <div class="breadcrumb"><a href="/">홈</a> › 영상</div>
   <div style="display:grid;grid-template-columns:1fr 300px;gap:20px">
@@ -465,9 +459,7 @@ _VIDEO = _BASE.replace('{% block body %}{% endblock %}', """
     </aside>
   </div>
 </div>
-{% endblock %}
-{% block scripts %}
-<script>
+""").replace('__SCRIPTS__', '''<script>
 // 키보드 단축키
 document.addEventListener('keydown',function(e){
   const vp=document.getElementById('vp');
@@ -481,8 +473,7 @@ document.addEventListener('keydown',function(e){
                       else document.exitFullscreen()}
 });
 </script>
-{% endblock %}""")
-
+''')
 # ─────────────────────────────────────────────────
 #  공통 Jinja2 매크로
 # ─────────────────────────────────────────────────
@@ -623,27 +614,39 @@ def stream_video(vid_id):
     path = _get_path(vid_id)
     if not path: abort(404)
 
-    # Windows long path
-    lp = ('\\\\?\\' + str(Path(path).resolve())
-          if sys.platform == 'win32' else path)
+    # Windows long path (UNC prefix for >260 chars)
+    if sys.platform == 'win32':
+        try:
+            lp = '\\\\?\\' + str(Path(path).resolve())
+        except Exception:
+            lp = path
+    else:
+        lp = path
+
     if not os.path.exists(lp): abort(404)
 
-    size  = os.path.getsize(lp)
-    mime  = mimetypes.guess_type(path)[0] or 'video/mp4'
-    rng   = request.headers.get('Range')
+    try:
+        size = os.path.getsize(lp)
+    except Exception:
+        abort(500)
+
+    mime = mimetypes.guess_type(path)[0] or 'video/mp4'
+    rng  = request.headers.get('Range')
 
     if rng:
         try:
-            b1, b2 = rng.replace('bytes=', '').split('-')
-            b1 = int(b1)
-            b2 = int(b2) if b2.strip() else size - 1
+            raw = rng.replace('bytes=', '')
+            b1s, b2s = raw.split('-', 1)
+            b1 = int(b1s)
+            b2 = int(b2s) if b2s.strip() else size - 1
             b2 = min(b2, size - 1)
-        except Exception:
+            if b1 > b2: abort(416)
+        except (ValueError, TypeError):
             abort(416)
         length = b2 - b1 + 1
 
-        def gen(start=b1, end=b2):
-            with open(lp, 'rb') as f:
+        def gen(start=b1, end=b2, fp=lp):
+            with open(fp, 'rb') as f:
                 f.seek(start)
                 rem = end - start + 1
                 while rem > 0:
@@ -658,7 +661,15 @@ def stream_video(vid_id):
         rv.headers['Content-Length'] = str(length)
         return rv
 
-    rv = Response(open(lp, 'rb'), 200, mimetype=mime, direct_passthrough=True)
+    # 전체 파일 스트리밍
+    def full_gen(fp=lp):
+        with open(fp, 'rb') as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk: break
+                yield chunk
+
+    rv = Response(full_gen(), 200, mimetype=mime, direct_passthrough=True)
     rv.headers['Accept-Ranges']  = 'bytes'
     rv.headers['Content-Length'] = str(size)
     return rv

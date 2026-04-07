@@ -253,7 +253,9 @@ def _fetch_javdb(code: str) -> tuple:
 # ─────────────────────────────────────────────────
 #  Javbus (fallback)
 # ─────────────────────────────────────────────────
-JAVBUS_BASE = 'https://www.javbus.com'
+JAVBUS_BASE    = 'https://www.javbus.com'
+# 성인인증 쿠키 없으면 연령확인 페이지 HTML이 반환됨 → title/배우 파싱 실패
+_JAVBUS_COOKIES = {'over18': '1', 'age': '1'}
 
 def _fetch_javbus(code: str) -> tuple:
     """(meta_dict | None, error_str) 반환"""
@@ -262,13 +264,13 @@ def _fetch_javbus(code: str) -> tuple:
     try:
         url_direct = f'{JAVBUS_BASE}/{code}'
         print(f'[Javbus] GET {url_direct}', flush=True)
-        r = _get(url_direct, referer=JAVBUS_BASE)
+        r = _get(url_direct, referer=JAVBUS_BASE, cookies=_JAVBUS_COOKIES)
         print(f'[Javbus] status={r.status}', flush=True)
         if r.status != 200:
             # 검색 시도
             url_search = f'{JAVBUS_BASE}/search/{code}'
             print(f'[Javbus] 검색 GET {url_search}', flush=True)
-            r = _get(url_search, referer=JAVBUS_BASE)
+            r = _get(url_search, referer=JAVBUS_BASE, cookies=_JAVBUS_COOKIES)
             print(f'[Javbus] 검색 status={r.status}', flush=True)
             if r.status != 200:
                 return None, f'Javbus HTTP {r.status} (Cloudflare 차단 가능성)'
@@ -278,50 +280,77 @@ def _fetch_javbus(code: str) -> tuple:
                 return None, 'Javbus 검색결과 파싱 실패'
             href = a.get('href', '')
             time.sleep(0.8)
-            r    = _get(href, referer=url_search)
+            r    = _get(href, referer=url_search, cookies=_JAVBUS_COOKIES)
             if r.status != 200:
                 return None, f'Javbus 상세페이지 HTTP {r.status}'
 
         s = _soup(r.text)
+
+        # 연령확인 페이지 감지
+        if s.select_one('#age-check, .age-check, form[action*="age"]') or \
+           '연령' in (s.title.string or '') if s.title else False:
+            print(f'[Javbus] 연령확인 페이지 감지됨 (쿠키 미적용)', flush=True)
+            return None, 'Javbus 연령확인 페이지 (over18 쿠키 미적용)'
+
         result = {'code': code, 'source': 'javbus'}
 
-        title_el = s.select_one('h3')
-        result['title'] = title_el.get_text(strip=True).replace(code, '').strip() \
-                          if title_el else ''
+        # 제목: h3 → .title h3 → og:title 순으로 시도
+        title = ''
+        for sel in ('h3', '.title h3', 'h2.title', '.video-title'):
+            el = s.select_one(sel)
+            if el:
+                title = el.get_text(strip=True)
+                # 코드 자체가 제목에 들어있으면 제거
+                title = title.replace(code, '').replace(code.replace('-',''), '').strip()
+                if title:
+                    break
+        if not title:
+            meta_og = s.find('meta', property='og:title')
+            if meta_og:
+                title = meta_og.get('content', '').replace(code, '').strip()
+
+        # 파싱 진단
+        print(f'[Javbus] HTML 길이={len(r.text)}  title태그="{s.title.string if s.title else ""}"', flush=True)
+        result['title'] = title
 
         actresses, genres = [], []
         studio = date = ''
 
-        for p in s.select('.info p'):
+        for p in s.select('.info p, .movie-info p'):
             txt = p.get_text()
             links = [a.get_text(strip=True) for a in p.select('a')]
-            if any(k in txt for k in ('出演', '女優', '演員')):
-                actresses = links
-            elif any(k in txt for k in ('ジャンル', 'Genre', '類別')):
-                genres = links
-            elif any(k in txt for k in ('スタジオ', 'Studio', '片商')):
+            if any(k in txt for k in ('出演', '女優', '演員', 'Cast', '출연')):
+                actresses = [l for l in links if l]
+            elif any(k in txt for k in ('ジャンル', 'Genre', '類別', '장르')):
+                genres = [l for l in links if l]
+            elif any(k in txt for k in ('スタジオ', 'Studio', '片商', 'Maker')):
                 studio = links[0] if links else ''
-            elif any(k in txt for k in ('発売日', 'Date', '日期')):
+            elif any(k in txt for k in ('発売日', 'Date', '日期', 'Release')):
                 span = p.select_one('span')
                 date = span.get_text(strip=True) if span else ''
 
-        # 배우 별도 섹션
+        # 배우 별도 섹션 (여러 셀렉터 시도)
         if not actresses:
-            for box in s.select('.star-show .avatar-box, .actress-box .box'):
-                nm = box.select_one('span')
-                if nm:
-                    actresses.append(nm.get_text(strip=True))
+            for sel in ('.star-show .avatar-box', '.actress-box .box',
+                        '.star-box .actress-avatar', '[class*="actress"]'):
+                for box in s.select(sel):
+                    nm = box.select_one('span, p')
+                    if nm:
+                        actresses.append(nm.get_text(strip=True))
+                if actresses:
+                    break
 
-        cover = s.select_one('.screencap img, .bigImage img')
+        cover = s.select_one('.screencap img, .bigImage img, .video-cover img')
         result['actresses'] = actresses
         result['genres']    = genres
         result['studio']    = studio
         result['date']      = date
         result['cover_url'] = (cover.get('src') or cover.get('data-src', '')) if cover else ''
 
-        print(f'[Javbus] 제목="{result["title"]}" 배우={actresses}', flush=True)
+        print(f'[Javbus] 제목="{result["title"]}" 배우={actresses[:2]}', flush=True)
         if result['title']:
             return result, ''
+        return None, 'Javbus 제목 파싱 실패 (HTML 구조 변경 가능성)'
         return None, 'Javbus 제목 파싱 실패'
 
     except Exception as e:
@@ -396,20 +425,29 @@ def _lookup_offline(code: str) -> tuple:
 #  R18.dev  (FANZA 공식 JSON API — 스크래핑 없음)
 # ─────────────────────────────────────────────────
 R18_BASE = 'https://r18.dev/videos/vod/movies/detail/-/dvd_id={}/json/'
+_R18_HEADERS = {
+    'User-Agent':      _HEADERS['User-Agent'],
+    'Accept':          'application/json, text/plain, */*',
+    'Accept-Language': 'ja,ko;q=0.9,en;q=0.8',
+    'Referer':         'https://r18.dev/',
+    'Origin':          'https://r18.dev',
+}
 
 def _fetch_r18(code: str) -> tuple:
     """(meta_dict | None, error_str) 반환.
-    R18.dev 공식 JSON API — Cloudflare 없음, HTML 파싱 없음."""
+    R18.dev 공식 JSON API — HTML 파싱 없음."""
     try:
         url = R18_BASE.format(code)
         print(f'[R18.dev] GET {url}', flush=True)
 
-        if _HAS_HTTPX:
+        if _HAS_CFFI:
+            resp = _cffi_requests.get(url, headers=_R18_HEADERS,
+                                      impersonate='chrome110',
+                                      timeout=15, verify=False)
+            status = resp.status_code
+        elif _HAS_HTTPX:
             with httpx.Client(timeout=15, follow_redirects=True, verify=False) as c:
-                resp = c.get(url, headers={
-                    'User-Agent': 'Mozilla/5.0',
-                    'Accept': 'application/json',
-                })
+                resp = c.get(url, headers=_R18_HEADERS)
             status = resp.status_code
             if status != 200:
                 print(f'[R18.dev] HTTP {status}', flush=True)

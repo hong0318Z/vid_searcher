@@ -20,20 +20,25 @@
     --name       : 출력 파일명
 
 
-■ openai 패키지 포함 빌드 (AI 태그 기능 사용 시)
+■ 전체 기능 빌드 (AI 태그 + 웹 갤러리)
 ─────────────────────────────────────────────
   pyinstaller --onefile --windowed --name VidSort ^
-    --hidden-import openai ^
     --hidden-import httpx ^
+    --hidden-import flask ^
+    --hidden-import werkzeug ^
+    --hidden-import jinja2 ^
+    --hidden-import markupsafe ^
+    --add-data "web_gallery.py;." ^
     vidsort.py
 
   또는 spec 파일의 hiddenimports 항목에 추가:
-    hiddenimports=['openai', 'httpx'],
+    hiddenimports=['httpx','flask','werkzeug','jinja2','markupsafe'],
+    datas=[('web_gallery.py', '.')],
 
 
 ■ 빌드 전 체크리스트
 ─────────────────────────────────────────────
-  1. pip install pyinstaller pillow openai
+  1. pip install pyinstaller pillow httpx flask
   2. ffmpeg.exe / ffprobe.exe 를 dist 폴더에 같이 넣기
      (또는 시스템 PATH에 등록)
   3. vidsort.db, vidsort_cfg.json 은 exe 와 같은 폴더에 두기

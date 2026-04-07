@@ -447,18 +447,23 @@ class DB:
         return r[0] if r else None
 
     def get_random_paths(self, tag_filter=None, limit=60):
+        """랜덤 파일 목록. tag_filter 지정 시 AND 교집합 필터."""
         if tag_filter:
             ph = ','.join('?' * len(tag_filter))
             rows = self.conn.execute(
-                f"SELECT DISTINCT f.path FROM files f "
-                f"JOIN tags t ON f.path=t.path "
-                f"WHERE t.tag IN ({ph}) ORDER BY RANDOM() LIMIT ?",
-                [*tag_filter, limit]).fetchall()
+                f"SELECT f.path, f.name, f.duration, f.thumb_ok "
+                f"FROM files f "
+                f"WHERE (SELECT COUNT(DISTINCT t.tag) FROM tags t "
+                f"       WHERE t.path=f.path AND t.tag IN ({ph})) = ? "
+                f"ORDER BY RANDOM() LIMIT ?",
+                [*tag_filter, len(tag_filter), limit]).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT path FROM files ORDER BY RANDOM() LIMIT ?",
+                "SELECT path, name, duration, thumb_ok FROM files "
+                "ORDER BY RANDOM() LIMIT ?",
                 (limit,)).fetchall()
-        return [r[0] for r in rows]
+        return [{'path': r[0], 'name': r[1], 'duration': r[2], 'thumb_ok': r[3]}
+                for r in rows]
 
     def get_tags(self,path):
         return [r[0] for r in self.conn.execute(
@@ -1422,140 +1427,25 @@ class VidSort(tk.Tk):
                  ).pack(anchor='e', padx=14)
         ttk.Button(win, text='닫기', command=win.destroy).pack(pady=8)
 
-    # ── 갤러리 뷰 ───────────────────────────────
+    # ── 갤러리 뷰 (웹 브라우저) ──────────────────
     def _gallery_view(self):
-        win = tk.Toplevel(self); win.title('🌐 갤러리 뷰')
-        win.configure(bg='#0d0d14'); win.geometry('1100x750')
-        win.minsize(800, 500)
+        # EXE(frozen) 실행 시 exe 폴더를 sys.path에 추가해 web_gallery.py 탐색
+        exe_dir = str(Path(sys.executable).parent
+                      if getattr(sys, 'frozen', False)
+                      else Path(__file__).parent)
+        if exe_dir not in sys.path:
+            sys.path.insert(0, exe_dir)
+        try:
+            import importlib, web_gallery
+            importlib.reload(web_gallery)   # 재실행 시 최신 반영
+            web_gallery.start(DB_PATH, THUMB_DIR, port=8765)
+        except ImportError:
+            messagebox.showerror('오류',
+                'web_gallery.py 를 찾을 수 없습니다.\n'
+                f'아래 경로에 파일을 넣어주세요:\n{exe_dir}')
+        except Exception as e:
+            messagebox.showerror('웹 갤러리 오류', str(e))
 
-        # ── 왼쪽 태그 패널 ──
-        left = tk.Frame(win, bg='#0a0a12', width=220)
-        left.pack(side='left', fill='y'); left.pack_propagate(False)
-
-        tk.Label(left, text='태그 필터', bg='#0a0a12', fg='#555',
-                 font=('Consolas', 9, 'bold')).pack(anchor='w', padx=10, pady=(12,4))
-
-        tag_cv  = tk.Canvas(left, bg='#0a0a12', highlightthickness=0)
-        tag_vsb = ttk.Scrollbar(left, orient='vertical', command=tag_cv.yview)
-        tag_cv.configure(yscrollcommand=tag_vsb.set)
-        tag_vsb.pack(side='right', fill='y')
-        tag_cv.pack(fill='both', expand=True)
-        tag_inner = tk.Frame(tag_cv, bg='#0a0a12')
-        tag_cv.create_window((0,0), window=tag_inner, anchor='nw')
-        tag_inner.bind('<Configure>',
-            lambda e: tag_cv.configure(scrollregion=tag_cv.bbox('all')))
-        tag_cv.bind('<MouseWheel>',
-            lambda e: tag_cv.yview_scroll(-1*(e.delta//120), 'units'))
-
-        # ── 오른쪽 영상 그리드 ──
-        right = tk.Frame(win, bg='#0d0d14')
-        right.pack(side='left', fill='both', expand=True)
-
-        top_bar = tk.Frame(right, bg='#0d0d14'); top_bar.pack(fill='x', padx=8, pady=6)
-        tk.Label(top_bar, text='🌐 갤러리 뷰', bg='#0d0d14', fg='#7c6ff7',
-                 font=('Consolas', 11, 'bold')).pack(side='left')
-        lbl_cnt = tk.Label(top_bar, text='', bg='#0d0d14', fg='#555',
-                           font=('Consolas', 8)); lbl_cnt.pack(side='left', padx=8)
-        ttk.Button(top_bar, text='🔀 랜덤 새로고침',
-                   command=lambda: load_grid()).pack(side='right', padx=4)
-
-        grid_cv  = tk.Canvas(right, bg='#0d0d14', highlightthickness=0)
-        grid_vsb = ttk.Scrollbar(right, orient='vertical', command=grid_cv.yview)
-        grid_cv.configure(yscrollcommand=grid_vsb.set)
-        grid_vsb.pack(side='right', fill='y')
-        grid_cv.pack(fill='both', expand=True)
-        grid_inner = tk.Frame(grid_cv, bg='#0d0d14')
-        grid_cv.create_window((0,0), window=grid_inner, anchor='nw')
-        grid_inner.bind('<Configure>',
-            lambda e: grid_cv.configure(scrollregion=grid_cv.bbox('all')))
-        grid_cv.bind('<MouseWheel>',
-            lambda e: grid_cv.yview_scroll(-1*(e.delta//120), 'units'))
-
-        # 태그 체크박스 변수
-        tags_data = self.db.all_tags_with_desc()
-        tag_vars  = {}
-        _ph_refs  = []   # GC 방지
-
-        TW, TH = 160, 100
-        COLS   = 5
-
-        def load_grid():
-            for w in grid_inner.winfo_children(): w.destroy()
-            _ph_refs.clear()
-            selected = [t for t, v in tag_vars.items() if v.get()]
-            paths = self.db.get_random_paths(
-                tag_filter=selected if selected else None, limit=60)
-            lbl_cnt.config(text=f'{len(paths)}개 표시')
-            for idx, path in enumerate(paths):
-                card = tk.Frame(grid_inner, bg='#13131f',
-                                width=TW+16, height=TH+44)
-                card.grid(row=idx//COLS, column=idx%COLS,
-                          padx=4, pady=4, sticky='nw')
-                card.grid_propagate(False)
-                img_lbl = tk.Label(card, bg='#0a0a14')
-                img_lbl.place(x=8, y=4, width=TW, height=TH)
-                tk.Label(card, text=Path(path).stem[:24],
-                         bg='#13131f', fg='#888',
-                         font=('Consolas', 7), wraplength=TW+4,
-                         justify='left').place(x=4, y=TH+6, width=TW+8)
-
-                def _lt(p=path, lbl=img_lbl):
-                    tf = thumb_file(p)
-                    if not tf.exists(): return
-                    try:
-                        img = Image.open(tf).resize((TW, TH), Image.LANCZOS)
-                        ph  = ImageTk.PhotoImage(img)
-                        _ph_refs.append(ph)
-                        lbl.config(image=ph)
-                    except: pass
-                threading.Thread(target=_lt, daemon=True).start()
-
-                for w in (card, img_lbl):
-                    w.bind('<Double-Button-1>', lambda e, p=path: self._open(p))
-
-        # 태그 사이드바 구성
-        ttk.Button(tag_inner, text='  전체 (필터 없음)',
-                   command=lambda: ([v.set(False) for v in tag_vars.values()],
-                                    load_grid())
-                   ).pack(fill='x', padx=4, pady=(0,4))
-
-        _tag_ph = []  # 태그 썸네일 GC 방지
-        for tag, desc in tags_data:
-            var = tk.BooleanVar(value=False)
-            tag_vars[tag] = var
-
-            row = tk.Frame(tag_inner, bg='#1a1a28', cursor='hand2')
-            row.pack(fill='x', padx=4, pady=1)
-
-            # 썸네일
-            th_lbl = tk.Label(row, bg='#0a0a14', width=64, height=40)
-            th_lbl.pack(side='left', padx=(4,4), pady=4)
-
-            def _load_tag_thumb(t=tag, lbl=th_lbl):
-                p = self.db.get_random_path_for_tag(t)
-                if not p: return
-                tf = thumb_file(p)
-                if not tf.exists(): return
-                try:
-                    img = Image.open(tf).resize((64, 40), Image.LANCZOS)
-                    ph  = ImageTk.PhotoImage(img)
-                    _tag_ph.append(ph)
-                    lbl.config(image=ph)
-                except: pass
-            threading.Thread(target=_load_tag_thumb, daemon=True).start()
-
-            txt_f = tk.Frame(row, bg='#1a1a28')
-            txt_f.pack(side='left', fill='x', expand=True, padx=(0,4))
-            tk.Checkbutton(txt_f, text=tag, variable=var,
-                           bg='#1a1a28', fg='#dcdcf0',
-                           activebackground='#1a1a28', selectcolor='#1a1a28',
-                           font=('Consolas', 9, 'bold'), cursor='hand2',
-                           command=load_grid).pack(anchor='w')
-            if desc:
-                tk.Label(txt_f, text=desc[:30], bg='#1a1a28', fg='#555',
-                         font=('Consolas', 7), wraplength=130).pack(anchor='w')
-
-        load_grid()
 
     def _show_daily_pick(self):
         """태그/별칭 없는 파일 중 랜덤 100개 — 오늘의 추천"""

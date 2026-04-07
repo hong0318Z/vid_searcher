@@ -115,6 +115,7 @@ def _get_tag_groups(limit_tags=6, vids_per_tag=6):
             groups.append({'tag': tag, 'cnt': cnt, 'vids': vids})
     return groups
 
+
 def _get_related(vid_id, limit=16):
     path = _get_path(vid_id)
     if not path: return []

@@ -445,6 +445,10 @@ def _fetch_r18(code: str) -> tuple:
                                       impersonate='chrome110',
                                       timeout=15, verify=False)
             status = resp.status_code
+            if status != 200:
+                print(f'[R18.dev] HTTP {status}', flush=True)
+                return None, f'R18.dev HTTP {status}'
+            data = resp.json()
         elif _HAS_HTTPX:
             with httpx.Client(timeout=15, follow_redirects=True, verify=False) as c:
                 resp = c.get(url, headers=_R18_HEADERS)

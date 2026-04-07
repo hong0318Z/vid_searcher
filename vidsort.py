@@ -3048,64 +3048,105 @@ class VidSort(tk.Tk):
         client = self._get_llm_client()
         if not client: return
 
-        pending_count = self.db.count_pending_jav()
-
         win = tk.Toplevel(self)
         win.title('🎬 JAV 메타데이터 처리')
         win.configure(bg='#0d0d14')
-        win.geometry('500x440')
-        win.resizable(False, True)
+        win.geometry('560x620')
+        win.resizable(True, True)
         win.grab_set()
 
+        # ── 상단 헤더 ──
         tk.Label(win, text='🎬  JAV 자동 처리',
                  bg='#0d0d14', fg='#dcdcf0',
-                 font=('Consolas', 12, 'bold')).pack(pady=(16, 4))
-        tk.Label(win,
-                 text='alias=없음 + 태그=없음 + 미처리 파일에서 AV 코드를 추출,\n'
-                      'JavDB 스크래핑 → LLM 한글 번역 → alias/설명/태그 자동 등록',
-                 bg='#0d0d14', fg='#555', font=('Consolas', 8),
-                 justify='center').pack(pady=(0, 8))
+                 font=('Consolas', 12, 'bold')).pack(pady=(14, 2))
 
-        info_f = tk.Frame(win, bg='#1a1a28')
-        info_f.pack(fill='x', padx=20, pady=4)
-        lbl_count = tk.Label(info_f, text=f'처리 대상: {pending_count}개 파일',
-                             bg='#1a1a28', fg='#7c6ff7',
-                             font=('Consolas', 10, 'bold'))
-        lbl_count.pack(pady=8)
+        # ── 발견된 파일 목록 섹션 ──
+        hdr_f = tk.Frame(win, bg='#0d0d14'); hdr_f.pack(fill='x', padx=16, pady=(6, 2))
+        lbl_found = tk.Label(hdr_f, text='스캔 중...', bg='#0d0d14', fg='#7c6ff7',
+                             font=('Consolas', 9, 'bold'))
+        lbl_found.pack(side='left')
+        tk.Label(hdr_f, text='(AV 코드 추출 가능한 미처리 파일)',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 8)).pack(side='left', padx=6)
 
-        batch_f = tk.Frame(win, bg='#0d0d14')
-        batch_f.pack(pady=4)
-        tk.Label(batch_f, text='배치 크기:', bg='#0d0d14', fg='#aaa',
-                 font=('Consolas', 9)).pack(side='left', padx=4)
-        batch_var = tk.StringVar(value='20')
-        ttk.Spinbox(batch_f, from_=1, to=500, textvariable=batch_var,
-                    width=6, font=('Consolas', 9)).pack(side='left')
+        list_f = tk.Frame(win, bg='#0d0d14'); list_f.pack(fill='both', expand=True, padx=16, pady=(0, 4))
+        lb_vsb = ttk.Scrollbar(list_f, orient='vertical')
+        lb_vsb.pack(side='right', fill='y')
+        lb = tk.Listbox(list_f, bg='#0d0d12', fg='#bbb', font=('Consolas', 9),
+                        selectbackground='#7c6ff7', activestyle='none',
+                        borderwidth=0, highlightthickness=1, highlightcolor='#2a2a3d',
+                        yscrollcommand=lb_vsb.set)
+        lb.pack(fill='both', expand=True)
+        lb_vsb.config(command=lb.yview)
 
-        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
+        # ── 처리 개수 + 시작 ──
+        ctrl_f = tk.Frame(win, bg='#0d0d14'); ctrl_f.pack(fill='x', padx=16, pady=4)
+        tk.Label(ctrl_f, text='처리할 개수:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        batch_var = tk.StringVar(value='10')
+        ttk.Spinbox(ctrl_f, from_=1, to=999, textvariable=batch_var,
+                    width=5, font=('Consolas', 9)).pack(side='left', padx=6)
+        tk.Label(ctrl_f, text='개  (스크래핑+LLM 각 ~5초, 10개≈50초)',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 8)).pack(side='left')
 
-        lbl_prog = tk.Label(win, text='대기 중', bg='#0d0d14', fg='#555',
-                            font=('Consolas', 9))
-        lbl_prog.pack()
-        pb = ttk.Progressbar(win, length=440, mode='determinate', maximum=1)
-        pb.pack(padx=24, pady=4)
-        lbl_file = tk.Label(win, text='', bg='#0d0d14', fg='#444',
-                            font=('Consolas', 8), wraplength=460)
-        lbl_file.pack()
-        lbl_result = tk.Label(win, text='', bg='#0d0d14', fg='#4dffb4',
-                              font=('Consolas', 8), wraplength=460, justify='left')
-        lbl_result.pack(pady=4, padx=20)
+        start_btn = ttk.Button(ctrl_f, text='▶ 시작', style='Acc.TButton')
+        start_btn.pack(side='right')
 
-        btn_f = tk.Frame(win, bg='#0d0d14')
-        btn_f.pack(pady=8)
-        start_btn = ttk.Button(btn_f, text='▶ 시작', style='Acc.TButton')
-        start_btn.pack(side='left', padx=4)
-        ttk.Button(btn_f, text='닫기', command=win.destroy).pack(side='left', padx=4)
+        # ── 진행 바 ──
+        ttk.Separator(win).pack(fill='x', padx=12, pady=4)
+        prog_f = tk.Frame(win, bg='#0d0d14'); prog_f.pack(fill='x', padx=16)
+        lbl_prog = tk.Label(prog_f, text='대기 중', bg='#0d0d14', fg='#555',
+                            font=('Consolas', 8))
+        lbl_prog.pack(side='left')
+        lbl_cur = tk.Label(prog_f, text='', bg='#0d0d14', fg='#444',
+                           font=('Consolas', 8))
+        lbl_cur.pack(side='left', padx=8)
+        pb = ttk.Progressbar(win, length=520, mode='determinate', maximum=1)
+        pb.pack(padx=16, pady=2)
 
-        _stop  = threading.Event()
-        _stats = {'matched': 0, 'skipped': 0}
+        # ── 완료 목록 ──
+        ttk.Separator(win).pack(fill='x', padx=12, pady=4)
+        tk.Label(win, text='완료 목록', bg='#0d0d14', fg='#555',
+                 font=('Consolas', 8, 'bold')).pack(anchor='w', padx=16)
+        done_f = tk.Frame(win, bg='#0d0d14'); done_f.pack(fill='both', padx=16, pady=(2, 4))
+        done_vsb = ttk.Scrollbar(done_f, orient='vertical')
+        done_vsb.pack(side='right', fill='y')
+        done_lb = tk.Listbox(done_f, bg='#091209', fg='#4dffb4', font=('Consolas', 8),
+                             height=5, activestyle='none', borderwidth=0,
+                             highlightthickness=1, highlightcolor='#2a2a3d',
+                             yscrollcommand=done_vsb.set)
+        done_lb.pack(fill='both', expand=True)
+        done_vsb.config(command=done_lb.yview)
 
+        # ── 닫기 ──
+        ttk.Button(win, text='닫기', command=win.destroy).pack(pady=(2, 10))
+
+        _stop      = threading.Event()
+        _candidates: list = []   # [(path, name, code), ...]
+
+        # ── 1단계: 스캔 (백그라운드) ──────────────────
+        def scan_worker():
+            rows = self.db.get_pending_jav(limit=9999)
+            found = []
+            for row in rows:
+                code = jav_scraper.extract_code(row['name'])
+                if code:
+                    found.append((row['path'], row['name'], code))
+            _candidates.clear()
+            _candidates.extend(found)
+
+            def _update_list():
+                lb.delete(0, 'end')
+                for _, name, code in found:
+                    lb.insert('end', f'  {code}  │  {name}')
+                lbl_found.config(text=f'발견된 AV 파일: {len(found)}개')
+                start_btn.config(state='normal' if found else 'disabled')
+            win.after(0, _update_list)
+
+        start_btn.config(state='disabled')
+        threading.Thread(target=scan_worker, daemon=True).start()
+
+        # ── LLM 번역 헬퍼 ─────────────────────────────
         def _translate(meta: dict):
-            """LLM으로 제목 한글 번역 + 설명 생성. (title_ko, description) 반환"""
             actresses_str = ', '.join(meta.get('actresses', [])[:4]) or '불명'
             genres_str    = ', '.join(meta.get('genres', [])[:5]) or '불명'
             code          = meta.get('code', '')
@@ -3135,86 +3176,95 @@ class VidSort(tk.Tk):
             data = json.loads(raw.strip())
             return data.get('title_ko', orig_title), data.get('description', '')
 
+        # ── 2단계: 처리 (백그라운드) ──────────────────
         def worker():
             try:
                 limit = max(1, int(batch_var.get()))
             except ValueError:
-                limit = 20
-            rows  = self.db.get_pending_jav(limit)
-            total = len(rows)
+                limit = 10
+            targets = _candidates[:limit]
+            total   = len(targets)
             if total == 0:
-                win.after(0, lambda: (
-                    lbl_prog.config(text='처리할 파일이 없습니다.', fg='#ffd166'),
-                ))
+                win.after(0, lambda: lbl_prog.config(text='처리할 파일 없음', fg='#ffd166'))
                 return
 
             win.after(0, lambda t=total: pb.configure(maximum=max(t, 1)))
+            done_idx = []   # 완료된 candidates 인덱스
 
-            for i, row in enumerate(rows):
+            for i, (path, name, code) in enumerate(targets):
                 if _stop.is_set():
                     break
-                path = row['path']
-                name = row['name']
-                n    = i + 1
+                n = i + 1
 
                 def _upd(n=n, total=total, name=name):
                     pb['value'] = n
                     lbl_prog.config(text=f'{n} / {total}', fg='#7c6ff7')
-                    lbl_file.config(text=name)
+                    lbl_cur.config(text=name[:50])
                 win.after(0, _upd)
 
-                # 1) AV 코드 추출
-                code = jav_scraper.extract_code(name)
-                if not code:
-                    self.db.set_jav_done(path)
-                    _stats['skipped'] += 1
-                    continue
-
-                # 2) JavDB 스크래핑
+                # 스크래핑
                 meta = jav_scraper.fetch_meta(code)
                 if not meta or not meta.get('title'):
-                    self.db.set_jav_done(path)
-                    _stats['skipped'] += 1
+                    # 실패 → jav_done 안 찍음, 리스트에 표시만 변경
+                    fail_msg = f'❌ {code}  스크래핑 실패'
+                    def _fail(idx=i, msg=fail_msg):
+                        try:
+                            lb.itemconfig(idx, fg='#ff6b6b')
+                            lb.delete(idx)
+                            lb.insert(idx, f'  ❌ {msg}')
+                            lb.itemconfig(idx, fg='#ff6b6b')
+                        except Exception:
+                            pass
+                    win.after(0, _fail)
                     continue
 
-                # 3) LLM 번역
+                # LLM 번역
                 try:
                     title_ko, description = _translate(meta)
                 except Exception:
                     title_ko    = meta.get('title', code)
                     description = ''
 
-                # 4) alias / description 저장
+                # DB 저장
                 alias = f"{title_ko} [{code}]"
                 self.db.set_alias(path, alias)
                 if description:
                     self.db.set_description(path, description)
-
-                # 5) 배우(최대 4명) + 장르(최대 3개) 태그
                 for actress in meta.get('actresses', [])[:4]:
                     if actress:
                         self.db.add_tag(path, actress)
                 for genre in meta.get('genres', [])[:3]:
                     if genre:
                         self.db.add_tag(path, genre)
-
-                # 6) 완료 마킹
                 self.db.set_jav_done(path)
-                _stats['matched'] += 1
 
-                ok_msg = f'✅ {code}: {title_ko}'
-                win.after(0, lambda msg=ok_msg: lbl_result.config(text=msg, fg='#4dffb4'))
+                done_idx.append(i)
+                ok_entry = f'✅ [{code}]  {title_ko}'
+                def _ok(idx=i, entry=ok_entry):
+                    try:
+                        # 대기 목록에서 시각적으로 회색으로
+                        lb.itemconfig(idx, fg='#3a5a3a')
+                    except Exception:
+                        pass
+                    done_lb.insert('end', entry)
+                    done_lb.see('end')
+                win.after(0, _ok)
+
+            # 완료 후 처리된 항목을 candidates에서 제거
+            for idx in sorted(done_idx, reverse=True):
+                if idx < len(_candidates):
+                    _candidates.pop(idx)
 
             def _finish():
                 try:
-                    new_count = self.db.count_pending_jav()
-                    lbl_count.config(text=f'처리 대상: {new_count}개 파일')
-                    lbl_prog.config(text='완료', fg='#4dffb4')
-                    lbl_result.config(
-                        text=(f"처리 완료  ✅ 적용 {_stats['matched']}건  "
-                              f"⏭ 미매칭/스킵 {_stats['skipped']}건"),
-                        fg='#4dffb4')
-                    start_btn.config(state='normal')
+                    # 리스트 갱신 (성공 항목 제거)
+                    lb.delete(0, 'end')
+                    for _, name, code in _candidates:
+                        lb.insert('end', f'  {code}  │  {name}')
+                    lbl_found.config(text=f'발견된 AV 파일: {len(_candidates)}개')
+                    lbl_prog.config(text=f'완료  ✅ {len(done_idx)}건 처리', fg='#4dffb4')
+                    lbl_cur.config(text='')
+                    start_btn.config(state='normal' if _candidates else 'disabled')
                     self._reload_sidebar()
                     self._reload()
                 except Exception:
@@ -3224,8 +3274,6 @@ class VidSort(tk.Tk):
         def start():
             start_btn.config(state='disabled')
             _stop.clear()
-            _stats['matched'] = _stats['skipped'] = 0
-            lbl_result.config(text='')
             threading.Thread(target=worker, daemon=True).start()
 
         start_btn.config(command=start)

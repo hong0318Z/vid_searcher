@@ -156,6 +156,14 @@ class DB:
         """)
         self.conn.commit()
 
+        # ── tag_meta 테이블 (태그 설명) ───────────────
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS tag_meta(
+                tag TEXT PRIMARY KEY, description TEXT DEFAULT ''
+            )
+        """)
+        self.conn.commit()
+
         # ── ext 컬럼 마이그레이션 ──────────────────
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(files)").fetchall()]
         if 'ext' not in cols:
@@ -352,6 +360,40 @@ class DB:
     def all_tags(self):
         return [r[0] for r in self.conn.execute(
             "SELECT DISTINCT tag FROM tags ORDER BY tag").fetchall()]
+
+    def all_tags_with_desc(self):
+        tags = self.all_tags()
+        descs = dict(self.conn.execute(
+            "SELECT tag, description FROM tag_meta").fetchall())
+        return [(t, descs.get(t, '')) for t in tags]
+
+    def set_tag_desc(self, tag, desc):
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO tag_meta(tag, description) VALUES(?,?)",
+                (tag, desc))
+            self.conn.commit()
+
+    def get_random_path_for_tag(self, tag):
+        r = self.conn.execute(
+            "SELECT f.path FROM files f JOIN tags t ON f.path=t.path "
+            "WHERE t.tag=? AND f.thumb_ok=1 ORDER BY RANDOM() LIMIT 1",
+            (tag,)).fetchone()
+        return r[0] if r else None
+
+    def get_random_paths(self, tag_filter=None, limit=60):
+        if tag_filter:
+            ph = ','.join('?' * len(tag_filter))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT f.path FROM files f "
+                f"JOIN tags t ON f.path=t.path "
+                f"WHERE t.tag IN ({ph}) ORDER BY RANDOM() LIMIT ?",
+                [*tag_filter, limit]).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT path FROM files ORDER BY RANDOM() LIMIT ?",
+                (limit,)).fetchall()
+        return [r[0] for r in rows]
 
     def get_tags(self,path):
         return [r[0] for r in self.conn.execute(
@@ -1011,13 +1053,21 @@ class VidSort(tk.Tk):
         ttk.Button(self.sidebar,text='전체 보기',
                    command=self._show_all).pack(fill='x',padx=6,pady=(0,4))
         ttk.Button(self.sidebar,text='🎲 오늘의 추천',
-                   command=self._show_daily_pick).pack(fill='x',padx=6,pady=(0,6))
+                   command=self._show_daily_pick).pack(fill='x',padx=6,pady=(0,2))
+        ttk.Button(self.sidebar,text='🔄 전체 폴더 재스캔',
+                   command=self._rescan_all_folders).pack(fill='x',padx=6,pady=(0,2))
+        ttk.Button(self.sidebar,text='🌐 갤러리 뷰',
+                   command=self._gallery_view).pack(fill='x',padx=6,pady=(0,6))
 
         ttk.Separator(self.sidebar).pack(fill='x',padx=8,pady=4)
 
         # 태그 버튼 패널
-        tk.Label(self.sidebar,text='🏷  태그',bg='#0a0a12',fg='#555',
-                 font=('Consolas',9,'bold')).pack(anchor='w',padx=10,pady=(4,4))
+        tag_hdr = tk.Frame(self.sidebar, bg='#0a0a12')
+        tag_hdr.pack(fill='x', padx=6, pady=(4,2))
+        tk.Label(tag_hdr,text='🏷  태그',bg='#0a0a12',fg='#555',
+                 font=('Consolas',9,'bold')).pack(side='left',padx=4)
+        ttk.Button(tag_hdr,text='관리',
+                   command=self._tag_manage_dlg).pack(side='right')
 
         # 스크롤 가능한 태그 버튼 영역
         tag_outer = tk.Frame(self.sidebar,bg='#0a0a12')
@@ -1139,6 +1189,291 @@ class VidSort(tk.Tk):
         self.fl.selection_clear(0,'end')
         self._offset=0
         self._reload()
+
+    # ── 전체 폴더 재스캔 ────────────────────────
+    def _rescan_all_folders(self):
+        folders = self.db.all_folders()
+        if not folders:
+            messagebox.showinfo('재스캔', '등록된 폴더가 없습니다.'); return
+
+        win = tk.Toplevel(self); win.title('🔄 전체 폴더 재스캔')
+        win.configure(bg='#0d0d14'); win.geometry('460x200')
+        win.resizable(False, False); win.attributes('-topmost', True)
+
+        tk.Label(win, text='전체 폴더 재스캔 중...',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(18, 4))
+        lbl_cur = tk.Label(win, text='', bg='#0d0d14', fg='#7c6ff7',
+                           font=('Consolas', 9)); lbl_cur.pack()
+        pb = ttk.Progressbar(win, length=400, mode='determinate',
+                             maximum=len(folders)); pb.pack(pady=8, padx=24)
+        lbl_stat = tk.Label(win, text='', bg='#0d0d14', fg='#555',
+                            font=('Consolas', 8)); lbl_stat.pack()
+
+        total_added = [0]; total_deleted = [0]
+
+        def worker():
+            for i, folder in enumerate(folders):
+                win.after(0, lambda f=folder, n=i: (
+                    lbl_cur.config(text=f'📁 {Path(f).name}'),
+                    pb.configure(value=n)))
+
+                db_rows  = self.db.get_all_for_thumbs(folder=folder)
+                db_paths = {v['path'] for v in db_rows}
+                found = set(); count = 0
+
+                for root, dirs, files in os.walk(longpath(folder)):
+                    dirs[:] = [d for d in dirs
+                                if not d.startswith('.') and d != '__pycache__']
+                    for fname in files:
+                        ext = Path(fname).suffix.lower()
+                        if ext not in VIDEO_EXTS: continue
+                        clean = str(Path(root) / fname).replace('\\\\?\\', '')
+                        found.add(clean)
+                        if clean in db_paths: continue
+                        try:
+                            st = os.stat(longpath(clean))
+                            self.db.upsert({
+                                'path': clean, 'name': fname, 'alias': '',
+                                'size': st.st_size, 'mtime': st.st_mtime,
+                                'duration': 0, 'width': 0, 'height': 0,
+                                'thumb_ok': 0, 'folder': folder,
+                                'added_at': time.time()
+                            })
+                            count += 1
+                        except: pass
+
+                deleted = db_paths - found
+                for p in deleted: self.db.remove(p)
+                total_added[0]   += count
+                total_deleted[0] += len(deleted)
+                win.after(0, lambda a=count, d=len(deleted):
+                          lbl_stat.config(text=f'추가 {a}개 / 삭제 {d}개'))
+
+            def done():
+                try: win.destroy()
+                except: pass
+                self._reload_sidebar(); self._reload()
+                messagebox.showinfo('재스캔 완료',
+                    f'폴더 {len(folders)}개 완료\n'
+                    f'추가: {total_added[0]}개  삭제: {total_deleted[0]}개')
+            win.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── 태그 관리 (설명 편집) ────────────────────
+    def _tag_manage_dlg(self):
+        win = tk.Toplevel(self); win.title('🏷 태그 관리')
+        win.configure(bg='#0d0d14'); win.geometry('540x480')
+        win.resizable(True, True); win.minsize(420, 360); win.grab_set()
+
+        tk.Label(win, text='태그 관리',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(14, 6))
+
+        main_f = tk.Frame(win, bg='#0d0d14')
+        main_f.pack(fill='both', expand=True, padx=12, pady=4)
+
+        # ── 왼쪽: 태그 목록 ──
+        left_f = tk.Frame(main_f, bg='#0d0d14', width=180)
+        left_f.pack(side='left', fill='y', padx=(0, 8))
+        left_f.pack_propagate(False)
+        tk.Label(left_f, text='태그 목록', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        lb_sb = ttk.Scrollbar(left_f, orient='vertical')
+        lb = tk.Listbox(left_f, bg='#1a1a28', fg='#dcdcf0',
+                        selectbackground='#7c6ff7', selectforeground='#fff',
+                        font=('Consolas', 10), bd=0, highlightthickness=0,
+                        activestyle='none', yscrollcommand=lb_sb.set)
+        lb_sb.configure(command=lb.yview)
+        lb_sb.pack(side='right', fill='y')
+        lb.pack(fill='both', expand=True)
+
+        # ── 오른쪽: 설명 편집 ──
+        right_f = tk.Frame(main_f, bg='#0d0d14')
+        right_f.pack(side='left', fill='both', expand=True)
+        tk.Label(right_f, text='선택된 태그', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        lbl_tag = tk.Label(right_f, text='—', bg='#0d0d14', fg='#7c6ff7',
+                           font=('Consolas', 12, 'bold'))
+        lbl_tag.pack(anchor='w', pady=(0, 8))
+        tk.Label(right_f, text='설명', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        desc_txt = tk.Text(right_f, bg='#1a1a28', fg='#dcdcf0',
+                           font=('Consolas', 10), height=7, relief='flat',
+                           bd=0, highlightthickness=1,
+                           highlightbackground='#2a2a3d',
+                           insertbackground='#7c6ff7', wrap='word')
+        desc_txt.pack(fill='both', expand=True, pady=(2, 6))
+        save_btn = ttk.Button(right_f, text='💾 설명 저장',
+                              style='Acc.TButton', state='disabled')
+        save_btn.pack(anchor='e')
+
+        tags_data = list(self.db.all_tags_with_desc())
+        cur = [None]
+
+        for tag, _ in tags_data:
+            lb.insert('end', '  ' + tag)
+
+        def on_select(e=None):
+            sel = lb.curselection()
+            if not sel: return
+            idx = sel[0]; tag, desc = tags_data[idx]
+            cur[0] = idx
+            lbl_tag.config(text=tag)
+            desc_txt.delete('1.0', 'end')
+            desc_txt.insert('1.0', desc)
+            save_btn.config(state='normal')
+
+        def save_desc():
+            if cur[0] is None: return
+            tag, _ = tags_data[cur[0]]
+            desc = desc_txt.get('1.0', 'end').strip()
+            self.db.set_tag_desc(tag, desc)
+            tags_data[cur[0]] = (tag, desc)
+
+        lb.bind('<<ListboxSelect>>', on_select)
+        save_btn.config(command=save_desc)
+
+        tk.Label(win, text=f'총 {len(tags_data)}개 태그',
+                 bg='#0d0d14', fg='#444', font=('Consolas', 8)
+                 ).pack(anchor='e', padx=14)
+        ttk.Button(win, text='닫기', command=win.destroy).pack(pady=8)
+
+    # ── 갤러리 뷰 ───────────────────────────────
+    def _gallery_view(self):
+        win = tk.Toplevel(self); win.title('🌐 갤러리 뷰')
+        win.configure(bg='#0d0d14'); win.geometry('1100x750')
+        win.minsize(800, 500)
+
+        # ── 왼쪽 태그 패널 ──
+        left = tk.Frame(win, bg='#0a0a12', width=220)
+        left.pack(side='left', fill='y'); left.pack_propagate(False)
+
+        tk.Label(left, text='태그 필터', bg='#0a0a12', fg='#555',
+                 font=('Consolas', 9, 'bold')).pack(anchor='w', padx=10, pady=(12,4))
+
+        tag_cv  = tk.Canvas(left, bg='#0a0a12', highlightthickness=0)
+        tag_vsb = ttk.Scrollbar(left, orient='vertical', command=tag_cv.yview)
+        tag_cv.configure(yscrollcommand=tag_vsb.set)
+        tag_vsb.pack(side='right', fill='y')
+        tag_cv.pack(fill='both', expand=True)
+        tag_inner = tk.Frame(tag_cv, bg='#0a0a12')
+        tag_cv.create_window((0,0), window=tag_inner, anchor='nw')
+        tag_inner.bind('<Configure>',
+            lambda e: tag_cv.configure(scrollregion=tag_cv.bbox('all')))
+        tag_cv.bind('<MouseWheel>',
+            lambda e: tag_cv.yview_scroll(-1*(e.delta//120), 'units'))
+
+        # ── 오른쪽 영상 그리드 ──
+        right = tk.Frame(win, bg='#0d0d14')
+        right.pack(side='left', fill='both', expand=True)
+
+        top_bar = tk.Frame(right, bg='#0d0d14'); top_bar.pack(fill='x', padx=8, pady=6)
+        tk.Label(top_bar, text='🌐 갤러리 뷰', bg='#0d0d14', fg='#7c6ff7',
+                 font=('Consolas', 11, 'bold')).pack(side='left')
+        lbl_cnt = tk.Label(top_bar, text='', bg='#0d0d14', fg='#555',
+                           font=('Consolas', 8)); lbl_cnt.pack(side='left', padx=8)
+        ttk.Button(top_bar, text='🔀 랜덤 새로고침',
+                   command=lambda: load_grid()).pack(side='right', padx=4)
+
+        grid_cv  = tk.Canvas(right, bg='#0d0d14', highlightthickness=0)
+        grid_vsb = ttk.Scrollbar(right, orient='vertical', command=grid_cv.yview)
+        grid_cv.configure(yscrollcommand=grid_vsb.set)
+        grid_vsb.pack(side='right', fill='y')
+        grid_cv.pack(fill='both', expand=True)
+        grid_inner = tk.Frame(grid_cv, bg='#0d0d14')
+        grid_cv.create_window((0,0), window=grid_inner, anchor='nw')
+        grid_inner.bind('<Configure>',
+            lambda e: grid_cv.configure(scrollregion=grid_cv.bbox('all')))
+        grid_cv.bind('<MouseWheel>',
+            lambda e: grid_cv.yview_scroll(-1*(e.delta//120), 'units'))
+
+        # 태그 체크박스 변수
+        tags_data = self.db.all_tags_with_desc()
+        tag_vars  = {}
+        _ph_refs  = []   # GC 방지
+
+        TW, TH = 160, 100
+        COLS   = 5
+
+        def load_grid():
+            for w in grid_inner.winfo_children(): w.destroy()
+            _ph_refs.clear()
+            selected = [t for t, v in tag_vars.items() if v.get()]
+            paths = self.db.get_random_paths(
+                tag_filter=selected if selected else None, limit=60)
+            lbl_cnt.config(text=f'{len(paths)}개 표시')
+            for idx, path in enumerate(paths):
+                card = tk.Frame(grid_inner, bg='#13131f',
+                                width=TW+16, height=TH+44)
+                card.grid(row=idx//COLS, column=idx%COLS,
+                          padx=4, pady=4, sticky='nw')
+                card.grid_propagate(False)
+                img_lbl = tk.Label(card, bg='#0a0a14')
+                img_lbl.place(x=8, y=4, width=TW, height=TH)
+                tk.Label(card, text=Path(path).stem[:24],
+                         bg='#13131f', fg='#888',
+                         font=('Consolas', 7), wraplength=TW+4,
+                         justify='left').place(x=4, y=TH+6, width=TW+8)
+
+                def _lt(p=path, lbl=img_lbl):
+                    tf = thumb_file(p)
+                    if not tf.exists(): return
+                    try:
+                        img = Image.open(tf).resize((TW, TH), Image.LANCZOS)
+                        ph  = ImageTk.PhotoImage(img)
+                        _ph_refs.append(ph)
+                        lbl.config(image=ph)
+                    except: pass
+                threading.Thread(target=_lt, daemon=True).start()
+
+                for w in (card, img_lbl):
+                    w.bind('<Double-Button-1>', lambda e, p=path: self._open(p))
+
+        # 태그 사이드바 구성
+        ttk.Button(tag_inner, text='  전체 (필터 없음)',
+                   command=lambda: ([v.set(False) for v in tag_vars.values()],
+                                    load_grid())
+                   ).pack(fill='x', padx=4, pady=(0,4))
+
+        _tag_ph = []  # 태그 썸네일 GC 방지
+        for tag, desc in tags_data:
+            var = tk.BooleanVar(value=False)
+            tag_vars[tag] = var
+
+            row = tk.Frame(tag_inner, bg='#1a1a28', cursor='hand2')
+            row.pack(fill='x', padx=4, pady=1)
+
+            # 썸네일
+            th_lbl = tk.Label(row, bg='#0a0a14', width=64, height=40)
+            th_lbl.pack(side='left', padx=(4,4), pady=4)
+
+            def _load_tag_thumb(t=tag, lbl=th_lbl):
+                p = self.db.get_random_path_for_tag(t)
+                if not p: return
+                tf = thumb_file(p)
+                if not tf.exists(): return
+                try:
+                    img = Image.open(tf).resize((64, 40), Image.LANCZOS)
+                    ph  = ImageTk.PhotoImage(img)
+                    _tag_ph.append(ph)
+                    lbl.config(image=ph)
+                except: pass
+            threading.Thread(target=_load_tag_thumb, daemon=True).start()
+
+            txt_f = tk.Frame(row, bg='#1a1a28')
+            txt_f.pack(side='left', fill='x', expand=True, padx=(0,4))
+            tk.Checkbutton(txt_f, text=tag, variable=var,
+                           bg='#1a1a28', fg='#dcdcf0',
+                           activebackground='#1a1a28', selectcolor='#1a1a28',
+                           font=('Consolas', 9, 'bold'), cursor='hand2',
+                           command=load_grid).pack(anchor='w')
+            if desc:
+                tk.Label(txt_f, text=desc[:30], bg='#1a1a28', fg='#555',
+                         font=('Consolas', 7), wraplength=130).pack(anchor='w')
+
+        load_grid()
 
     def _show_daily_pick(self):
         """태그/별칭 없는 파일 중 랜덤 100개 — 오늘의 추천"""

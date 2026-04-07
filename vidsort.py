@@ -392,20 +392,25 @@ class DB:
         """).fetchone()[0]
 
     def get_jav_done_list(self, search: str = '', limit: int = 500):
-        """JAV 관련 파일 목록 (완료 + 스크래핑 대기 모두)"""
+        """JAV 관련 파일 목록 (스크래핑 데이터 있는 것만)
+        jav_raw!='' (스크래핑 완료/대기) 또는 jav_done=1+alias에 [코드] 패턴 (LLM 완료)"""
+        base_cond = """(
+            (f.jav_raw IS NOT NULL AND f.jav_raw != '')
+            OR (f.jav_done = 1 AND f.alias LIKE '%[%-%]%')
+        )"""
         if search:
             lq = f'%{search.lower()}%'
-            rows = self.conn.execute("""
+            rows = self.conn.execute(f"""
                 SELECT f.* FROM files f
-                WHERE (f.jav_done = 1 OR (f.jav_raw IS NOT NULL AND f.jav_raw != ''))
+                WHERE {base_cond}
                   AND (LOWER(f.alias) LIKE ? OR LOWER(f.name) LIKE ?)
                 ORDER BY f.jav_done DESC, f.alias COLLATE NOCASE
                 LIMIT ?
             """, (lq, lq, limit)).fetchall()
         else:
-            rows = self.conn.execute("""
+            rows = self.conn.execute(f"""
                 SELECT f.* FROM files f
-                WHERE (f.jav_done = 1 OR (f.jav_raw IS NOT NULL AND f.jav_raw != ''))
+                WHERE {base_cond}
                 ORDER BY f.jav_done DESC, f.alias COLLATE NOCASE
                 LIMIT ?
             """, (limit,)).fetchall()
@@ -421,8 +426,8 @@ class DB:
             self.conn.commit()
 
     def count_jav_done(self, search: str = ''):
-        """JAV 관련 파일 수 (완료 + 스크래핑 대기)"""
-        cond = "(jav_done=1 OR (jav_raw IS NOT NULL AND jav_raw != ''))"
+        """JAV 관련 파일 수"""
+        cond = "((jav_raw IS NOT NULL AND jav_raw != '') OR (jav_done=1 AND alias LIKE '%[%-%]%'))"
         if search:
             lq = f'%{search.lower()}%'
             return self.conn.execute(
@@ -3236,15 +3241,26 @@ class VidSort(tk.Tk):
         '近親相姦':'근친','寝取られ':'네토라레','催眠':'최면',
         '痴漢':'치한','野外':'야외','車':'차안','温泉':'온천',
         '4K':'4K','高画質':'고화질','VR':'VR','独占':'독점',
-        # 영어
+        # 영어 (R18.dev 장르 포함)
         'Creampie':'질내사정','Blowjob':'펠라','Handjob':'핸드잡',
-        'Lesbian':'레즈','Anal':'항문','Squirting':'스쿼팅',
+        'Lesbian':'레즈','Anal':'항문','Anal Play':'항문','Squirting':'스쿼팅',
         'Big Tits':'거유','Tiny Tits':'빈유','Amateur':'아마추어',
-        'Mature':'성숙녀','Milf':'밀프','Cosplay':'코스프레',
-        'Uniform':'교복','Nurse':'간호사','Office Lady':'OL',
-        'Threesome':'3P','Orgy':'난교','Outdoor':'야외',
+        'Mature':'성숙녀','Mature Woman':'성숙녀','Milf':'밀프',
+        'Married Woman':'기혼녀','Housewife':'주부','Wife':'아내',
+        'Cheating':'바람','Cheating Wife':'불륜','Cuckold':'NTR',
+        'Drama':'드라마','Beautiful Girl':'미녀','Slut':'음란녀',
+        'Nymphomaniac':'색녀','Embarrassment':'굴욕','Club Hostess & Sex Worker':'접객업',
+        'Princess & Mademoiselle':'아가씨','Featured Actress':'간판배우',
+        'Black Man':'흑인','Interracial':'인터레이셜','Gal':'갸루',
+        'Cosplay':'코스프레','Uniform':'교복','Nurse':'간호사','Office Lady':'OL',
+        'Threesome':'3P','Orgy':'난교','Outdoor':'야외','Group Sex':'집단',
         'POV':'POV','Uncensored':'무수정','Censored':'검열',
         'HD':'HD','4K':'4K','VR':'VR',
+        'Solowork':'단독','Debut':'데뷔','Best':'베스트','Planning':'기획',
+        'Facials':'얼굴사정','Golden Shower':'황금샤워','Enema':'관장',
+        'Double Penetration':'이중삽입','Bondage':'긴박','S&M':'SM',
+        'Schoolgirl':'여고생','College Girl':'여대생','Teacher':'교사',
+        'Step Family':'의가족','Incest':'근친','Taboo':'금기',
     }
 
     def _jav_process_dlg(self):
@@ -3526,6 +3542,36 @@ class VidSort(tk.Tk):
         lbl_l_cur  = tk.Label(l_pf, text='', bg='#0d0d14', fg='#444', font=('Consolas', 8))
         lbl_l_cur.pack(side='left', padx=8)
 
+        # ── LLM 응답 디버그 영역 ──
+        dbg_frame = tk.Frame(tab2, bg='#0d0d14')
+        dbg_frame.pack(fill='x', padx=10, pady=(2, 0))
+        dbg_toggle = tk.BooleanVar(value=False)
+        dbg_txt_frame = tk.Frame(tab2, bg='#0d0d14')
+        dbg_vsb = ttk.Scrollbar(dbg_txt_frame, orient='vertical')
+        dbg_vsb.pack(side='right', fill='y')
+        dbg_txt = tk.Text(dbg_txt_frame, bg='#0a0a12', fg='#7c6ff7',
+                          font=('Consolas', 7), height=6, relief='flat',
+                          bd=0, highlightthickness=0, state='disabled',
+                          yscrollcommand=dbg_vsb.set, wrap='none')
+        dbg_txt.pack(fill='both', expand=True)
+        dbg_vsb.config(command=dbg_txt.yview)
+
+        def _toggle_dbg():
+            if dbg_toggle.get():
+                dbg_txt_frame.pack(fill='x', padx=10, pady=(0, 2))
+            else:
+                dbg_txt_frame.pack_forget()
+        tk.Checkbutton(dbg_frame, text='LLM 응답 보기 (디버그)',
+                       variable=dbg_toggle, command=_toggle_dbg,
+                       bg='#0d0d14', fg='#555', selectcolor='#0d0d14',
+                       font=('Consolas', 8)).pack(side='left')
+
+        def _update_dbg(text):
+            dbg_txt.config(state='normal')
+            dbg_txt.delete('1.0', 'end')
+            dbg_txt.insert('1.0', text)
+            dbg_txt.config(state='disabled')
+
         _llm_rows: list = []  # DB rows with jav_raw
 
         def _scan_tab2():
@@ -3622,15 +3668,23 @@ class VidSort(tk.Tk):
                     _log['tok_in']  += tok_in
                     _log['tok_out'] += tok_out
                     win.after(0, _refresh_log)
+                    win.after(0, lambda r=raw: _update_dbg(r))
 
-                    # JSON 파싱
-                    if raw.startswith('```'):
-                        parts = raw.split('```')
-                        raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
-                    result_map = json.loads(raw.strip())
+                    # JSON 파싱 (```json ... ``` 블록 제거)
+                    raw_stripped = raw.strip()
+                    if '```' in raw_stripped:
+                        parts = raw_stripped.split('```')
+                        raw_stripped = parts[1].lstrip('json').strip() if len(parts) > 1 else raw_stripped
+                    # { 로 시작하는 부분만 추출
+                    brace = raw_stripped.find('{')
+                    if brace > 0:
+                        raw_stripped = raw_stripped[brace:]
+                    result_map = json.loads(raw_stripped)
                 except Exception as e:
                     err_msg = str(e)
-                    win.after(0, lambda m=err_msg: lbl_l_cur.config(text=f'LLM 오류: {m[:60]}', fg='#ff6b6b'))
+                    win.after(0, lambda m=err_msg, r=raw if 'raw' in dir() else '':
+                              (_update_dbg(f'[오류] {m}\n\n{r}'),
+                               lbl_l_cur.config(text=f'LLM 오류: {m[:80]}', fg='#ff6b6b')))
                     continue
 
                 # DB 저장
@@ -3648,16 +3702,16 @@ class VidSort(tk.Tk):
                     if desc:
                         self.db.set_description(path, desc)
 
-                    # 장르: 정적 매핑 우선, LLM 결과 보완
+                    # 태그 적용
                     self.db.add_tag(path, 'JAV')
+                    # 배우 (LLM 번역 우선, 없으면 원문)
                     for a in (actresses_ko or meta.get('actresses', []))[:4]:
                         if a: self.db.add_tag(path, a)
-                    genres_final = []
-                    for g in meta.get('genres', [])[:4]:
-                        mapped = self._GENRE_MAP.get(g)
-                        genres_final.append(mapped if mapped else g)
-                    for g in (genres_ko or genres_final)[:3]:
-                        if g: self.db.add_tag(path, g)
+                    # 장르: genres_ko + 원문 genres 모두 _GENRE_MAP 통과
+                    raw_genres = genres_ko if genres_ko else meta.get('genres', [])
+                    for g in raw_genres[:4]:
+                        mapped = self._GENRE_MAP.get(g, g)
+                        if mapped: self.db.add_tag(path, mapped)
 
                     self.db.set_jav_done(path)
                     done_count += 1

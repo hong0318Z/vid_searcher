@@ -3526,10 +3526,10 @@ class VidSort(tk.Tk):
         lc_f = tk.Frame(tab2, bg='#0d0d14'); lc_f.pack(fill='x', padx=10, pady=4)
         tk.Label(lc_f, text='LLM 1회 처리량:', bg='#0d0d14', fg='#aaa',
                  font=('Consolas', 9)).pack(side='left')
-        llm_batch = tk.StringVar(value='20')
-        ttk.Spinbox(lc_f, from_=1, to=100, textvariable=llm_batch,
+        llm_batch = tk.StringVar(value='8')
+        ttk.Spinbox(lc_f, from_=1, to=50, textvariable=llm_batch,
                     width=4, font=('Consolas', 9)).pack(side='left', padx=6)
-        tk.Label(lc_f, text='개/회  (전체 일괄 처리)',
+        tk.Label(lc_f, text='개/회  (8 권장, 4096 토큰 제한)',
                  bg='#0d0d14', fg='#444', font=('Consolas', 8)).pack(side='left')
         llm_btn = ttk.Button(lc_f, text='▶ LLM 번역', style='Acc.TButton')
         llm_btn.pack(side='right')
@@ -3658,11 +3658,13 @@ class VidSort(tk.Tk):
                     '"2":{...}}'
                 )
 
+                raw = ''
                 try:
+                    # max_tokens: 배치 1개당 약 350토큰 (한국어 제목+설명+배우+장르)
                     raw, tok_in, tok_out = client._chat_tracked(
                         [{"role": "system", "content": sys_msg},
                          {"role": "user",   "content": user_msg}],
-                        max_tokens=600 + len(batch) * 80
+                        max_tokens=min(4000, max(800, len(batch) * 350))
                     )
                     _log['calls'] += 1
                     _log['tok_in']  += tok_in
@@ -3679,10 +3681,28 @@ class VidSort(tk.Tk):
                     brace = raw_stripped.find('{')
                     if brace > 0:
                         raw_stripped = raw_stripped[brace:]
-                    result_map = json.loads(raw_stripped)
+
+                    # 잘린 JSON 복구: 완전한 항목만 개별 추출
+                    try:
+                        result_map = json.loads(raw_stripped)
+                    except json.JSONDecodeError:
+                        # "N": {...} 패턴을 개별 파싱
+                        import re as _re
+                        result_map = {}
+                        for m in _re.finditer(r'"(\d+)"\s*:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\})', raw_stripped):
+                            try:
+                                result_map[m.group(1)] = json.loads(m.group(2))
+                            except Exception:
+                                pass
+                        if not result_map:
+                            raise  # 복구 실패 시 원래 예외 발생
+                        win.after(0, lambda n=len(result_map):
+                                  lbl_l_cur.config(
+                                      text=f'⚠ JSON 잘림 — {n}개만 복구됨', fg='#ffd166'))
+
                 except Exception as e:
                     err_msg = str(e)
-                    win.after(0, lambda m=err_msg, r=raw if 'raw' in dir() else '':
+                    win.after(0, lambda m=err_msg, r=raw:
                               (_update_dbg(f'[오류] {m}\n\n{r}'),
                                lbl_l_cur.config(text=f'LLM 오류: {m[:80]}', fg='#ff6b6b')))
                     continue

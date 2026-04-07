@@ -3,7 +3,7 @@ JavDB / Javbus 스크래퍼
 AV 코드 → 제목·배우·장르·설명 조회
 """
 
-import re, time
+import re, time, random
 from pathlib import Path
 
 try:
@@ -18,13 +18,22 @@ try:
 except ImportError:
     _HAS_BS4 = False
 
+# 브라우저에 최대한 가깝게 — Cloudflare 봇 차단 우회
 _HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) '
         'Chrome/124.0.0.0 Safari/537.36'),
-    'Accept-Language': 'ja,ko;q=0.9,en-US;q=0.8',
-    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ja,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection':      'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest':  'document',
+    'Sec-Fetch-Mode':  'navigate',
+    'Sec-Fetch-Site':  'none',
+    'Sec-Fetch-User':  '?1',
+    'Cache-Control':   'max-age=0',
 }
 
 # ─────────────────────────────────────────────────
@@ -55,28 +64,54 @@ def extract_code(filename: str) -> str | None:
     return f'{letters}-{digits}'
 
 # ─────────────────────────────────────────────────
-#  HTTP
+#  HTTP  (재시도 + verify=False로 TLS 지문 문제 우회)
 # ─────────────────────────────────────────────────
-def _get(url: str, timeout: int = 15, cookies: dict | None = None):
-    if _HAS_HTTPX:
-        with httpx.Client(timeout=timeout, follow_redirects=True,
-                          headers=_HEADERS, cookies=cookies or {}) as c:
-            r = c.get(url)
-            r.status = r.status_code
-            return r
-    import urllib.request, urllib.parse
-    req = urllib.request.Request(url, headers=_HEADERS)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            class _R:
-                status = resp.status
-                text   = resp.read().decode('utf-8', errors='replace')
-            return _R()
-    except Exception as e:
-        class _Err:
-            status = 0
-            text   = ''
-        return _Err()
+def _get(url: str, timeout: int = 20, cookies: dict | None = None,
+         referer: str = ''):
+    headers = dict(_HEADERS)
+    if referer:
+        headers['Referer'] = referer
+
+    last_exc = None
+    for attempt in range(3):
+        if attempt:
+            wait = 2 ** attempt + random.uniform(0, 1)
+            print(f'[_get] 재시도 {attempt}/2 ({wait:.1f}s 후) {url}', flush=True)
+            time.sleep(wait)
+        try:
+            if _HAS_HTTPX:
+                with httpx.Client(
+                        timeout=timeout,
+                        follow_redirects=True,
+                        headers=headers,
+                        cookies=cookies or {},
+                        verify=False,          # Cloudflare TLS 지문 차단 우회
+                ) as c:
+                    r = c.get(url)
+                    r.status = r.status_code
+                    return r
+            else:
+                import urllib.request, ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode    = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                    class _R:
+                        status = resp.status
+                        text   = resp.read().decode('utf-8', errors='replace')
+                    return _R()
+        except Exception as e:
+            last_exc = e
+            print(f'[_get] 시도{attempt+1} 실패: {type(e).__name__}: {e}', flush=True)
+
+    # 모든 재시도 실패
+    class _Err:
+        status = 0
+        text   = ''
+        _err   = last_exc
+    print(f'[_get] 최종 실패: {last_exc}', flush=True)
+    return _Err()
 
 def _soup(html: str):
     return BeautifulSoup(html, 'html.parser')
@@ -192,25 +227,25 @@ def _fetch_javbus(code: str) -> tuple:
     try:
         url_direct = f'{JAVBUS_BASE}/{code}'
         print(f'[Javbus] GET {url_direct}', flush=True)
-        r = _get(url_direct)
+        r = _get(url_direct, referer=JAVBUS_BASE)
         print(f'[Javbus] status={r.status}', flush=True)
         if r.status != 200:
             # 검색 시도
             url_search = f'{JAVBUS_BASE}/search/{code}'
             print(f'[Javbus] 검색 GET {url_search}', flush=True)
-            r = _get(url_search)
+            r = _get(url_search, referer=JAVBUS_BASE)
             print(f'[Javbus] 검색 status={r.status}', flush=True)
             if r.status != 200:
-                return None, f'Javbus HTTP {r.status}'
+                return None, f'Javbus HTTP {r.status} (Cloudflare 차단 가능성)'
             s    = _soup(r.text)
             a    = s.select_one('.movie-box')
             if not a:
-                return None
+                return None, 'Javbus 검색결과 파싱 실패'
             href = a.get('href', '')
-            time.sleep(0.5)
-            r    = _get(href)
+            time.sleep(0.8)
+            r    = _get(href, referer=url_search)
             if r.status != 200:
-                return None
+                return None, f'Javbus 상세페이지 HTTP {r.status}'
 
         s = _soup(r.text)
         result = {'code': code, 'source': 'javbus'}

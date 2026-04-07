@@ -1884,6 +1884,7 @@ class VidSort(tk.Tk):
         m.add_command(label='🗂  탐색기에서 열기', command=lambda:self._reveal(path))
         m.add_separator()
         m.add_command(label='✏  별칭 편집',        command=lambda:self._alias_dlg(path))
+        m.add_command(label='📝  설명 편집',        command=lambda:self._desc_dlg(path))
         m.add_command(label='🏷  태그 편집',        command=lambda:self._tag_dlg(paths))
         m.add_command(label='🤖  AI 자동 태그',    command=lambda:self._llm_auto_tag_paths(paths))
         m.add_separator()
@@ -1916,6 +1917,50 @@ class VidSort(tk.Tk):
         bf=tk.Frame(win,bg='#0d0d14'); bf.pack(pady=8)
         ttk.Button(bf,text='저장',style='Acc.TButton',command=save).pack(side='left',padx=4)
         ttk.Button(bf,text='취소',command=win.destroy).pack(side='left',padx=4)
+
+    # ── DESCRIPTION EDITOR ──────────────────────
+    def _desc_dlg(self, path):
+        v = next((x for x in self._videos if x['path'] == path), None)
+        if not v: return
+        # DB에서 현재 설명 직접 조회
+        row = self.db.conn.execute(
+            "SELECT description FROM files WHERE path=?", (path,)).fetchone()
+        cur_desc = (row[0] or '') if row else ''
+
+        win = tk.Toplevel(self); win.title('설명 편집')
+        win.configure(bg='#0d0d14'); win.geometry('480x300')
+        win.resizable(True, True); win.grab_set()
+
+        tk.Label(win, text=v.get('alias') or v['name'],
+                 bg='#0d0d14', fg='#777', font=('Consolas', 8),
+                 wraplength=440).pack(anchor='w', padx=16, pady=(12, 4))
+
+        tk.Label(win, text='설명:',
+                 bg='#0d0d14', fg='#aaa', font=('Consolas', 9)
+                 ).pack(anchor='w', padx=16)
+
+        txt_f = tk.Frame(win, bg='#0d0d14')
+        txt_f.pack(fill='both', expand=True, padx=16, pady=(2, 4))
+        vsb = ttk.Scrollbar(txt_f, orient='vertical')
+        vsb.pack(side='right', fill='y')
+        txt = tk.Text(txt_f, bg='#1a1a28', fg='#dcdcf0',
+                      insertbackground='#dcdcf0',
+                      font=('Consolas', 10), wrap='word',
+                      borderwidth=0, yscrollcommand=vsb.set)
+        vsb.config(command=txt.yview)
+        txt.pack(fill='both', expand=True)
+        txt.insert('1.0', cur_desc)
+        txt.focus_set()
+
+        def save():
+            desc = txt.get('1.0', 'end').strip()
+            self.db.set_description(path, desc)
+            win.destroy()
+
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=6)
+        ttk.Button(bf, text='저장', style='Acc.TButton', command=save).pack(side='left', padx=4)
+        ttk.Button(bf, text='취소', command=win.destroy).pack(side='left', padx=4)
+        win.bind('<Control-Return>', lambda e: save())
 
     # ── TAG EDITOR ──────────────────────────────
     def _tag_dlg(self, paths):
@@ -2950,11 +2995,16 @@ class VidSort(tk.Tk):
                  bg='#0d0d14', fg='#dcdcf0',
                  font=('Consolas', 12, 'bold')).pack(pady=(14, 2))
 
-        # 오프라인 DB 상태
+        # 오프라인 DB + 엔진 상태
         offline_stat = jav_scraper.offline_db_stats()
         offline_color = '#4dffb4' if '없음' not in offline_stat else '#555'
         tk.Label(win, text=offline_stat,
                  bg='#0d0d14', fg=offline_color,
+                 font=('Consolas', 8)).pack(pady=(0, 2))
+        engine_stat = jav_scraper.scraper_engine()
+        engine_color = '#4dffb4' if 'curl_cffi' in engine_stat else '#ffd166'
+        tk.Label(win, text=f'HTTP 엔진: {engine_stat}',
+                 bg='#0d0d14', fg=engine_color,
                  font=('Consolas', 8)).pack(pady=(0, 4))
         tk.Label(win,
                  text='조회 순서: ① 오프라인 JSON  ② R18.dev API  ③ JavDB  ④ Javbus',
@@ -3129,6 +3179,7 @@ class VidSort(tk.Tk):
                 self.db.set_alias(path, alias)
                 if description:
                     self.db.set_description(path, description)
+                self.db.add_tag(path, 'JAV')
                 for actress in meta.get('actresses', [])[:4]:
                     if actress:
                         self.db.add_tag(path, actress)

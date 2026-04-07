@@ -24,6 +24,12 @@ import re, time, random, json
 from pathlib import Path
 
 try:
+    from curl_cffi import requests as _cffi_requests
+    _HAS_CFFI = True
+except ImportError:
+    _HAS_CFFI = False
+
+try:
     import httpx
     _HAS_HTTPX = True
 except ImportError:
@@ -96,13 +102,25 @@ def _get(url: str, timeout: int = 20, cookies: dict | None = None,
             print(f'[_get] 재시도 {attempt}/2 ({wait:.1f}s 후) {url}', flush=True)
             time.sleep(wait)
         try:
-            if _HAS_HTTPX:
+            # curl_cffi: Chrome TLS 지문 완벽 복제 → Cloudflare 우회 최강
+            if _HAS_CFFI:
+                r = _cffi_requests.get(
+                    url, headers=headers,
+                    cookies=cookies or {},
+                    timeout=timeout,
+                    impersonate='chrome110',
+                    allow_redirects=True,
+                    verify=False,
+                )
+                r.status = r.status_code
+                return r
+            elif _HAS_HTTPX:
                 with httpx.Client(
                         timeout=timeout,
                         follow_redirects=True,
                         headers=headers,
                         cookies=cookies or {},
-                        verify=False,          # Cloudflare TLS 지문 차단 우회
+                        verify=False,
                 ) as c:
                     r = c.get(url)
                     r.status = r.status_code
@@ -510,13 +528,19 @@ def offline_db_stats() -> str:
     return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
 
 def check_deps() -> list[str]:
-    """누락 의존성 목록 반환"""
+    """누락 의존성 목록 반환 (필수만)"""
     missing = []
-    if not _HAS_HTTPX:
+    if not _HAS_HTTPX and not _HAS_CFFI:
         missing.append('httpx')
     if not _HAS_BS4:
         missing.append('beautifulsoup4')
     return missing
+
+def scraper_engine() -> str:
+    """현재 사용 중인 HTTP 엔진 이름"""
+    if _HAS_CFFI:  return 'curl_cffi (Cloudflare 우회 최강)'
+    if _HAS_HTTPX: return 'httpx (기본)'
+    return 'urllib (내장)'
 
 # ─────────────────────────────────────────────────
 #  CLI 테스트:  python jav_scraper.py PRED-123

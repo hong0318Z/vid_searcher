@@ -245,8 +245,9 @@ class DB:
         if search:
             lq = f'%{search.lower()}%'
             where.append(
-                "(LOWER(f.name) LIKE ? OR LOWER(f.alias) LIKE ? OR LOWER(t.tag) LIKE ?)")
-            params += [lq, lq, lq]
+                "(LOWER(f.name) LIKE ? OR LOWER(f.alias) LIKE ? "
+                "OR LOWER(t.tag) LIKE ? OR LOWER(f.folder) LIKE ?)")
+            params += [lq, lq, lq, lq]
         if tag:
             where.append("t.tag = ?")
             params.append(tag)
@@ -390,7 +391,27 @@ class DB:
               AND f.jav_raw IS NOT NULL AND f.jav_raw != ''
         """).fetchone()[0]
 
-    def reset_jav(self, path):
+    def get_jav_done_list(self, search: str = '', limit: int = 500):
+        """jav_done=1 인 JAV 처리 완료 파일 목록"""
+        if search:
+            lq = f'%{search.lower()}%'
+            rows = self.conn.execute("""
+                SELECT f.* FROM files f
+                WHERE f.jav_done = 1
+                  AND (LOWER(f.alias) LIKE ? OR LOWER(f.name) LIKE ?)
+                ORDER BY f.alias COLLATE NOCASE
+                LIMIT ?
+            """, (lq, lq, limit)).fetchall()
+        else:
+            rows = self.conn.execute("""
+                SELECT f.* FROM files f
+                WHERE f.jav_done = 1
+                ORDER BY f.alias COLLATE NOCASE
+                LIMIT ?
+            """, (limit,)).fetchall()
+        return self._dicts(rows)
+
+    def reset_jav(self, path: str):
         """JAV 처리 완전 초기화 — 스크래핑 전 상태로 되돌림"""
         with self.lock:
             self.conn.execute(
@@ -399,31 +420,14 @@ class DB:
             self.conn.execute("DELETE FROM tags WHERE path=?", (path,))
             self.conn.commit()
 
-    def get_jav_done(self, search='', limit=300, offset=0):
-        """jav_done=1 완료 파일 목록 (JAV DB 뷰어용)"""
-        if search:
-            rows = self.conn.execute("""
-                SELECT f.* FROM files f
-                WHERE f.jav_done=1
-                  AND (f.alias LIKE ? OR f.name LIKE ?)
-                ORDER BY f.alias
-                LIMIT ? OFFSET ?
-            """, (f'%{search}%', f'%{search}%', limit, offset)).fetchall()
-        else:
-            rows = self.conn.execute("""
-                SELECT f.* FROM files f
-                WHERE f.jav_done=1
-                ORDER BY f.alias
-                LIMIT ? OFFSET ?
-            """, (limit, offset)).fetchall()
-        return self._dicts(rows)
-
-    def count_jav_done(self, search=''):
+    def count_jav_done(self, search: str = ''):
         """jav_done=1 개수"""
         if search:
+            lq = f'%{search.lower()}%'
             return self.conn.execute(
-                "SELECT COUNT(*) FROM files WHERE jav_done=1 AND (alias LIKE ? OR name LIKE ?)",
-                (f'%{search}%', f'%{search}%')).fetchone()[0]
+                "SELECT COUNT(*) FROM files WHERE jav_done=1 "
+                "AND (LOWER(alias) LIKE ? OR LOWER(name) LIKE ?)",
+                (lq, lq)).fetchone()[0]
         return self.conn.execute(
             "SELECT COUNT(*) FROM files WHERE jav_done=1").fetchone()[0]
 
@@ -1270,7 +1274,7 @@ class VidSort(tk.Tk):
                    command=self._llm_pattern_dlg).pack(fill='x',pady=1)
         ttk.Button(ai_f,text='🎬 JAV 처리',
                    command=self._jav_process_dlg).pack(fill='x',pady=(4,1))
-        ttk.Button(ai_f,text='🗃 JAV DB 뷰어',
+        ttk.Button(ai_f,text='📋 JAV DB 목록',
                    command=self._jav_db_dlg).pack(fill='x',pady=1)
 
     # ── SIDEBAR 이벤트 ──────────────────────────
@@ -3117,7 +3121,12 @@ class VidSort(tk.Tk):
         client = self._get_llm_client()
         if not client: return
 
-        filenames = [Path(p).name for p in paths]
+        # 폴더 컨텍스트 포함: [폴더명] 파일명  → LLM이 폴더 의미를 참조 가능
+        def _fn_with_folder(p):
+            folder = Path(p).parent.name
+            name   = Path(p).name
+            return f'[{folder}] {name}' if folder else name
+        filenames = [_fn_with_folder(p) for p in paths]
         total     = len(paths)
 
         # 진행 팝업
@@ -3210,6 +3219,157 @@ class VidSort(tk.Tk):
         for p in paths:
             self.db.set_jav_done(p)
         messagebox.showinfo('JAV 제외', f'{len(paths)}개 파일을 JAV 처리 대상에서 제외했습니다.')
+
+    # ── JAV DB 뷰어 ──────────────────────────────
+    def _jav_db_dlg(self):
+        """JAV 처리 완료 파일 목록 + 초기화 + 태그 번역"""
+        win = tk.Toplevel(self); win.title('📋 JAV DB 목록')
+        win.configure(bg='#0d0d14'); win.geometry('720x520')
+        win.resizable(True, True); win.grab_set()
+
+        # 헤더
+        hf = tk.Frame(win, bg='#0d0d14'); hf.pack(fill='x', padx=12, pady=(10, 4))
+        tk.Label(hf, text='JAV 처리 완료 목록', bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(side='left')
+        cnt_lbl = tk.Label(hf, text='', bg='#0d0d14', fg='#7c6ff7',
+                           font=('Consolas', 9))
+        cnt_lbl.pack(side='left', padx=10)
+
+        # 검색
+        sf = tk.Frame(win, bg='#0d0d14'); sf.pack(fill='x', padx=12, pady=(0, 4))
+        tk.Label(sf, text='검색:', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(side='left')
+        q_var = tk.StringVar()
+        q_ent = ttk.Entry(sf, textvariable=q_var, font=('Consolas', 9), width=40)
+        q_ent.pack(side='left', padx=6)
+
+        # 목록
+        lf = tk.Frame(win, bg='#0d0d14'); lf.pack(fill='both', expand=True, padx=12)
+        vsb = ttk.Scrollbar(lf, orient='vertical')
+        vsb.pack(side='right', fill='y')
+        lb = tk.Listbox(lf, bg='#0a0a12', fg='#bbb', font=('Consolas', 8),
+                        selectbackground='#7c6ff7', activestyle='none',
+                        selectmode='extended',
+                        borderwidth=0, highlightthickness=0, yscrollcommand=vsb.set)
+        lb.pack(fill='both', expand=True)
+        vsb.config(command=lb.yview)
+
+        _rows: list = []
+
+        def _reload(q=''):
+            rows = self.db.get_jav_done_list(search=q, limit=500)
+            _rows.clear(); _rows.extend(rows)
+            lb.delete(0, 'end')
+            for r in rows:
+                alias = r.get('alias') or r.get('name', '')
+                # 태그 가져오기
+                tags = self.db.get_tags_for_paths([r['path']]).get(r['path'], [])
+                tag_str = ', '.join(tags[:5])
+                lb.insert('end', f"  {alias[:55]}  │  {tag_str[:40]}")
+            cnt_lbl.config(text=f'{len(rows)}개')
+
+        q_var.trace_add('write', lambda *_: _reload(q_var.get().strip()))
+        _reload()
+
+        # 우클릭 메뉴
+        def _rclick(e):
+            lb.selection_clear(0, 'end')
+            lb.selection_set(lb.nearest(e.y))
+            sel = lb.curselection()
+            if not sel: return
+            m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                        activebackground='#7c6ff7', activeforeground='#fff')
+            m.add_command(label='↩ 스크래핑 초기화 (처음으로)', command=_reset_sel)
+            m.add_command(label='🚫 영구 제외 유지 (jav_done=1)', command=lambda: None)
+            m.tk_popup(e.x_root, e.y_root)
+
+        def _reset_sel():
+            for idx in reversed(sorted(lb.curselection())):
+                if idx < len(_rows):
+                    path = _rows[idx]['path']
+                    self.db.reset_jav(path)
+            _reload(q_var.get().strip())
+
+        lb.bind('<Button-3>', _rclick)
+
+        # 하단 버튼
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(fill='x', padx=12, pady=8)
+
+        def _translate_tags():
+            """JAV 완료 파일들의 태그를 LLM으로 일괄 번역"""
+            client = self._get_llm_client()
+            if not client: return
+
+            import re as _re
+            def has_jp(t):
+                return bool(_re.search(
+                    r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', t))
+
+            # JAV 파일에 달린 태그만 수집
+            all_tags = []
+            for r in _rows:
+                tags = self.db.get_tags_for_paths([r['path']]).get(r['path'], [])
+                all_tags.extend(tags)
+            unique_jp = list(dict.fromkeys(t for t in all_tags if has_jp(t)))
+
+            if not unique_jp:
+                messagebox.showinfo('태그 번역', '번역할 일본어 태그가 없습니다.')
+                return
+            if not messagebox.askyesno('태그 번역',
+                    f'일본어 태그 {len(unique_jp)}개를 한국어로 번역합니까?'):
+                return
+
+            prog = tk.Toplevel(win); prog.title('번역 중')
+            prog.configure(bg='#0d0d14'); prog.geometry('360x100')
+            prog.grab_set()
+            lbl_pr = tk.Label(prog, text='LLM 호출 중...', bg='#0d0d14', fg='#7c6ff7',
+                              font=('Consolas', 9))
+            lbl_pr.pack(pady=18)
+            pb2 = ttk.Progressbar(prog, maximum=len(unique_jp))
+            pb2.pack(fill='x', padx=20)
+
+            def worker():
+                done = 0
+                BATCH = 30
+                for i in range(0, len(unique_jp), BATCH):
+                    batch = unique_jp[i:i + BATCH]
+                    tags_str = '\n'.join(f'{j+1}. {t}' for j, t in enumerate(batch))
+                    try:
+                        raw = client._chat(
+                            [{"role": "user",
+                              "content": (
+                                  '아래 일본어/영어 태그를 한국어로 번역하세요.\n'
+                                  'JSON만 {"1":"번역","2":"번역",...}\n\n' + tags_str
+                              )}], max_tokens=400)
+                        if raw.startswith('```'):
+                            raw = raw.split('```')[1].lstrip('json').strip()
+                        result = json.loads(raw.strip())
+                    except Exception:
+                        done += len(batch)
+                        prog.after(0, lambda d=done: pb2.config(value=d))
+                        continue
+                    for j, old_tag in enumerate(batch):
+                        new_tag = result.get(str(j + 1), '').strip()
+                        if new_tag and new_tag != old_tag:
+                            self.db.rename_tag(old_tag, new_tag)
+                        done += 1
+                        prog.after(0, lambda d=done, o=old_tag, n=new_tag:
+                                   (pb2.config(value=d),
+                                    lbl_pr.config(text=f'{o} → {n}')))
+
+                prog.after(0, prog.destroy)
+                prog.after(0, lambda: (
+                    messagebox.showinfo('완료', f'{len(unique_jp)}개 태그 번역 완료'),
+                    _reload(q_var.get().strip())
+                ))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(bf, text='🌐 태그 번역 (일본어→한국어)',
+                   command=_translate_tags).pack(side='left', padx=4)
+        ttk.Button(bf, text='↩ 선택 초기화',
+                   command=_reset_sel).pack(side='left', padx=4)
+        ttk.Button(bf, text='닫기', command=win.destroy).pack(side='right', padx=4)
 
     # ── JAV 처리 ────────────────────────────────
     # 장르 정적 번역 테이블 (LLM 불필요)
@@ -3314,8 +3474,8 @@ class VidSort(tk.Tk):
         s_vsb.pack(side='right', fill='y')
         s_lb = tk.Listbox(sf, bg='#0a0a12', fg='#bbb', font=('Consolas', 8),
                           selectbackground='#7c6ff7', activestyle='none',
-                          borderwidth=0, highlightthickness=0, yscrollcommand=s_vsb.set,
-                          selectmode='extended')
+                          selectmode='extended',
+                          borderwidth=0, highlightthickness=0, yscrollcommand=s_vsb.set)
         s_lb.pack(fill='both', expand=True)
         s_vsb.config(command=s_lb.yview)
 
@@ -3479,11 +3639,11 @@ class VidSort(tk.Tk):
             if not sel: return
             m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
                         activebackground='#7c6ff7', activeforeground='#fff')
-            m.add_command(label=f'🔄  스크래핑 전으로 초기화 ({len(sel)}개)',
-                          command=lambda: _reset_llm_sel())
+            m.add_command(label=f'↩ 스크래핑 전으로 초기화 ({len(sel)}개)',
+                          command=lambda: _reset_l_sel())
             m.tk_popup(e.x_root, e.y_root)
 
-        def _reset_llm_sel():
+        def _reset_l_sel():
             for idx in reversed(sorted(l_lb.curselection())):
                 if idx < len(_llm_rows):
                     self.db.reset_jav(_llm_rows[idx]['path'])
@@ -3539,13 +3699,19 @@ class VidSort(tk.Tk):
         def _llm_worker():
             client = self._get_llm_client()
             if not client:
-                win.after(0, lambda: llm_btn.config(state='normal'))
+                win.after(0, lambda: (
+                    llm_btn.config(state='normal'),
+                    lbl_l_prog.config(
+                        text='⚠ LLM 설정 없음 — 사이드바 ⚙설정에서 토큰 입력', fg='#ff6b6b')))
                 return
 
             rows  = list(_llm_rows)
             total = len(rows)
             if total == 0:
-                win.after(0, lambda: lbl_l_prog.config(text='처리할 항목 없음', fg='#ffd166'))
+                win.after(0, lambda: (
+                    lbl_l_prog.config(
+                        text='처리할 항목 없음 (Tab1에서 먼저 스크래핑 하세요)', fg='#ffd166'),
+                    llm_btn.config(state='normal')))
                 return
 
             try:

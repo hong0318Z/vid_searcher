@@ -382,18 +382,23 @@ class DB:
         return r[0] if r else None
 
     def get_random_paths(self, tag_filter=None, limit=60):
+        """랜덤 파일 목록. tag_filter 지정 시 AND 교집합 필터."""
         if tag_filter:
             ph = ','.join('?' * len(tag_filter))
             rows = self.conn.execute(
-                f"SELECT DISTINCT f.path FROM files f "
-                f"JOIN tags t ON f.path=t.path "
-                f"WHERE t.tag IN ({ph}) ORDER BY RANDOM() LIMIT ?",
-                [*tag_filter, limit]).fetchall()
+                f"SELECT f.path, f.name, f.duration, f.thumb_ok "
+                f"FROM files f "
+                f"WHERE (SELECT COUNT(DISTINCT t.tag) FROM tags t "
+                f"       WHERE t.path=f.path AND t.tag IN ({ph})) = ? "
+                f"ORDER BY RANDOM() LIMIT ?",
+                [*tag_filter, len(tag_filter), limit]).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT path FROM files ORDER BY RANDOM() LIMIT ?",
+                "SELECT path, name, duration, thumb_ok FROM files "
+                "ORDER BY RANDOM() LIMIT ?",
                 (limit,)).fetchall()
-        return [r[0] for r in rows]
+        return [{'path': r[0], 'name': r[1], 'duration': r[2], 'thumb_ok': r[3]}
+                for r in rows]
 
     def get_tags(self,path):
         return [r[0] for r in self.conn.execute(
@@ -1340,138 +1345,253 @@ class VidSort(tk.Tk):
                  ).pack(anchor='e', padx=14)
         ttk.Button(win, text='닫기', command=win.destroy).pack(pady=8)
 
-    # ── 갤러리 뷰 ───────────────────────────────
+    # ── 갤러리 뷰 (웹사이트 스타일) ─────────────
     def _gallery_view(self):
-        win = tk.Toplevel(self); win.title('🌐 갤러리 뷰')
-        win.configure(bg='#0d0d14'); win.geometry('1100x750')
-        win.minsize(800, 500)
+        # ── 색상 팔레트 ──
+        C_BG      = '#111111'
+        C_HEADER  = '#000000'
+        C_CARD    = '#1f1f1f'
+        C_ACCENT  = '#ff9000'   # 주황 (포털 스타일)
+        C_ACCENT2 = '#cc7700'
+        C_TEXT    = '#ffffff'
+        C_SUB     = '#aaaaaa'
+        C_SIDEBAR = '#1a1a1a'
+        C_SEL     = '#2a2000'   # 태그 선택 배경
 
-        # ── 왼쪽 태그 패널 ──
-        left = tk.Frame(win, bg='#0a0a12', width=220)
-        left.pack(side='left', fill='y'); left.pack_propagate(False)
+        win = tk.Toplevel(self)
+        win.title('VidSort Gallery')
+        win.configure(bg=C_BG)
+        win.geometry('1280x800'); win.minsize(900, 580)
 
-        tk.Label(left, text='태그 필터', bg='#0a0a12', fg='#555',
-                 font=('Consolas', 9, 'bold')).pack(anchor='w', padx=10, pady=(12,4))
+        # ────────────────────────────────────────
+        # HEADER
+        # ────────────────────────────────────────
+        hdr = tk.Frame(win, bg=C_HEADER, height=52)
+        hdr.pack(fill='x'); hdr.pack_propagate(False)
 
-        tag_cv  = tk.Canvas(left, bg='#0a0a12', highlightthickness=0)
-        tag_vsb = ttk.Scrollbar(left, orient='vertical', command=tag_cv.yview)
+        tk.Label(hdr, text='▶ VidSort', bg=C_HEADER, fg=C_ACCENT,
+                 font=('Arial', 16, 'bold'), padx=16).pack(side='left', pady=8)
+        tk.Label(hdr, text='Gallery', bg=C_HEADER, fg=C_TEXT,
+                 font=('Arial', 16)).pack(side='left', pady=8)
+
+        btn_style = {'bg': C_ACCENT, 'fg': C_HEADER, 'font': ('Arial', 9, 'bold'),
+                     'relief': 'flat', 'cursor': 'hand2', 'padx': 12, 'pady': 4}
+        tk.Button(hdr, text='⟳  랜덤 새로고침',
+                  command=lambda: load_grid(), **btn_style
+                  ).pack(side='right', padx=16, pady=10)
+
+        # ────────────────────────────────────────
+        # 메인 레이아웃 (좌 사이드바 + 우 그리드)
+        # ────────────────────────────────────────
+        body = tk.Frame(win, bg=C_BG)
+        body.pack(fill='both', expand=True)
+
+        # ── 왼쪽: 태그 카드 패널 ──────────────────
+        sidebar = tk.Frame(body, bg=C_SIDEBAR, width=230)
+        sidebar.pack(side='left', fill='y'); sidebar.pack_propagate(False)
+
+        tk.Label(sidebar, text='CATEGORIES', bg=C_SIDEBAR, fg=C_ACCENT,
+                 font=('Arial', 9, 'bold'), padx=12
+                 ).pack(anchor='w', pady=(14, 4))
+
+        tag_cv  = tk.Canvas(sidebar, bg=C_SIDEBAR, highlightthickness=0)
+        tag_vsb = ttk.Scrollbar(sidebar, orient='vertical', command=tag_cv.yview)
         tag_cv.configure(yscrollcommand=tag_vsb.set)
         tag_vsb.pack(side='right', fill='y')
         tag_cv.pack(fill='both', expand=True)
-        tag_inner = tk.Frame(tag_cv, bg='#0a0a12')
-        tag_cv.create_window((0,0), window=tag_inner, anchor='nw')
+        tag_inner = tk.Frame(tag_cv, bg=C_SIDEBAR)
+        tag_cv.create_window((0, 0), window=tag_inner, anchor='nw')
         tag_inner.bind('<Configure>',
             lambda e: tag_cv.configure(scrollregion=tag_cv.bbox('all')))
         tag_cv.bind('<MouseWheel>',
             lambda e: tag_cv.yview_scroll(-1*(e.delta//120), 'units'))
 
-        # ── 오른쪽 영상 그리드 ──
-        right = tk.Frame(win, bg='#0d0d14')
-        right.pack(side='left', fill='both', expand=True)
+        # ── 오른쪽: 영상 그리드 ───────────────────
+        main_area = tk.Frame(body, bg=C_BG)
+        main_area.pack(side='left', fill='both', expand=True)
 
-        top_bar = tk.Frame(right, bg='#0d0d14'); top_bar.pack(fill='x', padx=8, pady=6)
-        tk.Label(top_bar, text='🌐 갤러리 뷰', bg='#0d0d14', fg='#7c6ff7',
-                 font=('Consolas', 11, 'bold')).pack(side='left')
-        lbl_cnt = tk.Label(top_bar, text='', bg='#0d0d14', fg='#555',
-                           font=('Consolas', 8)); lbl_cnt.pack(side='left', padx=8)
-        ttk.Button(top_bar, text='🔀 랜덤 새로고침',
-                   command=lambda: load_grid()).pack(side='right', padx=4)
+        # 상태바 (결과 수 + 선택 태그 표시)
+        stat_bar = tk.Frame(main_area, bg='#1a1a1a', height=34)
+        stat_bar.pack(fill='x'); stat_bar.pack_propagate(False)
+        lbl_cnt  = tk.Label(stat_bar, text='', bg='#1a1a1a', fg=C_SUB,
+                            font=('Arial', 9), padx=12)
+        lbl_cnt.pack(side='left', pady=6)
+        lbl_sel  = tk.Label(stat_bar, text='', bg='#1a1a1a', fg=C_ACCENT,
+                            font=('Arial', 9, 'bold'))
+        lbl_sel.pack(side='left', pady=6)
 
-        grid_cv  = tk.Canvas(right, bg='#0d0d14', highlightthickness=0)
-        grid_vsb = ttk.Scrollbar(right, orient='vertical', command=grid_cv.yview)
+        grid_cv  = tk.Canvas(main_area, bg=C_BG, highlightthickness=0)
+        grid_vsb = ttk.Scrollbar(main_area, orient='vertical', command=grid_cv.yview)
         grid_cv.configure(yscrollcommand=grid_vsb.set)
         grid_vsb.pack(side='right', fill='y')
         grid_cv.pack(fill='both', expand=True)
-        grid_inner = tk.Frame(grid_cv, bg='#0d0d14')
-        grid_cv.create_window((0,0), window=grid_inner, anchor='nw')
+        grid_inner = tk.Frame(grid_cv, bg=C_BG)
+        grid_cv.create_window((0, 0), window=grid_inner, anchor='nw')
         grid_inner.bind('<Configure>',
             lambda e: grid_cv.configure(scrollregion=grid_cv.bbox('all')))
         grid_cv.bind('<MouseWheel>',
             lambda e: grid_cv.yview_scroll(-1*(e.delta//120), 'units'))
 
-        # 태그 체크박스 변수
+        # ── 데이터 ────────────────────────────────
         tags_data = self.db.all_tags_with_desc()
         tag_vars  = {}
-        _ph_refs  = []   # GC 방지
+        _vid_ph   = []   # 영상 썸네일 GC 방지
+        _tag_ph   = []   # 태그 썸네일 GC 방지
 
-        TW, TH = 160, 100
-        COLS   = 5
+        TW, TH = 220, 138   # 16:10 비슷한 비율
+        COLS   = 4
 
+        # ── 영상 그리드 로드 ──────────────────────
         def load_grid():
             for w in grid_inner.winfo_children(): w.destroy()
-            _ph_refs.clear()
-            selected = [t for t, v in tag_vars.items() if v.get()]
-            paths = self.db.get_random_paths(
-                tag_filter=selected if selected else None, limit=60)
-            lbl_cnt.config(text=f'{len(paths)}개 표시')
-            for idx, path in enumerate(paths):
-                card = tk.Frame(grid_inner, bg='#13131f',
-                                width=TW+16, height=TH+44)
-                card.grid(row=idx//COLS, column=idx%COLS,
-                          padx=4, pady=4, sticky='nw')
-                card.grid_propagate(False)
-                img_lbl = tk.Label(card, bg='#0a0a14')
-                img_lbl.place(x=8, y=4, width=TW, height=TH)
-                tk.Label(card, text=Path(path).stem[:24],
-                         bg='#13131f', fg='#888',
-                         font=('Consolas', 7), wraplength=TW+4,
-                         justify='left').place(x=4, y=TH+6, width=TW+8)
+            _vid_ph.clear()
 
+            selected = [t for t, v in tag_vars.items() if v.get()]
+            items = self.db.get_random_paths(
+                tag_filter=selected if selected else None, limit=60)
+
+            cnt_txt = f'{len(items)}개 영상'
+            sel_txt = ('  ▶  ' + ' + '.join(f'[{t}]' for t in selected)
+                       if selected else '')
+            lbl_cnt.config(text=cnt_txt)
+            lbl_sel.config(text=sel_txt)
+
+            for idx, item in enumerate(items):
+                path = item['path']
+                dur  = item['duration'] or 0
+                dur_str = (f'{int(dur)//60}:{int(dur)%60:02d}'
+                           if dur > 0 else '')
+
+                card = tk.Frame(grid_inner, bg=C_CARD,
+                                width=TW, height=TH + 56)
+                card.grid(row=idx//COLS, column=idx%COLS,
+                          padx=6, pady=6, sticky='nw')
+                card.grid_propagate(False)
+
+                # 썸네일 영역
+                thumb_frame = tk.Frame(card, bg='#000', width=TW, height=TH)
+                thumb_frame.place(x=0, y=0)
+                thumb_frame.pack_propagate(False)
+                img_lbl = tk.Label(thumb_frame, bg='#000')
+                img_lbl.place(x=0, y=0, width=TW, height=TH)
+
+                # 재생시간 배지
+                if dur_str:
+                    tk.Label(thumb_frame, text=dur_str, bg='#000000cc',
+                             fg='#fff', font=('Arial', 8, 'bold'),
+                             padx=4, pady=1).place(relx=1, rely=1,
+                             anchor='se', x=-4, y=-4)
+
+                # 제목
+                title = Path(path).stem
+                tk.Label(card, text=title, bg=C_CARD, fg=C_TEXT,
+                         font=('Arial', 8, 'bold'),
+                         wraplength=TW-8, justify='left', anchor='nw',
+                         ).place(x=6, y=TH+4, width=TW-8, height=32)
+
+                # 태그 칩
+                tags_here = self.db.get_tags(path)
+                chip_x = 6
+                for tg in tags_here[:4]:
+                    chip = tk.Label(card, text=tg, bg='#333', fg=C_ACCENT,
+                                    font=('Arial', 7), padx=4, pady=1,
+                                    cursor='hand2')
+                    chip.place(x=chip_x, y=TH+38)
+                    chip.bind('<Button-1>', lambda e, t=tg: (
+                        [v.set(False) for v in tag_vars.values()],
+                        tag_vars[t].set(True) if t in tag_vars else None,
+                        load_grid()))
+                    chip_x += len(tg)*6 + 16
+
+                # 썸네일 로드 (스레드)
                 def _lt(p=path, lbl=img_lbl):
                     tf = thumb_file(p)
                     if not tf.exists(): return
                     try:
                         img = Image.open(tf).resize((TW, TH), Image.LANCZOS)
                         ph  = ImageTk.PhotoImage(img)
-                        _ph_refs.append(ph)
-                        lbl.config(image=ph)
+                        _vid_ph.append(ph)
+                        win.after(0, lambda l=lbl, p=ph: l.config(image=p))
                     except: pass
                 threading.Thread(target=_lt, daemon=True).start()
 
-                for w in (card, img_lbl):
-                    w.bind('<Double-Button-1>', lambda e, p=path: self._open(p))
+                # 더블클릭 재생
+                for w in (card, thumb_frame, img_lbl):
+                    w.bind('<Double-Button-1>',
+                           lambda e, p=path: self._open(p))
 
-        # 태그 사이드바 구성
-        ttk.Button(tag_inner, text='  전체 (필터 없음)',
-                   command=lambda: ([v.set(False) for v in tag_vars.values()],
-                                    load_grid())
-                   ).pack(fill='x', padx=4, pady=(0,4))
+        # ── 태그 사이드바 구성 ────────────────────
+        # 전체 초기화 버튼
+        all_btn_cfg = {'bg': '#2a2a2a', 'fg': C_TEXT, 'font': ('Arial', 9),
+                       'relief': 'flat', 'cursor': 'hand2',
+                       'activebackground': '#333', 'activeforeground': C_TEXT}
+        tk.Button(tag_inner, text='◉  전체 보기',
+                  command=lambda: ([v.set(False) for v in tag_vars.values()],
+                                   load_grid()),
+                  **all_btn_cfg).pack(fill='x', padx=0, pady=(0, 2), ipadx=6, ipady=6)
 
-        _tag_ph = []  # 태그 썸네일 GC 방지
         for tag, desc in tags_data:
             var = tk.BooleanVar(value=False)
             tag_vars[tag] = var
 
-            row = tk.Frame(tag_inner, bg='#1a1a28', cursor='hand2')
-            row.pack(fill='x', padx=4, pady=1)
+            # 태그 카드
+            card = tk.Frame(tag_inner, bg=C_SIDEBAR, cursor='hand2')
+            card.pack(fill='x', pady=1)
 
-            # 썸네일
-            th_lbl = tk.Label(row, bg='#0a0a14', width=64, height=40)
-            th_lbl.pack(side='left', padx=(4,4), pady=4)
+            # 썸네일 (160×90)
+            THTW, THTH = 198, 112
+            th_cv = tk.Canvas(card, bg='#000', width=THTW, height=THTH,
+                              highlightthickness=0)
+            th_cv.pack(fill='x')
+            th_lbl = tk.Label(th_cv, bg='#000')
+            th_lbl.place(x=0, y=0, width=THTW, height=THTH)
 
-            def _load_tag_thumb(t=tag, lbl=th_lbl):
+            def _ltt(t=tag, lbl=th_lbl, cv=th_cv):
                 p = self.db.get_random_path_for_tag(t)
                 if not p: return
                 tf = thumb_file(p)
                 if not tf.exists(): return
                 try:
-                    img = Image.open(tf).resize((64, 40), Image.LANCZOS)
+                    img = Image.open(tf).resize((THTW, THTH), Image.LANCZOS)
                     ph  = ImageTk.PhotoImage(img)
                     _tag_ph.append(ph)
-                    lbl.config(image=ph)
+                    win.after(0, lambda l=lbl, p=ph: l.config(image=p))
                 except: pass
-            threading.Thread(target=_load_tag_thumb, daemon=True).start()
+            threading.Thread(target=_ltt, daemon=True).start()
 
-            txt_f = tk.Frame(row, bg='#1a1a28')
-            txt_f.pack(side='left', fill='x', expand=True, padx=(0,4))
-            tk.Checkbutton(txt_f, text=tag, variable=var,
-                           bg='#1a1a28', fg='#dcdcf0',
-                           activebackground='#1a1a28', selectcolor='#1a1a28',
-                           font=('Consolas', 9, 'bold'), cursor='hand2',
-                           command=load_grid).pack(anchor='w')
+            # 태그명 + 설명 바
+            info = tk.Frame(card, bg='#222')
+            info.pack(fill='x')
+
+            cb = tk.Checkbutton(info, text=f'  {tag}', variable=var,
+                                bg='#222', fg=C_TEXT,
+                                activebackground='#333',
+                                activeforeground=C_ACCENT,
+                                selectcolor='#222',
+                                font=('Arial', 10, 'bold'),
+                                cursor='hand2',
+                                indicatoron=False,
+                                relief='flat',
+                                command=lambda t=tag, v=var: (
+                                    # 선택 시 카드 색상 변경은 update_sel 에서
+                                    load_grid()))
+            cb.pack(fill='x', ipady=4)
+
             if desc:
-                tk.Label(txt_f, text=desc[:30], bg='#1a1a28', fg='#555',
-                         font=('Consolas', 7), wraplength=130).pack(anchor='w')
+                tk.Label(info, text=desc[:34], bg='#222', fg='#888',
+                         font=('Arial', 7), anchor='w', padx=8,
+                         ).pack(fill='x', pady=(0, 4))
+
+            # 체크 상태에 따라 카드 하이라이트
+            def _toggle_color(v=var, cb=cb, card=card, info=info):
+                if v.get():
+                    cb.config(fg=C_ACCENT, bg='#2a1800')
+                    info.config(bg='#2a1800')
+                else:
+                    cb.config(fg=C_TEXT, bg='#222')
+                    info.config(bg='#222')
+            cb.config(command=lambda v=var, cb=cb, card=card, info=info: (
+                _toggle_color(v, cb, card, info), load_grid()))
 
         load_grid()
 

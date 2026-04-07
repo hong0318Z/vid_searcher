@@ -3067,7 +3067,7 @@ class VidSort(tk.Tk):
                  bg='#0d0d14', fg=offline_color,
                  font=('Consolas', 8)).pack(pady=(0, 4))
         tk.Label(win,
-                 text='조회 순서: ① 오프라인 JSON  ② JavDB  ③ Javbus',
+                 text='조회 순서: ① 오프라인 JSON  ② R18.dev API  ③ JavDB  ④ Javbus',
                  bg='#0d0d14', fg='#333', font=('Consolas', 7)).pack()
 
         # ── 발견된 파일 목록 섹션 ──

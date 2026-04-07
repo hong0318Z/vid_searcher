@@ -375,33 +375,131 @@ def _lookup_offline(code: str) -> tuple:
     return meta, ''
 
 # ─────────────────────────────────────────────────
+#  R18.dev  (FANZA 공식 JSON API — 스크래핑 없음)
+# ─────────────────────────────────────────────────
+R18_BASE = 'https://r18.dev/videos/vod/movies/detail/-/dvd_id={}/json/'
+
+def _fetch_r18(code: str) -> tuple:
+    """(meta_dict | None, error_str) 반환.
+    R18.dev 공식 JSON API — Cloudflare 없음, HTML 파싱 없음."""
+    try:
+        url = R18_BASE.format(code)
+        print(f'[R18.dev] GET {url}', flush=True)
+
+        if _HAS_HTTPX:
+            with httpx.Client(timeout=15, follow_redirects=True, verify=False) as c:
+                resp = c.get(url, headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                })
+            status = resp.status_code
+            if status != 200:
+                print(f'[R18.dev] HTTP {status}', flush=True)
+                return None, f'R18.dev HTTP {status}'
+            data = resp.json()
+        else:
+            import urllib.request, ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode    = ssl.CERT_NONE
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0',
+                                                        'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+                status = r.status
+                if status != 200:
+                    return None, f'R18.dev HTTP {status}'
+                data = json.loads(r.read().decode('utf-8'))
+
+        # ── 파싱 ──
+        # 배우: name_romaji(영문) 또는 name(일본어) 사용
+        actresses = []
+        for a in (data.get('actresses') or []):
+            name = (a.get('name_romaji') or a.get('name') or '').strip()
+            if name:
+                actresses.append(name)
+
+        # 장르/카테고리
+        genres = []
+        for c in (data.get('categories') or []):
+            g = (c.get('name') or '').strip()
+            if g:
+                genres.append(g)
+
+        # 제목: title_ja(일본어 원제) 우선, 없으면 title(영문)
+        title = (data.get('title_ja') or data.get('title') or '').strip()
+
+        # 스튜디오/메이커
+        maker = data.get('maker') or {}
+        studio = (maker.get('name') or '').strip()
+
+        # 커버 이미지
+        images = data.get('images') or {}
+        jacket = images.get('jacket_image') or {}
+        cover_url = jacket.get('large') or jacket.get('small') or ''
+
+        release_date = (data.get('release_date') or '')[:10]
+
+        print(f'[R18.dev] 제목="{title}" 배우={actresses[:3]} 장르={genres[:3]}', flush=True)
+
+        if not title:
+            return None, 'R18.dev 응답에 제목 없음 (미등록 코드)'
+
+        return {
+            'code':      code,
+            'source':    'r18dev',
+            'title':     title,
+            'actresses': actresses,
+            'genres':    genres,
+            'studio':    studio,
+            'date':      release_date,
+            'cover_url': cover_url,
+        }, ''
+
+    except Exception as e:
+        import traceback
+        msg = f'R18.dev 예외: {e}'
+        print(f'[jav_scraper] {msg}\n{traceback.format_exc()}', flush=True)
+        return None, msg
+
+# ─────────────────────────────────────────────────
 #  공개 API
 # ─────────────────────────────────────────────────
 def fetch_meta(code: str) -> dict | None:
-    """오프라인 → JavDB → Javbus 순서로 메타데이터 조회. 실패 시 None."""
+    """오프라인 → R18.dev → JavDB → Javbus 순서로 조회. 실패 시 None."""
     meta, _ = fetch_meta_verbose(code)
     return meta
 
 def fetch_meta_verbose(code: str) -> tuple:
-    """(meta_dict | None, error_str) 반환. error_str은 최종 실패 원인.
-    조회 순서: 1) 오프라인 JSON  2) JavDB  3) Javbus
+    """(meta_dict | None, error_str). 최종 실패 원인 포함.
+
+    조회 순서:
+      1) 오프라인 JSON  (jav_offline.json)
+      2) R18.dev JSON API  (FANZA 공식, 빠르고 안정적)
+      3) JavDB 스크래핑
+      4) Javbus 스크래핑
     """
     # 1) 오프라인 덤프
     meta, err0 = _lookup_offline(code)
     if meta:
         return meta, ''
 
-    # 2) JavDB 라이브
-    meta, err1 = _fetch_javdb(code)
+    # 2) R18.dev 공식 API
+    meta, err1 = _fetch_r18(code)
     if meta:
         return meta, ''
 
-    # 3) Javbus 라이브
-    meta, err2 = _fetch_javbus(code)
+    # 3) JavDB 스크래핑
+    meta, err2 = _fetch_javdb(code)
     if meta:
         return meta, ''
 
-    combined = f'오프라인: {err0} / JavDB: {err1} / Javbus: {err2}'
+    # 4) Javbus 스크래핑
+    meta, err3 = _fetch_javbus(code)
+    if meta:
+        return meta, ''
+
+    combined = (f'오프라인: {err0} / R18: {err1} / '
+                f'JavDB: {err2} / Javbus: {err3}')
     return None, combined
 
 def offline_db_stats() -> str:

@@ -27,9 +27,11 @@ _COPILOT_HEADERS = {
 # 기본 시스템 프롬프트 (설정창에서 사용자가 덮어쓸 수 있음)
 DEFAULT_SYSTEM_PROMPT = (
     "당신은 동영상 파일 분류 전문가입니다.\n"
-    "파일명을 분석하여 주어진 태그 풀에서 적절한 태그를 1~3개 선택하세요.\n"
+    "파일명을 분석하여 적절한 태그를 1~3개 선택하세요.\n"
+    "기존 태그 풀에 가장 유사한 태그를 우선 사용하고,\n"
+    "아예 적합한 태그가 없으면 'NEW:새태그명' 형식으로 새 태그를 만드세요.\n"
     "반드시 JSON 형식으로만 응답하세요. 다른 설명 없이 JSON만 출력하세요.\n"
-    '응답 형식: {"1": ["태그1", "태그2"], "2": ["태그1"], ...}'
+    '응답 형식: {"1": ["태그1", "태그2"], "2": ["NEW:새장르"], ...}'
 )
 
 
@@ -108,6 +110,62 @@ class LLMClient:
 
         return results
 
+    def analyze_and_name(self, filenames: list,
+                         on_progress=None) -> list:
+        """
+        파일명 → 한글 제목(alias) + 설명(description) 생성.
+        5글자 미만 stem은 빈 결과 반환.
+
+        반환: [{"alias": "...", "description": "..."}, ...]  (filenames와 동일 순서)
+        """
+        total   = len(filenames)
+        results = [{"alias": "", "description": ""} for _ in range(total)]
+
+        for i in range(0, total, BATCH_SIZE):
+            batch = filenames[i:i + BATCH_SIZE]
+            batch_res = self._name_batch(batch)
+            results[i:i + len(batch)] = batch_res
+            if on_progress:
+                on_progress(min(i + BATCH_SIZE, total), total)
+
+        return results
+
+    def _name_batch(self, filenames: list) -> list:
+        """파일명 배치 → 한글 이름 + 설명"""
+        from pathlib import Path as _Path
+        eligible = [(idx, fn) for idx, fn in enumerate(filenames)
+                    if len(_Path(fn).stem) >= 5]
+        results = [{"alias": "", "description": ""} for _ in filenames]
+        if not eligible:
+            return results
+
+        lines = '\n'.join(f"{j+1}. {fn}" for j, (_, fn) in enumerate(eligible))
+        prompt = (
+            "동영상 파일명을 분석하여 한국어 제목과 간단한 설명을 생성하세요.\n"
+            "제목은 파일명 뜻을 살린 자연스러운 한국어로,\n"
+            "설명은 내용을 추측한 2문장 이내로 작성하세요.\n"
+            "반드시 JSON만 출력: "
+            '{"1":{"alias":"한글제목","description":"설명"},"2":{...},...}\n\n'
+            f"파일 목록:\n{lines}"
+        )
+        try:
+            raw = self._chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=400 + len(eligible) * 60,
+            )
+            if raw.startswith("```"):
+                raw = raw.split("```")[1].lstrip("json").strip()
+            data = json.loads(raw.strip())
+            for j, (orig_idx, _) in enumerate(eligible):
+                entry = data.get(str(j + 1), {})
+                results[orig_idx] = {
+                    "alias":       entry.get("alias", "").strip(),
+                    "description": entry.get("description", "").strip(),
+                }
+        except Exception:
+            pass
+        return results
+
     def _tag_batch(self, filenames: list, tag_pool: list,
                    system_prompt: str) -> list:
         """배치 단위 분류 — 같은 순서의 태그 리스트 반환"""
@@ -143,10 +201,19 @@ class LLMClient:
 
             data      = json.loads(raw)
             tags_list = []
+            pool_set  = set(tag_pool)
             for i in range(len(filenames)):
                 raw_tags = data.get(str(i + 1), [])
-                valid    = [t for t in raw_tags if t in tag_pool] \
-                           if isinstance(raw_tags, list) else []
+                valid = []
+                if isinstance(raw_tags, list):
+                    for t in raw_tags:
+                        if isinstance(t, str):
+                            if t.startswith('NEW:'):
+                                new_t = t[4:].strip()
+                                if new_t:
+                                    valid.append(new_t)   # 새 태그 허용
+                            elif t in pool_set:
+                                valid.append(t)
                 tags_list.append(valid)
             return tags_list
 

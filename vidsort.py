@@ -488,6 +488,13 @@ class DB:
             self.conn.execute("DELETE FROM tags WHERE path=? AND tag=?",(path,tag))
             self.conn.commit()
 
+    def delete_tag(self, tag: str):
+        """태그명을 모든 파일에서 완전 삭제 + tag_meta 제거"""
+        with self.lock:
+            self.conn.execute("DELETE FROM tags WHERE tag=?", (tag,))
+            self.conn.execute("DELETE FROM tag_meta WHERE tag=?", (tag,))
+            self.conn.commit()
+
     def get_all_for_thumbs(self, folder=None):
         if folder:
             rows = self.conn.execute(
@@ -1430,6 +1437,28 @@ class VidSort(tk.Tk):
 
         lb.bind('<<ListboxSelect>>', on_select)
         save_btn.config(command=save_desc)
+
+        def delete_tag():
+            if cur[0] is None: return
+            tag, _ = tags_data[cur[0]]
+            cnt = len(self.db.conn.execute(
+                "SELECT path FROM tags WHERE tag=?", (tag,)).fetchall())
+            if not messagebox.askyesno('태그 삭제',
+                    f'"{tag}" 태그를 삭제합니까?\n'
+                    f'({cnt}개 파일에서 제거됩니다)'):
+                return
+            self.db.delete_tag(tag)
+            idx = cur[0]
+            tags_data.pop(idx)
+            lb.delete(idx)
+            cur[0] = None
+            lbl_tag.config(text='—')
+            desc_txt.delete('1.0', 'end')
+            save_btn.config(state='disabled')
+
+        del_btn = ttk.Button(right_f, text='🗑 태그 삭제', command=delete_tag,
+                             style='TButton')
+        del_btn.pack(anchor='e', pady=(0, 4))
 
         # ── LLM 태그 번역 ──
         def _llm_translate_tags():
@@ -2803,6 +2832,11 @@ class VidSort(tk.Tk):
                        variable=skip_var,
                        bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
                        font=('Consolas', 9)).pack(anchor='w', padx=20)
+        name_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(win, text='제목 기반 한글 이름 + 설명 자동 생성 (5글자↑ 파일만)',
+                       variable=name_var,
+                       bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
+                       font=('Consolas', 9)).pack(anchor='w', padx=20)
 
         ttk.Separator(win).pack(fill='x', padx=16, pady=6)
 
@@ -2841,8 +2875,10 @@ class VidSort(tk.Tk):
                 return
 
             win.destroy()
-            extra = extra_var.get().strip()
-            self._llm_run_batch(paths, tag_pool, extra_prompt=extra)
+            extra     = extra_var.get().strip()
+            add_names = name_var.get()
+            self._llm_run_batch(paths, tag_pool, extra_prompt=extra,
+                                add_names=add_names)
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
         ttk.Button(bf, text='▶ 시작', style='Acc.TButton',
@@ -3037,7 +3073,7 @@ class VidSort(tk.Tk):
                  font=('Consolas', 8)).pack(side='right', padx=8)
 
     # ── AI 배치 태그 실행 ────────────────────────
-    def _llm_run_batch(self, paths, tag_pool, extra_prompt=''):
+    def _llm_run_batch(self, paths, tag_pool, extra_prompt='', add_names=False):
         """백그라운드 배치 태그 실행 + 진행 팝업"""
         client = self._get_llm_client()
         if not client: return
@@ -3100,15 +3136,31 @@ class VidSort(tk.Tk):
                     self.db.add_tag(path, tag)
                     applied += 1
 
+            # 한글 이름 + 설명 생성 (옵션)
+            named = 0
+            if add_names:
+                try:
+                    name_list = client.analyze_and_name(filenames)
+                    for path, entry in zip(paths, name_list):
+                        alias = entry.get('alias', '').strip()
+                        desc  = entry.get('description', '').strip()
+                        if alias:
+                            self.db.set_alias(path, alias)
+                            named += 1
+                        if desc:
+                            self.db.set_description(path, desc)
+                except Exception:
+                    pass
+
             def done():
                 try: popup.destroy()
                 except Exception: pass
                 self._reload_sidebar()
                 self._reload()
-                messagebox.showinfo(
-                    'AI 태그 완료',
-                    f'처리 완료: {len(paths)}개 파일\n'
-                    f'적용된 태그: {applied}건')
+                msg = f'처리 완료: {len(paths)}개 파일\n적용된 태그: {applied}건'
+                if add_names:
+                    msg += f'\n한글 이름 생성: {named}건'
+                messagebox.showinfo('AI 태그 완료', msg)
 
             popup.after(0, done)
 

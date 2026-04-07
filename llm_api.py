@@ -54,26 +54,50 @@ class LLMClient:
         content, _, _ = self._chat_tracked(messages, max_tokens)
         return content
 
-    def _chat_tracked(self, messages: list, max_tokens: int = 100) -> tuple:
-        """(content, prompt_tokens, completion_tokens) 반환"""
+    def _chat_tracked(self, messages: list, max_tokens: int = 100,
+                      on_chunk: callable = None) -> tuple:
+        """(content, prompt_tokens, completion_tokens) 반환.
+        스트리밍으로 수신 — 토큰이 오는 즉시 누적, 타임아웃은 청크 간격 기준."""
         url     = f"{self._endpoint}/chat/completions"
         payload = {
             "model":      self.model,
             "messages":   messages,
             "max_tokens": max_tokens,
+            "stream":     True,
         }
-        # 출력 토큰이 클수록 더 긴 타임아웃 필요
-        # 보수적으로 30 tok/s 기준, 최소 120초
-        http_timeout = max(120, max_tokens // 30)
-        with httpx.Client(timeout=http_timeout) as client:
-            resp = client.post(url, json=payload, headers=self._headers)
-            resp.raise_for_status()
-            body    = resp.json()
-            content = body["choices"][0]["message"]["content"].strip()
-            usage   = body.get("usage", {})
-            return (content,
-                    usage.get("prompt_tokens", 0),
-                    usage.get("completion_tokens", 0))
+        # 스트리밍: 청크 사이 60초 무응답이면 끊어짐 (전체 응답 대기 X)
+        with httpx.Client(timeout=httpx.Timeout(connect=30, read=60,
+                                                write=30, pool=10)) as client:
+            chunks   = []
+            tok_in   = 0
+            tok_out  = 0
+            with client.stream('POST', url, json=payload,
+                               headers=self._headers) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line or not line.startswith('data:'):
+                        continue
+                    data = line[5:].strip()
+                    if data == '[DONE]':
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except Exception:
+                        continue
+                    # 사용량 (마지막 청크에 포함되는 경우)
+                    if 'usage' in obj:
+                        u = obj['usage']
+                        tok_in  = u.get('prompt_tokens', tok_in)
+                        tok_out = u.get('completion_tokens', tok_out)
+                    delta = (obj.get('choices') or [{}])[0].get('delta', {})
+                    piece = delta.get('content') or ''
+                    if piece:
+                        chunks.append(piece)
+                        tok_out += 1   # 청크별 카운트 (usage 없을 때 추정)
+                        if on_chunk:
+                            on_chunk(piece)
+            content = ''.join(chunks).strip()
+            return content, tok_in, tok_out
 
     # ── 연결 테스트 ──────────────────────────────
     def test_connection(self) -> str:

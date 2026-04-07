@@ -3246,35 +3246,45 @@ class VidSort(tk.Tk):
         threading.Thread(target=scan_worker, daemon=True).start()
 
         # ── LLM 번역 헬퍼 ─────────────────────────────
-        def _translate(meta: dict):
+        def _translate(meta: dict, existing_tags: list):
+            """LLM: 제목 번역 + 설명 + 배우/장르 한글화 + 기존 태그 매칭"""
             actresses_str = ', '.join(meta.get('actresses', [])[:4]) or '불명'
             genres_str    = ', '.join(meta.get('genres', [])[:5]) or '불명'
             code          = meta.get('code', '')
             orig_title    = meta.get('title', '')
             studio        = meta.get('studio', '')
+            existing_str  = ', '.join(f'"{t}"' for t in existing_tags[:60]) if existing_tags else '없음'
             sys_msg = (
                 "당신은 AV 영상 메타데이터 번역 전문가입니다. "
                 "제목을 자연스러운 한국어로 번역하고, "
-                "배우와 장르를 바탕으로 간략한 설명을 작성하세요. "
+                "배우 이름은 한국어 표기(가타카나→한글 음차)로 변환하고, "
+                "장르는 한국어로 번역하세요. "
+                "기존 태그와 유사한 항목은 기존 태그를 우선 사용하세요. "
                 "반드시 JSON만 출력하세요."
             )
             user_msg = (
-                f"다음 AV 메타데이터를 한국어로 처리해주세요.\n"
                 f"코드: {code}\n원제: {orig_title}\n"
                 f"배우: {actresses_str}\n장르: {genres_str}\n스튜디오: {studio}\n\n"
-                "반드시 아래 JSON 형식으로만 응답하세요:\n"
-                '{"title_ko": "한글 제목", "description": "2~3문장 한글 설명"}'
+                f"기존 태그 목록: [{existing_str}]\n\n"
+                "아래 JSON 형식으로만 응답하세요:\n"
+                '{"title_ko": "한글 제목", '
+                '"description": "2~3문장 한글 설명", '
+                '"actresses_ko": ["배우1한글", "배우2한글"], '
+                '"genres_ko": ["장르1한글", "장르2한글"]}'
             )
             raw = client._chat(
                 [{"role": "system", "content": sys_msg},
                  {"role": "user",   "content": user_msg}],
-                max_tokens=400
+                max_tokens=500
             )
             if raw.startswith('```'):
                 parts = raw.split('```')
                 raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
             data = json.loads(raw.strip())
-            return data.get('title_ko', orig_title), data.get('description', '')
+            return (data.get('title_ko', orig_title),
+                    data.get('description', ''),
+                    data.get('actresses_ko', []),
+                    data.get('genres_ko', []))
 
         # ── 2단계: 처리 (백그라운드) ──────────────────
         def worker():
@@ -3317,23 +3327,29 @@ class VidSort(tk.Tk):
                     win.after(0, _fail)
                     continue
 
-                # LLM 번역
+                # 3) LLM 번역 + 한글 태그
+                existing_tags = self.db.all_tags()
                 try:
-                    title_ko, description = _translate(meta)
+                    title_ko, description, actresses_ko, genres_ko = _translate(meta, existing_tags)
                 except Exception:
                     title_ko    = meta.get('title', code)
                     description = ''
+                    actresses_ko = []
+                    genres_ko    = []
 
                 # DB 저장
                 alias = f"{title_ko} [{code}]"
                 self.db.set_alias(path, alias)
                 if description:
                     self.db.set_description(path, description)
+                # 5) JAV 태그 + 한글 배우(최대 4명) + 한글 장르(최대 3개)
                 self.db.add_tag(path, 'JAV')
-                for actress in meta.get('actresses', [])[:4]:
+                tag_src_actresses = actresses_ko if actresses_ko else meta.get('actresses', [])
+                tag_src_genres    = genres_ko    if genres_ko    else meta.get('genres', [])
+                for actress in tag_src_actresses[:4]:
                     if actress:
                         self.db.add_tag(path, actress)
-                for genre in meta.get('genres', [])[:3]:
+                for genre in tag_src_genres[:3]:
                     if genre:
                         self.db.add_tag(path, genre)
                 self.db.set_jav_done(path)

@@ -390,11 +390,16 @@ _TAGS = _BASE.replace('__BODY__', """
 <div class="wrap">
   <div class="section-hdr">
     <h2>카테고리 전체</h2>
-    <span class="cnt">{{ tags|length }}개 태그</span>
+    <span class="cnt" id="tag-cnt">{{ tags|length }}개 태그</span>
   </div>
-  <div class="tag-grid">
+  <div style="margin-bottom:14px">
+    <input id="tag-search" type="text" placeholder="태그 검색..."
+      style="background:#1a1a2e;border:1px solid #2a2a4a;color:#dcdcf0;
+             padding:8px 14px;border-radius:6px;font-size:14px;width:260px;outline:none">
+  </div>
+  <div class="tag-grid" id="tag-grid">
   {% for t in tags %}
-    <a href="/tag/{{ t.tag|urlencode }}" class="tag-card">
+    <a href="/tag/{{ t.tag|urlencode }}" class="tag-card" data-name="{{ t.tag|lower }}">
       {% if t.thumb %}
       <img src="/thumb/{{ t.thumb }}" loading="lazy" alt="{{ t.tag }}">
       {% else %}
@@ -409,7 +414,26 @@ _TAGS = _BASE.replace('__BODY__', """
   {% endfor %}
   </div>
 </div>
-""").replace('__SCRIPTS__', '')
+""").replace('__SCRIPTS__', """
+<script>
+(function(){
+  var inp = document.getElementById('tag-search');
+  var cnt = document.getElementById('tag-cnt');
+  inp.addEventListener('input', function(){
+    var q = inp.value.trim().toLowerCase();
+    var cards = document.querySelectorAll('#tag-grid .tag-card');
+    var visible = 0;
+    cards.forEach(function(c){
+      var match = !q || c.dataset.name.indexOf(q) !== -1;
+      c.style.display = match ? '' : 'none';
+      if(match) visible++;
+    });
+    cnt.textContent = visible + '개 태그' + (q ? ' (필터됨)' : '');
+  });
+  inp.focus();
+})();
+</script>
+""")
 
 _TAG_PAGE = _BASE.replace('__BODY__', """
 <div class="wrap">
@@ -576,7 +600,7 @@ def index():
     PER   = 40
     vids, total = _query_videos(offset=(pg-1)*PER, limit=PER)
     tags        = _get_tags_with_stats()
-    tag_groups  = _get_tag_groups(limit_tags=6, vids_per_tag=6)
+    tag_groups  = _get_tag_groups(limit_tags=6, vids_per_tag=2)
     c           = _conn()
     for v in vids:
         v['id']      = _vid_id(v['path'])

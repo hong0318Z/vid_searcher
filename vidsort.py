@@ -2404,12 +2404,8 @@ class VidSort(tk.Tk):
                 except Exception as ex:
                     _show_thumb(p)
             else:
+                # 썸네일만 표시 — 재생은 썸네일 클릭 또는 ▶ 외부 앱 버튼으로
                 _show_thumb(p)
-                if HAS_MPV:
-                    subprocess.Popen(['mpv', p],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                else:
-                    _launch_ext(p)
 
         # ── 오른쪽: 메타데이터 편집 패널 ────────
         right = tk.Frame(paned, bg='#0d0d14', width=380)

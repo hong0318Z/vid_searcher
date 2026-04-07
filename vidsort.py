@@ -3173,8 +3173,9 @@ class VidSort(tk.Tk):
         win = tk.Toplevel(self)
         win.title('▶ AI 자동 태그')
         win.configure(bg='#0d0d14')
-        win.geometry('500x500')
-        win.resizable(False, False)
+        win.geometry('520x580')
+        win.resizable(True, True)
+        win.minsize(440, 480)
         win.grab_set()
 
         tk.Label(win, text='AI 자동 태그',
@@ -3208,13 +3209,22 @@ class VidSort(tk.Tk):
 
         ttk.Separator(win).pack(fill='x', padx=16, pady=8)
 
-        # 태그 풀 미리보기 (DB 태그 전체)
+        # 태그 풀 미리보기 (DB 태그 전체) — 고정 높이 스크롤 박스
         tk.Label(win, text=f'사용할 태그 ({len(tag_pool)}개 — DB 전체 태그):',
                  bg='#0d0d14', fg='#888',
                  font=('Consolas', 9)).pack(anchor='w', padx=20)
-        tk.Label(win, text=' · '.join(tag_pool),
-                 bg='#0d0d14', fg='#7c6ff7',
-                 font=('Consolas', 9), wraplength=460).pack(padx=20, pady=2)
+        pool_frame = tk.Frame(win, bg='#0d0d14')
+        pool_frame.pack(fill='x', padx=20, pady=2)
+        pool_vsb = ttk.Scrollbar(pool_frame, orient='vertical')
+        pool_vsb.pack(side='right', fill='y')
+        pool_txt = tk.Text(pool_frame, bg='#131320', fg='#7c6ff7',
+                           font=('Consolas', 8), wrap='word', height=5,
+                           borderwidth=0, state='normal',
+                           yscrollcommand=pool_vsb.set)
+        pool_vsb.config(command=pool_txt.yview)
+        pool_txt.pack(fill='x')
+        pool_txt.insert('1.0', ' · '.join(tag_pool))
+        pool_txt.config(state='disabled')
 
         ttk.Separator(win).pack(fill='x', padx=16, pady=8)
 

@@ -62,7 +62,10 @@ class LLMClient:
             "messages":   messages,
             "max_tokens": max_tokens,
         }
-        with httpx.Client(timeout=60) as client:
+        # 출력 토큰이 클수록 더 긴 타임아웃 필요
+        # 보수적으로 30 tok/s 기준, 최소 120초
+        http_timeout = max(120, max_tokens // 30)
+        with httpx.Client(timeout=http_timeout) as client:
             resp = client.post(url, json=payload, headers=self._headers)
             resp.raise_for_status()
             body    = resp.json()

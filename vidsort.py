@@ -832,18 +832,33 @@ class CanvasGrid(tk.Frame):
         p=self._path_at(e.x,e.y)
         if p:
             v=next((x for x in self._videos if x['path']==p),None)
-            if v: self._show_tip(e.x_root,e.y_root,v['name']); return
+            if v:
+                desc = v.get('description','') or ''
+                self._show_tip(e.x_root, e.y_root, v['name'], desc)
+                return
         self._hide_tip()
 
-    def _show_tip(self,rx,ry,text):
+    def _show_tip(self, rx, ry, name, desc=''):
+        text = name
+        if desc:
+            # 설명 최대 120자 표시
+            short_desc = desc[:120] + ('…' if len(desc) > 120 else '')
+            text = f"{name}\n{'─'*30}\n{short_desc}"
         if self._tip_win:
-            try: self._tip_win.wm_geometry(f'+{rx+12}+{ry+16}'); return
-            except: pass
-        self._tip_win=tk.Toplevel(self)
+            try:
+                self._tip_win.wm_geometry(f'+{rx+12}+{ry+16}')
+                # 텍스트도 갱신
+                for w in self._tip_win.winfo_children():
+                    w.config(text=text)
+                return
+            except:
+                pass
+        self._tip_win = tk.Toplevel(self)
         self._tip_win.wm_overrideredirect(True)
         self._tip_win.wm_geometry(f'+{rx+12}+{ry+16}')
-        tk.Label(self._tip_win,text=text,bg='#1a1a28',fg='#ddd',
-                 font=('Consolas',8),padx=8,pady=4,relief='solid',bd=1).pack()
+        tk.Label(self._tip_win, text=text, bg='#1a1a28', fg='#ddd',
+                 font=('Consolas', 8), padx=8, pady=4, relief='solid',
+                 bd=1, justify='left', wraplength=360).pack()
 
     def _hide_tip(self,e=None):
         if self._tip_win:
@@ -2001,6 +2016,8 @@ class VidSort(tk.Tk):
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))
         m.add_command(label='📋  복사',             command=lambda:self._clipop('copy',paths))
         m.add_separator()
+        m.add_command(label='🚫  JAV 처리 제외',
+                      command=lambda: self._jav_exclude(paths))
         m.add_command(label='🗑  DB에서 제거',      command=lambda:self._rm_db(paths))
         m.tk_popup(e.x_root,e.y_root)
 
@@ -2731,7 +2748,7 @@ class VidSort(tk.Tk):
         win = tk.Toplevel(self)
         win.title('▶ AI 자동 태그')
         win.configure(bg='#0d0d14')
-        win.geometry('500x400')
+        win.geometry('500x500')
         win.resizable(False, False)
         win.grab_set()
 
@@ -2783,6 +2800,19 @@ class VidSort(tk.Tk):
                        bg='#0d0d14', fg='#888', selectcolor='#0d0d14',
                        font=('Consolas', 9)).pack(anchor='w', padx=20)
 
+        ttk.Separator(win).pack(fill='x', padx=16, pady=6)
+
+        tk.Label(win, text='추가 지시사항 (선택):',
+                 bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=20)
+        tk.Label(win, text='예) 이 폴더 영상엔 "액션" 태그를 반드시 포함하세요.',
+                 bg='#0d0d14', fg='#333', font=('Consolas', 7)).pack(anchor='w', padx=20)
+        extra_f = tk.Frame(win, bg='#0d0d14')
+        extra_f.pack(fill='x', padx=20, pady=(2, 0))
+        extra_var = tk.StringVar()
+        ttk.Entry(extra_f, textvariable=extra_var,
+                  font=('Consolas', 9), width=54).pack(fill='x')
+
         def start():
             scope = scope_var.get()
             if scope == 'current':
@@ -2807,7 +2837,8 @@ class VidSort(tk.Tk):
                 return
 
             win.destroy()
-            self._llm_run_batch(paths, tag_pool)
+            extra = extra_var.get().strip()
+            self._llm_run_batch(paths, tag_pool, extra_prompt=extra)
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=12)
         ttk.Button(bf, text='▶ 시작', style='Acc.TButton',
@@ -3002,7 +3033,7 @@ class VidSort(tk.Tk):
                  font=('Consolas', 8)).pack(side='right', padx=8)
 
     # ── AI 배치 태그 실행 ────────────────────────
-    def _llm_run_batch(self, paths, tag_pool):
+    def _llm_run_batch(self, paths, tag_pool, extra_prompt=''):
         """백그라운드 배치 태그 실행 + 진행 팝업"""
         client = self._get_llm_client()
         if not client: return
@@ -3045,9 +3076,12 @@ class VidSort(tk.Tk):
 
         def worker():
             try:
+                combined_prompt = self._llm_prompt or ''
+                if extra_prompt:
+                    combined_prompt = (combined_prompt + '\n\n추가 지시사항: ' + extra_prompt).strip()
                 tags_list = client.analyze_and_tag(
                     filenames, tag_pool, on_progress,
-                    custom_prompt=self._llm_prompt)
+                    custom_prompt=combined_prompt)
             except Exception as e:
                 err_msg = str(e)
                 popup.after(0, lambda msg=err_msg: (
@@ -3075,6 +3109,12 @@ class VidSort(tk.Tk):
             popup.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _jav_exclude(self, paths):
+        """선택 파일을 JAV 처리 대상에서 제외 (jav_done=1)"""
+        for p in paths:
+            self.db.set_jav_done(p)
+        messagebox.showinfo('JAV 제외', f'{len(paths)}개 파일을 JAV 처리 대상에서 제외했습니다.')
 
     # ── JAV 처리 ────────────────────────────────
     def _jav_process_dlg(self):

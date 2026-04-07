@@ -346,7 +346,7 @@ _HOME = _BASE.replace('__BODY__', """
     </a>
   {% endfor %}
   </div>
-  {% include '_pager.html' ignore missing %}
+  {{ _pager(page, pages, '/') }}
 </div>
 """).replace('__SCRIPTS__', '')
 
@@ -541,7 +541,7 @@ def index():
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
     return _render(_HOME, nav='home', videos=vids, tags=tags,
-                   total=total, pg=pg, pages=(total+PER-1)//PER)
+                   total=total, page=pg, pages=(total+PER-1)//PER)
 
 @app.route('/tags')
 def tags_page():
@@ -614,12 +614,17 @@ def stream_video(vid_id):
     path = _get_path(vid_id)
     if not path: abort(404)
 
-    # Windows long path (UNC prefix for >260 chars)
+    # Windows 경로 처리
+    # NAS/UNC (\\server\ 또는 //server/) 는 \\?\ 접두어 금지
     if sys.platform == 'win32':
-        try:
-            lp = '\\\\?\\' + str(Path(path).resolve())
-        except Exception:
+        is_unc = path.startswith('\\\\') or path.startswith('//')
+        if is_unc:
             lp = path
+        else:
+            try:
+                lp = '\\\\?\\' + str(Path(path).resolve())
+            except Exception:
+                lp = path
     else:
         lp = path
 

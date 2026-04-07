@@ -169,6 +169,12 @@ class DB:
         if 'ext' not in cols:
             self.conn.execute("ALTER TABLE files ADD COLUMN ext TEXT DEFAULT ''")
             self.conn.commit()
+        if 'description' not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN description TEXT DEFAULT ''")
+            self.conn.commit()
+        if 'jav_done' not in cols:
+            self.conn.execute("ALTER TABLE files ADD COLUMN jav_done INTEGER DEFAULT 0")
+            self.conn.commit()
 
         # ext 인덱스 (컬럼 확보 후 생성)
         self.conn.execute(
@@ -324,6 +330,36 @@ class DB:
         with self.lock:
             self.conn.execute("UPDATE files SET alias=? WHERE path=?",(alias,path))
             self.conn.commit()
+
+    def set_description(self, path, desc):
+        with self.lock:
+            self.conn.execute("UPDATE files SET description=? WHERE path=?", (desc, path))
+            self.conn.commit()
+
+    def set_jav_done(self, path):
+        with self.lock:
+            self.conn.execute("UPDATE files SET jav_done=1 WHERE path=?", (path,))
+            self.conn.commit()
+
+    def get_pending_jav(self, limit=50):
+        """alias='' AND 태그 없음 AND jav_done=0 인 파일"""
+        rows = self.conn.execute("""
+            SELECT f.* FROM files f
+            WHERE (f.alias IS NULL OR f.alias='')
+              AND f.jav_done = 0
+              AND f.path NOT IN (SELECT DISTINCT path FROM tags)
+            ORDER BY f.name
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return self._dicts(rows)
+
+    def count_pending_jav(self):
+        return self.conn.execute("""
+            SELECT COUNT(*) FROM files f
+            WHERE (f.alias IS NULL OR f.alias='')
+              AND f.jav_done = 0
+              AND f.path NOT IN (SELECT DISTINCT path FROM tags)
+        """).fetchone()[0]
 
     def remove(self,path):
         with self.lock:
@@ -1130,6 +1166,8 @@ class VidSort(tk.Tk):
                    command=self._llm_auto_tag_dlg).pack(fill='x',pady=(4,1))
         ttk.Button(ai_f,text='🔍 패턴 분석 → 태그',
                    command=self._llm_pattern_dlg).pack(fill='x',pady=1)
+        ttk.Button(ai_f,text='🎬 JAV 처리',
+                   command=self._jav_process_dlg).pack(fill='x',pady=(4,1))
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):
@@ -2992,6 +3030,205 @@ class VidSort(tk.Tk):
             popup.after(0, done)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ── JAV 처리 ────────────────────────────────
+    def _jav_process_dlg(self):
+        """JAV 메타데이터 자동 처리 다이얼로그"""
+        try:
+            import jav_scraper
+            missing = jav_scraper.check_deps()
+            if missing:
+                messagebox.showwarning('패키지 없음',
+                    f'필요한 패키지를 설치하세요:\n  pip install {" ".join(missing)}')
+                return
+        except ImportError:
+            messagebox.showerror('오류', 'jav_scraper.py 를 찾을 수 없습니다.')
+            return
+
+        client = self._get_llm_client()
+        if not client: return
+
+        pending_count = self.db.count_pending_jav()
+
+        win = tk.Toplevel(self)
+        win.title('🎬 JAV 메타데이터 처리')
+        win.configure(bg='#0d0d14')
+        win.geometry('500x440')
+        win.resizable(False, True)
+        win.grab_set()
+
+        tk.Label(win, text='🎬  JAV 자동 처리',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(16, 4))
+        tk.Label(win,
+                 text='alias=없음 + 태그=없음 + 미처리 파일에서 AV 코드를 추출,\n'
+                      'JavDB 스크래핑 → LLM 한글 번역 → alias/설명/태그 자동 등록',
+                 bg='#0d0d14', fg='#555', font=('Consolas', 8),
+                 justify='center').pack(pady=(0, 8))
+
+        info_f = tk.Frame(win, bg='#1a1a28')
+        info_f.pack(fill='x', padx=20, pady=4)
+        lbl_count = tk.Label(info_f, text=f'처리 대상: {pending_count}개 파일',
+                             bg='#1a1a28', fg='#7c6ff7',
+                             font=('Consolas', 10, 'bold'))
+        lbl_count.pack(pady=8)
+
+        batch_f = tk.Frame(win, bg='#0d0d14')
+        batch_f.pack(pady=4)
+        tk.Label(batch_f, text='배치 크기:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left', padx=4)
+        batch_var = tk.StringVar(value='20')
+        ttk.Spinbox(batch_f, from_=1, to=500, textvariable=batch_var,
+                    width=6, font=('Consolas', 9)).pack(side='left')
+
+        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
+
+        lbl_prog = tk.Label(win, text='대기 중', bg='#0d0d14', fg='#555',
+                            font=('Consolas', 9))
+        lbl_prog.pack()
+        pb = ttk.Progressbar(win, length=440, mode='determinate', maximum=1)
+        pb.pack(padx=24, pady=4)
+        lbl_file = tk.Label(win, text='', bg='#0d0d14', fg='#444',
+                            font=('Consolas', 8), wraplength=460)
+        lbl_file.pack()
+        lbl_result = tk.Label(win, text='', bg='#0d0d14', fg='#4dffb4',
+                              font=('Consolas', 8), wraplength=460, justify='left')
+        lbl_result.pack(pady=4, padx=20)
+
+        btn_f = tk.Frame(win, bg='#0d0d14')
+        btn_f.pack(pady=8)
+        start_btn = ttk.Button(btn_f, text='▶ 시작', style='Acc.TButton')
+        start_btn.pack(side='left', padx=4)
+        ttk.Button(btn_f, text='닫기', command=win.destroy).pack(side='left', padx=4)
+
+        _stop  = threading.Event()
+        _stats = {'matched': 0, 'skipped': 0}
+
+        def _translate(meta: dict):
+            """LLM으로 제목 한글 번역 + 설명 생성. (title_ko, description) 반환"""
+            actresses_str = ', '.join(meta.get('actresses', [])[:4]) or '불명'
+            genres_str    = ', '.join(meta.get('genres', [])[:5]) or '불명'
+            code          = meta.get('code', '')
+            orig_title    = meta.get('title', '')
+            studio        = meta.get('studio', '')
+            sys_msg = (
+                "당신은 AV 영상 메타데이터 번역 전문가입니다. "
+                "제목을 자연스러운 한국어로 번역하고, "
+                "배우와 장르를 바탕으로 간략한 설명을 작성하세요. "
+                "반드시 JSON만 출력하세요."
+            )
+            user_msg = (
+                f"다음 AV 메타데이터를 한국어로 처리해주세요.\n"
+                f"코드: {code}\n원제: {orig_title}\n"
+                f"배우: {actresses_str}\n장르: {genres_str}\n스튜디오: {studio}\n\n"
+                "반드시 아래 JSON 형식으로만 응답하세요:\n"
+                '{"title_ko": "한글 제목", "description": "2~3문장 한글 설명"}'
+            )
+            raw = client._chat(
+                [{"role": "system", "content": sys_msg},
+                 {"role": "user",   "content": user_msg}],
+                max_tokens=400
+            )
+            if raw.startswith('```'):
+                parts = raw.split('```')
+                raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
+            data = json.loads(raw.strip())
+            return data.get('title_ko', orig_title), data.get('description', '')
+
+        def worker():
+            try:
+                limit = max(1, int(batch_var.get()))
+            except ValueError:
+                limit = 20
+            rows  = self.db.get_pending_jav(limit)
+            total = len(rows)
+            if total == 0:
+                win.after(0, lambda: (
+                    lbl_prog.config(text='처리할 파일이 없습니다.', fg='#ffd166'),
+                ))
+                return
+
+            win.after(0, lambda t=total: pb.configure(maximum=max(t, 1)))
+
+            for i, row in enumerate(rows):
+                if _stop.is_set():
+                    break
+                path = row['path']
+                name = row['name']
+                n    = i + 1
+
+                def _upd(n=n, total=total, name=name):
+                    pb['value'] = n
+                    lbl_prog.config(text=f'{n} / {total}', fg='#7c6ff7')
+                    lbl_file.config(text=name)
+                win.after(0, _upd)
+
+                # 1) AV 코드 추출
+                code = jav_scraper.extract_code(name)
+                if not code:
+                    self.db.set_jav_done(path)
+                    _stats['skipped'] += 1
+                    continue
+
+                # 2) JavDB 스크래핑
+                meta = jav_scraper.fetch_meta(code)
+                if not meta or not meta.get('title'):
+                    self.db.set_jav_done(path)
+                    _stats['skipped'] += 1
+                    continue
+
+                # 3) LLM 번역
+                try:
+                    title_ko, description = _translate(meta)
+                except Exception:
+                    title_ko    = meta.get('title', code)
+                    description = ''
+
+                # 4) alias / description 저장
+                alias = f"{title_ko} [{code}]"
+                self.db.set_alias(path, alias)
+                if description:
+                    self.db.set_description(path, description)
+
+                # 5) 배우(최대 4명) + 장르(최대 3개) 태그
+                for actress in meta.get('actresses', [])[:4]:
+                    if actress:
+                        self.db.add_tag(path, actress)
+                for genre in meta.get('genres', [])[:3]:
+                    if genre:
+                        self.db.add_tag(path, genre)
+
+                # 6) 완료 마킹
+                self.db.set_jav_done(path)
+                _stats['matched'] += 1
+
+                ok_msg = f'✅ {code}: {title_ko}'
+                win.after(0, lambda msg=ok_msg: lbl_result.config(text=msg, fg='#4dffb4'))
+
+            def _finish():
+                try:
+                    new_count = self.db.count_pending_jav()
+                    lbl_count.config(text=f'처리 대상: {new_count}개 파일')
+                    lbl_prog.config(text='완료', fg='#4dffb4')
+                    lbl_result.config(
+                        text=(f"처리 완료  ✅ 적용 {_stats['matched']}건  "
+                              f"⏭ 미매칭/스킵 {_stats['skipped']}건"),
+                        fg='#4dffb4')
+                    start_btn.config(state='normal')
+                    self._reload_sidebar()
+                    self._reload()
+                except Exception:
+                    pass
+            win.after(0, _finish)
+
+        def start():
+            start_btn.config(state='disabled')
+            _stop.clear()
+            _stats['matched'] = _stats['skipped'] = 0
+            lbl_result.config(text='')
+            threading.Thread(target=worker, daemon=True).start()
+
+        start_btn.config(command=start)
 
     # ── MISC ────────────────────────────────────
     def _check_ffmpeg(self):

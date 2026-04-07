@@ -1,9 +1,26 @@
 """
 JavDB / Javbus 스크래퍼
 AV 코드 → 제목·배우·장르·설명 조회
+
+조회 순서:
+  1. 로컬 오프라인 JSON 덤프  (jav_offline.json)
+  2. JavDB 라이브 스크래핑
+  3. Javbus 라이브 스크래핑 (fallback)
+
+오프라인 JSON 형식 (코드는 대문자, 하이픈 포함):
+{
+  "PRED-123": {
+    "title": "원제",
+    "actresses": ["배우1", "배우2"],
+    "genres":    ["장르1", "장르2"],
+    "studio":    "스튜디오명",
+    "date":      "2024-01-01"
+  },
+  ...
+}
 """
 
-import re, time, random
+import re, time, random, json
 from pathlib import Path
 
 try:
@@ -296,23 +313,103 @@ def _fetch_javbus(code: str) -> tuple:
         return None, msg
 
 # ─────────────────────────────────────────────────
+#  오프라인 JSON 덤프
+#  파일명: jav_offline.json  (스크립트와 같은 폴더)
+# ─────────────────────────────────────────────────
+_OFFLINE_DB: dict = {}
+_OFFLINE_LOADED: bool = False
+
+def _load_offline():
+    global _OFFLINE_DB, _OFFLINE_LOADED
+    if _OFFLINE_LOADED:
+        return
+    _OFFLINE_LOADED = True
+    candidates = [
+        Path(__file__).parent / 'jav_offline.json',
+        Path('jav_offline.json'),
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                raw = json.loads(p.read_text(encoding='utf-8'))
+                # 키를 대문자+하이픈 정규화
+                for k, v in raw.items():
+                    norm = _normalize_key(k)
+                    _OFFLINE_DB[norm] = v
+                print(f'[jav_scraper] 오프라인 DB 로드: {p}  ({len(_OFFLINE_DB)}개)', flush=True)
+                return
+            except Exception as e:
+                print(f'[jav_scraper] 오프라인 DB 로드 실패: {e}', flush=True)
+    print('[jav_scraper] jav_offline.json 없음 → 라이브 스크래핑만 사용', flush=True)
+
+def _normalize_key(code: str) -> str:
+    """코드를 대문자+하이픈 형식으로 정규화  예) pred123 → PRED-123"""
+    code = code.upper().strip()
+    m = re.match(r'([A-Z]+)-?(\d+)', code)
+    if not m:
+        return code
+    return f'{m.group(1)}-{m.group(2).zfill(3)}'
+
+def _lookup_offline(code: str) -> tuple:
+    """오프라인 DB에서 조회. (meta | None, error_str)"""
+    _load_offline()
+    if not _OFFLINE_DB:
+        return None, '오프라인 DB 없음'
+    norm = _normalize_key(code)
+    row  = _OFFLINE_DB.get(norm)
+    if not row:
+        return None, f'오프라인 DB에 {norm} 없음'
+    meta = {
+        'code':      norm,
+        'source':    'offline',
+        'title':     row.get('title', ''),
+        'actresses': row.get('actresses', []),
+        'genres':    row.get('genres', []),
+        'studio':    row.get('studio', ''),
+        'date':      row.get('date', ''),
+        'cover_url': row.get('cover_url', ''),
+    }
+    if not meta['title']:
+        return None, f'오프라인 DB에 {norm} 있으나 title 없음'
+    print(f'[offline] HIT {norm}: {meta["title"]}', flush=True)
+    return meta, ''
+
+# ─────────────────────────────────────────────────
 #  공개 API
 # ─────────────────────────────────────────────────
 def fetch_meta(code: str) -> dict | None:
-    """JavDB → Javbus 순서로 메타데이터 조회. 실패 시 None."""
+    """오프라인 → JavDB → Javbus 순서로 메타데이터 조회. 실패 시 None."""
     meta, _ = fetch_meta_verbose(code)
     return meta
 
 def fetch_meta_verbose(code: str) -> tuple:
-    """(meta_dict | None, error_str) 반환. error_str은 최종 실패 원인."""
+    """(meta_dict | None, error_str) 반환. error_str은 최종 실패 원인.
+    조회 순서: 1) 오프라인 JSON  2) JavDB  3) Javbus
+    """
+    # 1) 오프라인 덤프
+    meta, err0 = _lookup_offline(code)
+    if meta:
+        return meta, ''
+
+    # 2) JavDB 라이브
     meta, err1 = _fetch_javdb(code)
     if meta:
         return meta, ''
+
+    # 3) Javbus 라이브
     meta, err2 = _fetch_javbus(code)
     if meta:
         return meta, ''
-    combined = f'JavDB: {err1} / Javbus: {err2}'
+
+    combined = f'오프라인: {err0} / JavDB: {err1} / Javbus: {err2}'
     return None, combined
+
+def offline_db_stats() -> str:
+    """오프라인 DB 현황 문자열 반환 (UI 표시용)"""
+    _load_offline()
+    if _OFFLINE_DB:
+        return f'오프라인 DB: {len(_OFFLINE_DB):,}개 코드'
+    return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
 
 def check_deps() -> list[str]:
     """누락 의존성 목록 반환"""

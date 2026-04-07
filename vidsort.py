@@ -3060,6 +3060,16 @@ class VidSort(tk.Tk):
                  bg='#0d0d14', fg='#dcdcf0',
                  font=('Consolas', 12, 'bold')).pack(pady=(14, 2))
 
+        # 오프라인 DB 상태
+        offline_stat = jav_scraper.offline_db_stats()
+        offline_color = '#4dffb4' if '없음' not in offline_stat else '#555'
+        tk.Label(win, text=offline_stat,
+                 bg='#0d0d14', fg=offline_color,
+                 font=('Consolas', 8)).pack(pady=(0, 4))
+        tk.Label(win,
+                 text='조회 순서: ① 오프라인 JSON  ② JavDB  ③ Javbus',
+                 bg='#0d0d14', fg='#333', font=('Consolas', 7)).pack()
+
         # ── 발견된 파일 목록 섹션 ──
         hdr_f = tk.Frame(win, bg='#0d0d14'); hdr_f.pack(fill='x', padx=16, pady=(6, 2))
         lbl_found = tk.Label(hdr_f, text='스캔 중...', bg='#0d0d14', fg='#7c6ff7',

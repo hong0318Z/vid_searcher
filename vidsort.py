@@ -390,6 +390,43 @@ class DB:
               AND f.jav_raw IS NOT NULL AND f.jav_raw != ''
         """).fetchone()[0]
 
+    def reset_jav(self, path):
+        """JAV 처리 완전 초기화 — 스크래핑 전 상태로 되돌림"""
+        with self.lock:
+            self.conn.execute(
+                "UPDATE files SET jav_done=0, jav_raw='', alias='', description='' WHERE path=?",
+                (path,))
+            self.conn.execute("DELETE FROM tags WHERE path=?", (path,))
+            self.conn.commit()
+
+    def get_jav_done(self, search='', limit=300, offset=0):
+        """jav_done=1 완료 파일 목록 (JAV DB 뷰어용)"""
+        if search:
+            rows = self.conn.execute("""
+                SELECT f.* FROM files f
+                WHERE f.jav_done=1
+                  AND (f.alias LIKE ? OR f.name LIKE ?)
+                ORDER BY f.alias
+                LIMIT ? OFFSET ?
+            """, (f'%{search}%', f'%{search}%', limit, offset)).fetchall()
+        else:
+            rows = self.conn.execute("""
+                SELECT f.* FROM files f
+                WHERE f.jav_done=1
+                ORDER BY f.alias
+                LIMIT ? OFFSET ?
+            """, (limit, offset)).fetchall()
+        return self._dicts(rows)
+
+    def count_jav_done(self, search=''):
+        """jav_done=1 개수"""
+        if search:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM files WHERE jav_done=1 AND (alias LIKE ? OR name LIKE ?)",
+                (f'%{search}%', f'%{search}%')).fetchone()[0]
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM files WHERE jav_done=1").fetchone()[0]
+
     def remove(self,path):
         with self.lock:
             self.conn.execute("DELETE FROM files WHERE path=?",(path,))
@@ -1233,6 +1270,8 @@ class VidSort(tk.Tk):
                    command=self._llm_pattern_dlg).pack(fill='x',pady=1)
         ttk.Button(ai_f,text='🎬 JAV 처리',
                    command=self._jav_process_dlg).pack(fill='x',pady=(4,1))
+        ttk.Button(ai_f,text='🗃 JAV DB 뷰어',
+                   command=self._jav_db_dlg).pack(fill='x',pady=1)
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):
@@ -3275,18 +3314,21 @@ class VidSort(tk.Tk):
         s_vsb.pack(side='right', fill='y')
         s_lb = tk.Listbox(sf, bg='#0a0a12', fg='#bbb', font=('Consolas', 8),
                           selectbackground='#7c6ff7', activestyle='none',
-                          borderwidth=0, highlightthickness=0, yscrollcommand=s_vsb.set)
+                          borderwidth=0, highlightthickness=0, yscrollcommand=s_vsb.set,
+                          selectmode='extended')
         s_lb.pack(fill='both', expand=True)
         s_vsb.config(command=s_lb.yview)
 
         def _s_lb_rclick(e):
-            s_lb.selection_clear(0, 'end')
-            s_lb.selection_set(s_lb.nearest(e.y))
+            idx = s_lb.nearest(e.y)
+            if idx not in s_lb.curselection():
+                s_lb.selection_clear(0, 'end')
+                s_lb.selection_set(idx)
             sel = s_lb.curselection()
             if not sel: return
             m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
                         activebackground='#7c6ff7', activeforeground='#fff')
-            m.add_command(label='🚫  JAV 처리 제외', command=lambda: _exclude_s_sel())
+            m.add_command(label=f'🚫  JAV 처리 제외 ({len(sel)}개)', command=lambda: _exclude_s_sel())
             m.tk_popup(e.x_root, e.y_root)
 
         def _exclude_s_sel():
@@ -3423,9 +3465,37 @@ class VidSort(tk.Tk):
         l_vsb.pack(side='right', fill='y')
         l_lb = tk.Listbox(lf, bg='#0a0a12', fg='#bbb', font=('Consolas', 8),
                           selectbackground='#7c6ff7', activestyle='none',
-                          borderwidth=0, highlightthickness=0, yscrollcommand=l_vsb.set)
+                          borderwidth=0, highlightthickness=0, yscrollcommand=l_vsb.set,
+                          selectmode='extended')
         l_lb.pack(fill='both', expand=True)
         l_vsb.config(command=l_lb.yview)
+
+        def _l_lb_rclick(e):
+            idx = l_lb.nearest(e.y)
+            if idx not in l_lb.curselection():
+                l_lb.selection_clear(0, 'end')
+                l_lb.selection_set(idx)
+            sel = l_lb.curselection()
+            if not sel: return
+            m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                        activebackground='#7c6ff7', activeforeground='#fff')
+            m.add_command(label=f'🔄  스크래핑 전으로 초기화 ({len(sel)}개)',
+                          command=lambda: _reset_llm_sel())
+            m.tk_popup(e.x_root, e.y_root)
+
+        def _reset_llm_sel():
+            for idx in reversed(sorted(l_lb.curselection())):
+                if idx < len(_llm_rows):
+                    self.db.reset_jav(_llm_rows[idx]['path'])
+                    _llm_rows.pop(idx)
+                    l_lb.delete(idx)
+            remaining = len(_llm_rows)
+            lbl_llm_count.config(
+                text=f'스크래핑 완료 (LLM 대기): {remaining}개  │  '
+                     f'LLM 1회 = {llm_batch.get()}개 처리')
+            llm_btn.config(state='normal' if _llm_rows else 'disabled')
+
+        l_lb.bind('<Button-3>', _l_lb_rclick)
 
         lc_f = tk.Frame(tab2, bg='#0d0d14'); lc_f.pack(fill='x', padx=10, pady=4)
         tk.Label(lc_f, text='LLM 1회 처리량:', bg='#0d0d14', fg='#aaa',
@@ -3606,6 +3676,251 @@ class VidSort(tk.Tk):
             llm_btn.config(state='disabled')
             threading.Thread(target=_llm_worker, daemon=True).start()
         llm_btn.config(command=_start_llm)
+
+    # ── JAV DB 뷰어 ─────────────────────────────
+    def _jav_db_dlg(self):
+        """완료된 JAV DB 항목 열람 + 태그 일괄 번역"""
+        win = tk.Toplevel(self)
+        win.title('🗃 JAV DB 뷰어')
+        win.configure(bg='#0d0d14')
+        win.geometry('820x640')
+        win.resizable(True, True)
+        win.grab_set()
+
+        # ── 상단 툴바 ──
+        tb = tk.Frame(win, bg='#0d0d14'); tb.pack(fill='x', padx=12, pady=(10, 4))
+        tk.Label(tb, text='🗃  JAV DB 뷰어', bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(side='left')
+        lbl_total = tk.Label(tb, text='', bg='#0d0d14', fg='#7c6ff7',
+                             font=('Consolas', 9))
+        lbl_total.pack(side='left', padx=12)
+
+        # ── 검색 바 ──
+        sf = tk.Frame(win, bg='#0d0d14'); sf.pack(fill='x', padx=12, pady=(0, 4))
+        tk.Label(sf, text='검색:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        search_var = tk.StringVar()
+        search_ent = ttk.Entry(sf, textvariable=search_var, width=30,
+                               font=('Consolas', 9))
+        search_ent.pack(side='left', padx=6)
+        ttk.Button(sf, text='🔍 검색', command=lambda: _load()).pack(side='left')
+        ttk.Button(sf, text='전체보기', command=lambda: (search_var.set(''), _load())).pack(side='left', padx=4)
+
+        # ── Treeview ──
+        tv_f = tk.Frame(win, bg='#0d0d14'); tv_f.pack(fill='both', expand=True, padx=12, pady=4)
+        tv_vsb = ttk.Scrollbar(tv_f, orient='vertical')
+        tv_vsb.pack(side='right', fill='y')
+        tv_hsb = ttk.Scrollbar(tv_f, orient='horizontal')
+        tv_hsb.pack(side='bottom', fill='x')
+
+        cols = ('code', 'title', 'tags', 'file')
+        tv = ttk.Treeview(tv_f, columns=cols, show='headings',
+                          selectmode='extended',
+                          yscrollcommand=tv_vsb.set,
+                          xscrollcommand=tv_hsb.set)
+        tv.heading('code',  text='코드',    anchor='w')
+        tv.heading('title', text='제목',    anchor='w')
+        tv.heading('tags',  text='태그',    anchor='w')
+        tv.heading('file',  text='파일명',  anchor='w')
+        tv.column('code',  width=100, minwidth=80,  stretch=False)
+        tv.column('title', width=260, minwidth=120)
+        tv.column('tags',  width=220, minwidth=100)
+        tv.column('file',  width=200, minwidth=100)
+        tv.pack(fill='both', expand=True)
+        tv_vsb.config(command=tv.yview)
+        tv_hsb.config(command=tv.xview)
+
+        # path 매핑: iid → path
+        _iid_path: dict = {}
+        _rows_cache: list = []
+
+        def _load():
+            for iid in tv.get_children():
+                tv.delete(iid)
+            _iid_path.clear()
+            _rows_cache.clear()
+            q = search_var.get().strip()
+            rows = self.db.get_jav_done(search=q, limit=500)
+            total = self.db.count_jav_done(search=q)
+            lbl_total.config(text=f'총 {total}개')
+            for row in rows:
+                path  = row['path']
+                alias = row.get('alias', '') or ''
+                name  = row.get('name', '')
+                # 코드 추출 (alias에서 [XXX-000] 패턴)
+                import re
+                m = re.search(r'\[([A-Z0-9]+-\d+)\]', alias)
+                code  = m.group(1) if m else ''
+                title = alias.replace(f' [{code}]', '').strip() if code else alias
+                tags  = self.db.get_tags(path)
+                tags_str = '  '.join(tags[:8])
+                iid = tv.insert('', 'end', values=(code, title, tags_str, name))
+                _iid_path[iid] = path
+                _rows_cache.append({'iid': iid, 'path': path, 'alias': alias,
+                                    'tags': tags, 'code': code})
+
+        # ── 우클릭 메뉴 ──
+        def _tv_rclick(e):
+            sel = tv.selection()
+            if not sel: return
+            m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                        activebackground='#7c6ff7', activeforeground='#fff')
+            m.add_command(label=f'🔄  스크래핑 전으로 초기화 ({len(sel)}개)',
+                          command=lambda: _reset_sel())
+            m.tk_popup(e.x_root, e.y_root)
+
+        def _reset_sel():
+            sel = tv.selection()
+            if not sel: return
+            if not messagebox.askyesno('초기화 확인',
+                    f'{len(sel)}개 항목을 스크래핑 전 상태로 초기화합니다.\n'
+                    '별칭, 설명, 태그가 모두 삭제됩니다. 계속하시겠습니까?',
+                    parent=win):
+                return
+            for iid in sel:
+                path = _iid_path.get(iid)
+                if path:
+                    self.db.reset_jav(path)
+                tv.delete(iid)
+            total = self.db.count_jav_done(search=search_var.get().strip())
+            lbl_total.config(text=f'총 {total}개')
+            self._reload_sidebar()
+            self._reload()
+
+        tv.bind('<Button-3>', _tv_rclick)
+
+        # ── 하단 버튼 바 ──
+        btn_f = tk.Frame(win, bg='#0d0d14'); btn_f.pack(fill='x', padx=12, pady=(0, 8))
+        lbl_sel = tk.Label(btn_f, text='선택: 0개', bg='#0d0d14', fg='#555',
+                           font=('Consolas', 8))
+        lbl_sel.pack(side='left')
+
+        def _update_sel_label(e=None):
+            lbl_sel.config(text=f'선택: {len(tv.selection())}개')
+        tv.bind('<<TreeviewSelect>>', _update_sel_label)
+
+        ttk.Button(btn_f, text='🗑 초기화',
+                   command=_reset_sel).pack(side='right', padx=4)
+        ttk.Button(btn_f, text='🌐 태그 번역 (LLM)',
+                   style='Acc.TButton',
+                   command=lambda: _translate_tags()).pack(side='right', padx=4)
+        ttk.Button(btn_f, text='전체 선택',
+                   command=lambda: tv.selection_set(tv.get_children())).pack(side='right', padx=4)
+        ttk.Button(btn_f, text='닫기',
+                   command=win.destroy).pack(side='right', padx=4)
+
+        # ── LLM 태그 번역 ──
+        def _translate_tags():
+            sel = tv.selection()
+            if not sel:
+                messagebox.showwarning('선택 없음', '번역할 항목을 선택하세요.', parent=win)
+                return
+            client = self._get_llm_client()
+            if not client: return
+
+            # 진행 팝업
+            prog_win = tk.Toplevel(win)
+            prog_win.title('태그 번역 중...')
+            prog_win.configure(bg='#0d0d14')
+            prog_win.geometry('420x120')
+            prog_win.grab_set()
+            tk.Label(prog_win, text='LLM으로 태그를 번역 중입니다...',
+                     bg='#0d0d14', fg='#dcdcf0', font=('Consolas', 9)).pack(pady=(16, 4))
+            pb = ttk.Progressbar(prog_win, length=380, mode='determinate')
+            pb.pack(padx=20, pady=4)
+            lbl_p = tk.Label(prog_win, text='', bg='#0d0d14', fg='#7c6ff7',
+                             font=('Consolas', 8))
+            lbl_p.pack()
+
+            # 선택 항목 수집
+            targets = []
+            for iid in sel:
+                path = _iid_path.get(iid)
+                if path:
+                    tags = self.db.get_tags(path)
+                    targets.append({'iid': iid, 'path': path, 'tags': tags})
+
+            def _worker():
+                total = len(targets)
+                pb.configure(maximum=max(total, 1))
+                per_call = 20
+                n_batches = (total + per_call - 1) // per_call
+                done = 0
+
+                existing_tags = self.db.all_tags()
+                existing_str  = ', '.join(f'"{t}"' for t in existing_tags[:60]) or '없음'
+
+                for b_idx in range(n_batches):
+                    batch = targets[b_idx * per_call: (b_idx + 1) * per_call]
+
+                    items_str = ''
+                    for k, item in enumerate(batch, 1):
+                        items_str += f"{k}. 태그목록: {', '.join(item['tags'])}\n"
+
+                    sys_msg = (
+                        "당신은 AV 메타데이터 태그 번역 전문가입니다. "
+                        "태그가 일본어 또는 영어이면 한국어로 번역하세요. "
+                        "이미 한국어인 태그는 그대로 두세요. "
+                        "기존 태그 목록과 유사한 태그가 있으면 기존 태그를 사용하세요. "
+                        "반드시 JSON만 출력하세요."
+                    )
+                    user_msg = (
+                        f"기존 태그 목록: [{existing_str}]\n\n"
+                        f"번역할 항목 ({len(batch)}개):\n{items_str}\n"
+                        "각 번호에 맞게 번역된 태그 배열로 응답:\n"
+                        '{"1":["태그1","태그2",...],"2":[...]}'
+                    )
+
+                    try:
+                        raw, _, _ = client._chat_tracked(
+                            [{"role": "system", "content": sys_msg},
+                             {"role": "user",   "content": user_msg}],
+                            max_tokens=400 + len(batch) * 60
+                        )
+                        if raw.startswith('```'):
+                            parts = raw.split('```')
+                            raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
+                        result_map = json.loads(raw.strip())
+                    except Exception as ex:
+                        win.after(0, lambda e=str(ex): lbl_p.config(
+                            text=f'LLM 오류: {e[:70]}', fg='#ff6b6b'))
+                        continue
+
+                    for k, item in enumerate(batch, 1):
+                        new_tags = result_map.get(str(k), [])
+                        if not new_tags:
+                            continue
+                        path = item['path']
+                        old_tags = item['tags']
+                        # 기존 태그 제거 후 새 태그 삽입
+                        for t in old_tags:
+                            self.db.remove_tag(path, t)
+                        for t in new_tags:
+                            if t: self.db.add_tag(path, t)
+                        done += 1
+
+                        def _upd(iid=item['iid'], tags=new_tags, n=done, tot=total):
+                            pb['value'] = n
+                            lbl_p.config(text=f'{n}/{tot}개 처리')
+                            try:
+                                old_vals = tv.item(iid, 'values')
+                                tv.item(iid, values=(old_vals[0], old_vals[1],
+                                                     '  '.join(tags[:8]), old_vals[3]))
+                            except Exception: pass
+                        win.after(0, _upd)
+
+                def _done():
+                    try: prog_win.destroy()
+                    except Exception: pass
+                    self._reload_sidebar()
+                    self._reload()
+                    messagebox.showinfo('완료', f'{done}개 항목의 태그를 번역했습니다.', parent=win)
+                win.after(0, _done)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        # 초기 로드
+        _load()
 
     # ── MISC ────────────────────────────────────
     def _check_ffmpeg(self):

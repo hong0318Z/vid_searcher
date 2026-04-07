@@ -3203,15 +3203,14 @@ class VidSort(tk.Tk):
                 win.after(0, _upd)
 
                 # 스크래핑
-                meta = jav_scraper.fetch_meta(code)
+                meta, scrape_err = jav_scraper.fetch_meta_verbose(code)
                 if not meta or not meta.get('title'):
-                    # 실패 → jav_done 안 찍음, 리스트에 표시만 변경
-                    fail_msg = f'❌ {code}  스크래핑 실패'
-                    def _fail(idx=i, msg=fail_msg):
+                    # 실패 → jav_done 안 찍음, 리스트에 오류 사유 표시
+                    fail_entry = f'  ❌ {code}  {scrape_err}'
+                    def _fail(idx=i, entry=fail_entry):
                         try:
-                            lb.itemconfig(idx, fg='#ff6b6b')
                             lb.delete(idx)
-                            lb.insert(idx, f'  ❌ {msg}')
+                            lb.insert(idx, entry)
                             lb.itemconfig(idx, fg='#ff6b6b')
                         except Exception:
                             pass

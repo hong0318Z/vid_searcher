@@ -86,18 +86,24 @@ def _soup(html: str):
 # ─────────────────────────────────────────────────
 JAVDB_BASE = 'https://javdb.com'
 
-def _fetch_javdb(code: str) -> dict | None:
+def _fetch_javdb(code: str) -> tuple:
+    """(meta_dict | None, error_str) 반환"""
     if not _HAS_BS4:
-        return None
+        return None, 'beautifulsoup4 미설치'
     try:
-        r = _get(f'{JAVDB_BASE}/search?q={code}&f=all')
+        url_search = f'{JAVDB_BASE}/search?q={code}&f=all'
+        print(f'[JavDB] GET {url_search}', flush=True)
+        r = _get(url_search)
+        print(f'[JavDB] status={r.status}', flush=True)
         if r.status != 200:
-            return None
+            return None, f'JavDB 검색 HTTP {r.status}'
         soup = _soup(r.text)
 
         # 코드 일치 카드 우선, 없으면 첫 번째
         movie_path = None
-        for card in soup.select('.movie-list .item, .search-video-section .item'):
+        cards = soup.select('.movie-list .item, .search-video-section .item')
+        print(f'[JavDB] 검색결과 카드 {len(cards)}개', flush=True)
+        for card in cards:
             uid = card.select_one('.uid, .video-title strong')
             if uid and uid.get_text(strip=True).upper() == code.upper():
                 a = card.select_one('a')
@@ -109,13 +115,15 @@ def _fetch_javdb(code: str) -> dict | None:
             if a:
                 movie_path = a.get('href', '')
         if not movie_path:
-            return None
+            return None, f'JavDB 검색결과에 {code} 없음 (카드:{len(cards)}개)'
 
         time.sleep(0.8)
         url = JAVDB_BASE + movie_path if movie_path.startswith('/') else movie_path
+        print(f'[JavDB] 상세 GET {url}', flush=True)
         r2  = _get(url)
+        print(f'[JavDB] 상세 status={r2.status}', flush=True)
         if r2.status != 200:
-            return None
+            return None, f'JavDB 상세페이지 HTTP {r2.status}'
         s = _soup(r2.text)
 
         result = {'code': code, 'source': 'javdb', 'url': url}
@@ -161,27 +169,39 @@ def _fetch_javdb(code: str) -> dict | None:
                 break
         result.setdefault('cover_url', '')
 
-        return result if result['title'] else None
+        print(f'[JavDB] 제목="{result["title"]}" 배우={actresses} 장르={genres}', flush=True)
+        if result['title']:
+            return result, ''
+        return None, 'JavDB 제목 파싱 실패 (HTML 구조 변경 가능성)'
 
     except Exception as e:
-        print(f'[jav_scraper] JavDB 오류 ({code}): {e}')
-        return None
+        import traceback
+        msg = f'JavDB 예외: {e}'
+        print(f'[jav_scraper] {msg}\n{traceback.format_exc()}', flush=True)
+        return None, msg
 
 # ─────────────────────────────────────────────────
 #  Javbus (fallback)
 # ─────────────────────────────────────────────────
 JAVBUS_BASE = 'https://www.javbus.com'
 
-def _fetch_javbus(code: str) -> dict | None:
+def _fetch_javbus(code: str) -> tuple:
+    """(meta_dict | None, error_str) 반환"""
     if not _HAS_BS4:
-        return None
+        return None, 'beautifulsoup4 미설치'
     try:
-        r = _get(f'{JAVBUS_BASE}/{code}')
+        url_direct = f'{JAVBUS_BASE}/{code}'
+        print(f'[Javbus] GET {url_direct}', flush=True)
+        r = _get(url_direct)
+        print(f'[Javbus] status={r.status}', flush=True)
         if r.status != 200:
             # 검색 시도
-            r = _get(f'{JAVBUS_BASE}/search/{code}')
+            url_search = f'{JAVBUS_BASE}/search/{code}'
+            print(f'[Javbus] 검색 GET {url_search}', flush=True)
+            r = _get(url_search)
+            print(f'[Javbus] 검색 status={r.status}', flush=True)
             if r.status != 200:
-                return None
+                return None, f'Javbus HTTP {r.status}'
             s    = _soup(r.text)
             a    = s.select_one('.movie-box')
             if not a:
@@ -229,21 +249,35 @@ def _fetch_javbus(code: str) -> dict | None:
         result['date']      = date
         result['cover_url'] = (cover.get('src') or cover.get('data-src', '')) if cover else ''
 
-        return result if result['title'] else None
+        print(f'[Javbus] 제목="{result["title"]}" 배우={actresses}', flush=True)
+        if result['title']:
+            return result, ''
+        return None, 'Javbus 제목 파싱 실패'
 
     except Exception as e:
-        print(f'[jav_scraper] Javbus 오류 ({code}): {e}')
-        return None
+        import traceback
+        msg = f'Javbus 예외: {e}'
+        print(f'[jav_scraper] {msg}\n{traceback.format_exc()}', flush=True)
+        return None, msg
 
 # ─────────────────────────────────────────────────
 #  공개 API
 # ─────────────────────────────────────────────────
 def fetch_meta(code: str) -> dict | None:
     """JavDB → Javbus 순서로 메타데이터 조회. 실패 시 None."""
-    result = _fetch_javdb(code)
-    if not result:
-        result = _fetch_javbus(code)
-    return result
+    meta, _ = fetch_meta_verbose(code)
+    return meta
+
+def fetch_meta_verbose(code: str) -> tuple:
+    """(meta_dict | None, error_str) 반환. error_str은 최종 실패 원인."""
+    meta, err1 = _fetch_javdb(code)
+    if meta:
+        return meta, ''
+    meta, err2 = _fetch_javbus(code)
+    if meta:
+        return meta, ''
+    combined = f'JavDB: {err1} / Javbus: {err2}'
+    return None, combined
 
 def check_deps() -> list[str]:
     """누락 의존성 목록 반환"""
@@ -253,3 +287,20 @@ def check_deps() -> list[str]:
     if not _HAS_BS4:
         missing.append('beautifulsoup4')
     return missing
+
+# ─────────────────────────────────────────────────
+#  CLI 테스트:  python jav_scraper.py PRED-123
+# ─────────────────────────────────────────────────
+if __name__ == '__main__':
+    import sys, json
+    code_arg = sys.argv[1] if len(sys.argv) > 1 else ''
+    if not code_arg:
+        print('사용법: python jav_scraper.py <AV코드>  예) python jav_scraper.py PRED-123')
+        sys.exit(1)
+    print(f'\n=== 테스트: {code_arg} ===\n')
+    meta, err = fetch_meta_verbose(code_arg)
+    if meta:
+        print('\n[결과]')
+        print(json.dumps(meta, ensure_ascii=False, indent=2))
+    else:
+        print(f'\n[실패] {err}')

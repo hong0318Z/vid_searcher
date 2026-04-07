@@ -1168,7 +1168,7 @@ class VidSort(tk.Tk):
         self._right=tk.Frame(main,bg='#0d0d14')
         self._right.pack(side='left',fill='both',expand=True)
         self.grid_widget=CanvasGrid(self._right,
-                                    on_open=self._open,
+                                    on_open=self._viewer_dlg,
                                     on_ctx=self._ctx,
                                     on_click=self._click)
         self.grid_widget.pack(fill='both',expand=True)
@@ -2087,6 +2087,7 @@ class VidSort(tk.Tk):
         paths=list(self._sel)
         m=tk.Menu(self,tearoff=0,bg='#1a1a28',fg='#dcdcf0',
                   activebackground='#7c6ff7',activeforeground='#fff',font=('Consolas',9))
+        m.add_command(label='🎬  뷰어 / 편집 패널', command=lambda:self._viewer_dlg(path))
         m.add_command(label='▶  재생 (기본 앱)',  command=lambda:self._open(path))
         m.add_command(label='🗂  탐색기에서 열기', command=lambda:self._reveal(path))
         m.add_separator()
@@ -2295,6 +2296,352 @@ class VidSort(tk.Tk):
         ttk.Button(win, text='완료', style='Acc.TButton',
                    command=lambda: (win.destroy(), self._reload_sidebar(), self._reload())
                    ).pack(pady=8)
+
+    # ── INLINE VIEWER / EDITOR ──────────────────
+    def _viewer_dlg(self, path):
+        """영상 플레이어 + 메타데이터 인라인 편집 창.
+        Linux X11 + mpv 있으면 임베딩, 없으면 썸네일+외부 재생."""
+        import shutil as _shutil
+
+        # 현재 목록에서 인덱스 찾기 (이전/다음 탐색용)
+        _vlist  = list(self._videos)       # 스냅샷
+        _cur    = [next((i for i,v in enumerate(_vlist) if v['path']==path), 0)]
+        _proc   = [None]                   # mpv 프로세스 참조
+
+        HAS_MPV   = bool(_shutil.which('mpv'))
+        IS_X11    = bool(os.environ.get('DISPLAY'))
+        CAN_EMBED = HAS_MPV and IS_X11 and sys.platform not in ('win32','darwin')
+
+        win = tk.Toplevel(self)
+        win.title('뷰어 / 편집')
+        win.configure(bg='#0d0d14')
+        win.geometry('1200x700')
+        win.minsize(800, 500)
+
+        # ── 메인 PanedWindow ────────────────────
+        paned = tk.PanedWindow(win, orient='horizontal', bg='#0d0d14',
+                               sashwidth=5, sashrelief='flat', bd=0)
+        paned.pack(fill='both', expand=True)
+
+        # ── 왼쪽: 플레이어 영역 ─────────────────
+        left = tk.Frame(paned, bg='#000000')
+        paned.add(left, minsize=400)
+        paned.paneconfigure(left, stretch='always')
+
+        player_frame = tk.Frame(left, bg='#000000')
+        player_frame.pack(fill='both', expand=True)
+
+        ctrl_bar = tk.Frame(left, bg='#0a0a14', height=36)
+        ctrl_bar.pack(fill='x', side='bottom')
+        ctrl_bar.pack_propagate(False)
+
+        nav_lbl = tk.Label(ctrl_bar, text='', bg='#0a0a14', fg='#666',
+                           font=('Consolas', 9))
+        nav_lbl.pack(side='left', padx=10)
+
+        def _kill():
+            if _proc[0]:
+                try: _proc[0].terminate()
+                except: pass
+                _proc[0] = None
+
+        def _launch_ext(p):
+            if sys.platform == 'win32':    os.startfile(p)
+            elif sys.platform == 'darwin': subprocess.Popen(['open', p])
+            else:                          subprocess.Popen(['xdg-open', p])
+
+        thumb_lbl = [None]   # 썸네일 레이블 참조 유지
+
+        def _show_thumb(p):
+            # 기존 위젯 정리
+            for w in player_frame.winfo_children():
+                w.destroy()
+            thumb_lbl[0] = None
+            try:
+                from PIL import Image as _I, ImageTk as _IT
+                tf = thumb_file(p)
+                if tf.exists():
+                    img = _I.open(tf)
+                    fw = max(player_frame.winfo_width(), 480)
+                    fh = max(player_frame.winfo_height(), 300)
+                    img.thumbnail((fw, fh - 40), _I.LANCZOS)
+                    photo = _IT.PhotoImage(img)
+                    lbl = tk.Label(player_frame, image=photo, bg='#000',
+                                   cursor='hand2')
+                    lbl.image = photo
+                    lbl.place(relx=0.5, rely=0.5, anchor='center')
+                    lbl.bind('<Button-1>', lambda e: _launch_ext(p))
+                    thumb_lbl[0] = lbl
+                    tk.Label(player_frame,
+                             text='▶ 클릭하여 외부 앱으로 재생',
+                             bg='#00000099', fg='#ccc', font=('Consolas', 10),
+                             padx=6, pady=2
+                             ).place(relx=0.5, rely=0.5, anchor='center')
+                    return
+            except Exception:
+                pass
+            # 썸네일 없으면 플레이 버튼
+            tk.Label(player_frame, text='🎬', bg='#000', fg='#444',
+                     font=('Consolas', 48)).place(relx=0.5, rely=0.4, anchor='center')
+            tk.Label(player_frame, text='▶ 더블클릭: 외부 앱으로 재생',
+                     bg='#000', fg='#666', font=('Consolas', 10)
+                     ).place(relx=0.5, rely=0.62, anchor='center')
+            player_frame.bind('<Double-Button-1>', lambda e: _launch_ext(p))
+
+        def _play(p):
+            _kill()
+            if CAN_EMBED:
+                # 기존 썸네일 위젯 제거
+                for w in player_frame.winfo_children():
+                    w.destroy()
+                player_frame.update_idletasks()
+                wid = player_frame.winfo_id()
+                try:
+                    _proc[0] = subprocess.Popen(
+                        ['mpv', f'--wid={wid}', '--no-terminal', '--no-border',
+                         '--keep-open=yes', '--force-window=yes', p],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception as ex:
+                    _show_thumb(p)
+            else:
+                _show_thumb(p)
+                if HAS_MPV:
+                    subprocess.Popen(['mpv', p],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    _launch_ext(p)
+
+        # ── 오른쪽: 메타데이터 편집 패널 ────────
+        right = tk.Frame(paned, bg='#0d0d14', width=380)
+        paned.add(right, minsize=300)
+        paned.paneconfigure(right, stretch='never')
+
+        rc = tk.Canvas(right, bg='#0d0d14', highlightthickness=0)
+        rsb = ttk.Scrollbar(right, orient='vertical', command=rc.yview)
+        rc.configure(yscrollcommand=rsb.set)
+        rsb.pack(side='right', fill='y')
+        rc.pack(fill='both', expand=True)
+        panel = tk.Frame(rc, bg='#0d0d14')
+        pw_id = rc.create_window((0, 0), window=panel, anchor='nw')
+
+        def _sync(e=None):
+            rc.configure(scrollregion=rc.bbox('all'))
+            rc.itemconfig(pw_id, width=rc.winfo_width())
+        panel.bind('<Configure>', _sync)
+        rc.bind('<Configure>', _sync)
+        rc.bind('<MouseWheel>',
+                lambda e: rc.yview_scroll(int(-1*(e.delta/120)), 'units'))
+
+        def _lbl(txt, size=9, bold=False, fg='#aaa', pady=(8,1)):
+            font = ('Consolas', size, 'bold') if bold else ('Consolas', size)
+            tk.Label(panel, text=txt, bg='#0d0d14', fg=fg,
+                     font=font).pack(anchor='w', padx=12, pady=pady)
+
+        # 파일명
+        fname_lbl = tk.Label(panel, text='', bg='#0d0d14', fg='#444',
+                              font=('Consolas', 8), wraplength=330, justify='left')
+        fname_lbl.pack(anchor='w', padx=12, pady=(10, 0))
+
+        # 별칭
+        _lbl('제목 / 별칭', bold=True)
+        alias_var = tk.StringVar()
+        alias_ent = ttk.Entry(panel, textvariable=alias_var,
+                              font=('Consolas', 10))
+        alias_ent.pack(fill='x', padx=12)
+
+        # 설명
+        _lbl('설명', bold=True)
+        desc_wrap = tk.Frame(panel, bg='#0d0d14')
+        desc_wrap.pack(fill='x', padx=12)
+        dvsb = ttk.Scrollbar(desc_wrap, orient='vertical')
+        dvsb.pack(side='right', fill='y')
+        desc_txt = tk.Text(desc_wrap, bg='#1a1a28', fg='#dcdcf0',
+                           insertbackground='#dcdcf0',
+                           font=('Consolas', 9), wrap='word', height=6,
+                           borderwidth=0, yscrollcommand=dvsb.set)
+        dvsb.config(command=desc_txt.yview)
+        desc_txt.pack(fill='x')
+
+        # 태그
+        _lbl('태그', bold=True)
+        tags_wrap = tk.Frame(panel, bg='#131320',
+                             highlightthickness=1, highlightbackground='#2a2a3d')
+        tags_wrap.pack(fill='x', padx=12, pady=(0,2))
+
+        def _refresh_tags(p):
+            for w in tags_wrap.winfo_children(): w.destroy()
+            tags = self.db.get_tags(p)
+            if not tags:
+                tk.Label(tags_wrap, text='(태그 없음)',
+                         bg='#131320', fg='#444', font=('Consolas', 8)
+                         ).pack(anchor='w', padx=6, pady=4)
+                return
+            row_f = None; x_used = 0
+            for t in tags:
+                chip = tk.Frame(tags_wrap, bg='#2a2a44', bd=0)
+                chip.pack(side='left', padx=(3,0), pady=3)
+                tk.Label(chip, text=t, bg='#2a2a44', fg='#c8c8f0',
+                         font=('Consolas', 8), padx=4).pack(side='left')
+                def _rm(tag=t, fp=p):
+                    self.db.remove_tag(fp, tag)
+                    _refresh_tags(fp)
+                    self._reload()
+                tk.Button(chip, text='×', bg='#2a2a44', fg='#666',
+                          bd=0, padx=2, font=('Consolas', 8),
+                          activebackground='#cc3333', activeforeground='#fff',
+                          cursor='hand2', command=_rm).pack(side='left')
+
+        # 태그 추가
+        add_frame = tk.Frame(panel, bg='#0d0d14')
+        add_frame.pack(fill='x', padx=12, pady=(3,0))
+        add_var = tk.StringVar()
+
+        all_tags_cache = [self.db.all_tags()]
+
+        def _add_tag():
+            p = _vlist[_cur[0]]['path']
+            t = add_var.get().strip()
+            if not t: return
+            self.db.add_tag(p, t)
+            add_var.set('')
+            _refresh_tags(p)
+            self._reload()
+
+        add_ent = ttk.Entry(add_frame, textvariable=add_var,
+                            font=('Consolas', 9))
+        add_ent.pack(side='left', fill='x', expand=True)
+        add_ent.bind('<Return>', lambda e: _add_tag())
+        ttk.Button(add_frame, text='+ 추가', command=_add_tag
+                   ).pack(side='left', padx=(4,0))
+
+        # 전체 태그에서 선택
+        def _tag_picker():
+            p = _vlist[_cur[0]]['path']
+            all_t = self.db.all_tags()
+            cur_t = set(self.db.get_tags(p))
+            pw = tk.Toplevel(win); pw.title('태그 선택')
+            pw.configure(bg='#0d0d14'); pw.geometry('320x420')
+            pw.grab_set()
+            sv = tk.StringVar()
+            ttk.Entry(pw, textvariable=sv, font=('Consolas', 9)
+                      ).pack(fill='x', padx=10, pady=(8,2))
+            lb = tk.Listbox(pw, bg='#1a1a28', fg='#dcdcf0',
+                            font=('Consolas', 9), selectmode='extended',
+                            borderwidth=0, highlightthickness=0)
+            lb.pack(fill='both', expand=True, padx=10)
+            def _flt(*a):
+                lb.delete(0,'end')
+                q = sv.get().lower()
+                for t in all_t:
+                    if t not in cur_t and q in t.lower():
+                        lb.insert('end', t)
+            sv.trace_add('write', _flt); _flt()
+            def _apply():
+                sel = [lb.get(i) for i in lb.curselection()]
+                for t in sel:
+                    self.db.add_tag(p, t)
+                _refresh_tags(p); self._reload(); pw.destroy()
+            ttk.Button(pw, text='추가', style='Acc.TButton',
+                       command=_apply).pack(pady=6)
+
+        ttk.Button(panel, text='📋 전체 태그에서 선택',
+                   command=_tag_picker).pack(anchor='w', padx=12, pady=(2,6))
+
+        # 저장 상태 레이블
+        save_lbl = tk.Label(panel, text='', bg='#0d0d14', fg='#4dffb4',
+                             font=('Consolas', 9))
+        save_lbl.pack(anchor='w', padx=12)
+
+        # 저장 / AI 자동태그 버튼
+        bf = tk.Frame(panel, bg='#0d0d14')
+        bf.pack(fill='x', padx=12, pady=(2,8))
+
+        def _save():
+            p = _vlist[_cur[0]]['path']
+            a = alias_var.get().strip()
+            d = desc_txt.get('1.0', 'end').strip()
+            self.db.set_alias(p, a)
+            self.db.set_description(p, d)
+            v = next((x for x in self._videos if x['path'] == p), None)
+            if v: v['alias'] = a
+            save_lbl.config(text='✔ 저장됨')
+            win.after(1800, lambda: save_lbl.config(text=''))
+            self._reload()
+
+        def _ai_tag():
+            p = _vlist[_cur[0]]['path']
+            self._llm_auto_tag_paths([p])
+
+        ttk.Button(bf, text='💾 저장', style='Acc.TButton',
+                   command=_save).pack(side='left', padx=(0,4))
+        ttk.Button(bf, text='🤖 AI 자동태그',
+                   command=_ai_tag).pack(side='left', padx=4)
+
+        ttk.Separator(panel, orient='horizontal').pack(fill='x', padx=12, pady=6)
+
+        # 파일 정보
+        info_lbl = tk.Label(panel, text='', bg='#0d0d14', fg='#555',
+                             font=('Consolas', 8), justify='left', wraplength=330)
+        info_lbl.pack(anchor='w', padx=12, pady=(0,8))
+
+        # ── 이전/다음 버튼 ───────────────────────
+        def _go(delta):
+            ni = _cur[0] + delta
+            if 0 <= ni < len(_vlist):
+                _cur[0] = ni
+                p = _vlist[ni]['path']
+                _load(p)
+                _play(p)
+
+        ttk.Button(ctrl_bar, text='◀ 이전',
+                   command=lambda: _go(-1)).pack(side='left', padx=4, pady=4)
+        ttk.Button(ctrl_bar, text='다음 ▶',
+                   command=lambda: _go(1)).pack(side='left', padx=4)
+        ttk.Button(ctrl_bar, text='▶ 외부 앱',
+                   command=lambda: _launch_ext(_vlist[_cur[0]]['path'])
+                   ).pack(side='right', padx=8)
+
+        # ── 패널 데이터 로드 함수 ────────────────
+        def _load(p):
+            v   = next((x for x in self._videos if x['path'] == p), None)
+            row = self.db.conn.execute(
+                "SELECT alias, description FROM files WHERE path=?", (p,)
+            ).fetchone()
+            cur_alias = (row[0] or '') if row else ''
+            cur_desc  = (row[1] or '') if row else ''
+
+            fname_lbl.config(text=Path(p).name)
+            alias_var.set(cur_alias)
+            desc_txt.delete('1.0', 'end')
+            desc_txt.insert('1.0', cur_desc)
+            _refresh_tags(p)
+
+            # 파일 정보
+            parts = []
+            if v:
+                if v.get('duration'):  parts.append(f'⏱ {fmt_dur(v["duration"])}')
+                if v.get('width'):     parts.append(f'📐 {v["width"]}×{v["height"]}')
+                if v.get('size'):      parts.append(f'💾 {v["size"]/1024/1024:.1f} MB')
+            info_lbl.config(text='   '.join(parts))
+
+            # 타이틀 바
+            win.title(f'뷰어 — {cur_alias or Path(p).name}')
+
+            # 내비 레이블
+            nav_lbl.config(text=f'{_cur[0]+1} / {len(_vlist)}')
+
+        # ── 키보드 단축키 ────────────────────────
+        win.bind('<Left>',           lambda e: _go(-1))
+        win.bind('<Right>',          lambda e: _go(1))
+        win.bind('<Control-s>',      lambda e: _save())
+        win.bind('<Control-Return>', lambda e: _save())
+
+        # ── 종료시 mpv 정리 ──────────────────────
+        win.protocol('WM_DELETE_WINDOW', lambda: (_kill(), win.destroy()))
+
+        # ── 초기 로드 ────────────────────────────
+        _load(path)
+        win.after(150, lambda: _play(path))   # 창 그려진 후 재생 시작
 
     # ── FILE OPS ────────────────────────────────
     def _open(self,path):

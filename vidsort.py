@@ -18,10 +18,42 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
 # VLC 인라인 플레이어 (python-vlc 설치 시 자동 활성화)
+def _setup_vlc_path():
+    """Windows에서 libvlc.dll 위치를 DLL 검색 경로에 추가"""
+    if sys.platform != 'win32':
+        return
+    try:
+        import winreg
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            for sub in (r'SOFTWARE\VideoLAN\VLC',
+                        r'SOFTWARE\WOW6432Node\VideoLAN\VLC'):
+                try:
+                    with winreg.OpenKey(hive, sub) as k:
+                        d = winreg.QueryValueEx(k, 'InstallDir')[0]
+                        if d and (Path(d) / 'libvlc.dll').exists():
+                            os.environ['PATH'] = d + os.pathsep + os.environ.get('PATH', '')
+                            # Python 3.8+ — DLL 검색 경로 직접 등록
+                            if hasattr(os, 'add_dll_directory'):
+                                os.add_dll_directory(d)
+                            return
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # 레지스트리 실패 시 일반 경로 시도
+    for d in (r'C:\Program Files\VideoLAN\VLC',
+              r'C:\Program Files (x86)\VideoLAN\VLC'):
+        if (Path(d) / 'libvlc.dll').exists():
+            os.environ['PATH'] = d + os.pathsep + os.environ.get('PATH', '')
+            if hasattr(os, 'add_dll_directory'):
+                os.add_dll_directory(d)
+            return
+
+_setup_vlc_path()
 try:
     import vlc as _vlc
     HAS_VLC = True
-except ImportError:
+except (ImportError, OSError, FileNotFoundError):
     HAS_VLC = False
     _vlc = None
 

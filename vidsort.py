@@ -1571,8 +1571,7 @@ class VidSort(tk.Tk):
                         + tags_str
                     )
                     try:
-                        raw = client._chat([{"role":"user","content":prompt}],
-                                           max_tokens=400)
+                        raw = client._chat([{"role":"user","content":prompt}])
                         if raw.startswith('```'):
                             raw = raw.split('```')[1].lstrip('json').strip()
                         result = json.loads(raw.strip())
@@ -1639,7 +1638,7 @@ class VidSort(tk.Tk):
                         [{"role": "system",
                           "content": "당신은 태그 정리 전문가입니다. JSON만 출력하세요."},
                          {"role": "user", "content": prompt}],
-                        max_tokens=2000
+                        max_tokens=64000
                     )
                     if '```' in raw:
                         raw = raw.split('```')[1].lstrip('json').strip()
@@ -4203,7 +4202,7 @@ class VidSort(tk.Tk):
                     raw, tok_in, tok_out = client._chat_tracked(
                         [{"role": "system", "content": sys_msg},
                          {"role": "user",   "content": user_msg}],
-                        max_tokens=max(800, len(batch) * 350)
+                        max_tokens=64000
                     )
                     _log['calls'] += 1
                     _log['tok_in']  += tok_in
@@ -4517,7 +4516,7 @@ class VidSort(tk.Tk):
                         raw, _, _ = client._chat_tracked(
                             [{"role": "system", "content": sys_msg},
                              {"role": "user",   "content": user_msg}],
-                            max_tokens=400 + len(batch) * 60
+                            max_tokens=64000
                         )
                         if raw.startswith('```'):
                             parts = raw.split('```')

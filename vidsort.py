@@ -53,9 +53,11 @@ _setup_vlc_path()
 try:
     import vlc as _vlc
     HAS_VLC = True
-except (ImportError, OSError, FileNotFoundError):
+    print(f'[VLC] 로드 성공: {_vlc.__file__}', flush=True)
+except (ImportError, OSError, FileNotFoundError) as _vlc_load_err:
     HAS_VLC = False
     _vlc = None
+    print(f'[VLC] 로드 실패 (폴백): {_vlc_load_err}', flush=True)
 
 # ─────────────────────────────────────────────────────
 #  CONSTANTS
@@ -3056,27 +3058,49 @@ class VidSort(tk.Tk):
             player_frame.update_idletasks()
 
             if CAN_VLC:
+                _vlc_err = [None]
                 try:
-                    inst = _vlc.Instance()
+                    # Windows: 경로를 VLC URI로 변환
+                    if sys.platform == 'win32':
+                        uri = 'file:///' + p.replace('\\', '/').lstrip('/')
+                    else:
+                        uri = p
+                    inst = _vlc.Instance('--no-video-title-show',
+                                         '--quiet', '--no-osd')
                     _inst[0] = inst
                     mp = inst.media_player_new()
                     _mp[0] = mp
                     mp.audio_set_volume(int(_vol_var.get()))
-                    media = inst.media_new(p)
+                    media = inst.media_new(uri)
                     mp.set_media(media)
+                    # 윈도우 핸들을 완전히 렌더된 후 가져오기
+                    player_frame.update()
                     wid = player_frame.winfo_id()
+                    print(f'[VLC] wid={wid}  uri={uri}', flush=True)
                     if sys.platform == 'win32':
                         mp.set_hwnd(wid)
                     elif sys.platform == 'darwin':
                         mp.set_nsobject(wid)
                     else:
                         mp.set_xwindow(wid)
-                    mp.play()
-                    _seek_var.set(0)
-                    win.after(600, _update_seek)   # 안정화 후 업데이터 시작
-                    return
-                except Exception:
-                    pass  # VLC 실패 시 아래 경로로
+                    ret = mp.play()
+                    print(f'[VLC] play() returned {ret}', flush=True)
+                    if ret == 0:   # 0 = success
+                        _seek_var.set(0)
+                        win.after(600, _update_seek)
+                        return
+                    _vlc_err[0] = f'play() returned {ret}'
+                except Exception as e:
+                    _vlc_err[0] = str(e)
+                    print(f'[VLC] exception: {e}', flush=True)
+                # VLC 실패 — 화면에 오류 표시 후 폴백
+                for w in player_frame.winfo_children():
+                    w.destroy()
+                tk.Label(player_frame,
+                         text=f'⚠ VLC 오류:\n{_vlc_err[0]}\n\n(외부 앱 버튼으로 재생)',
+                         bg='#0a0005', fg='#ff6666', font=('Consolas', 9),
+                         justify='center', wraplength=380
+                         ).place(relx=0.5, rely=0.45, anchor='center')
 
             if CAN_MPV:
                 wid = player_frame.winfo_id()

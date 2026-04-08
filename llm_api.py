@@ -50,11 +50,11 @@ class LLMClient:
         }
 
     # ── 내부 호출 ────────────────────────────────
-    def _chat(self, messages: list, max_tokens: int = 100) -> str:
+    def _chat(self, messages: list, max_tokens: int = MAX_OUTPUT_TOKENS) -> str:
         content, _, _ = self._chat_tracked(messages, max_tokens)
         return content
 
-    def _chat_tracked(self, messages: list, max_tokens: int = 100,
+    def _chat_tracked(self, messages: list, max_tokens: int = MAX_OUTPUT_TOKENS,
                       on_chunk: callable = None) -> tuple:
         """(content, prompt_tokens, completion_tokens) 반환.
         스트리밍으로 수신 — 토큰이 오는 즉시 누적, 타임아웃은 청크 간격 기준."""
@@ -178,7 +178,7 @@ class LLMClient:
         try:
             raw = self._chat(
                 [{"role": "user", "content": prompt}],
-                max_tokens=400 + len(eligible) * 60,
+                max_tokens=MAX_OUTPUT_TOKENS,
             )
             if raw.startswith("```"):
                 raw = raw.split("```")[1].lstrip("json").strip()

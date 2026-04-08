@@ -19,9 +19,24 @@ from PIL import Image, ImageTk
 
 # VLC 인라인 플레이어 (python-vlc 설치 시 자동 활성화)
 def _setup_vlc_path():
-    """Windows에서 libvlc.dll 위치를 DLL 검색 경로에 추가"""
+    """Windows에서 libvlc.dll 위치를 python-vlc가 인식하도록 환경변수 설정.
+    python-vlc의 find_lib()은 PYTHON_VLC_LIB_PATH 를 가장 먼저 확인한다."""
     if sys.platform != 'win32':
-        return
+        return None
+
+    def _apply(d: str):
+        dll = str(Path(d) / 'libvlc.dll')
+        # python-vlc 공식 환경변수 — find_lib()이 이걸 최우선 사용
+        os.environ['PYTHON_VLC_LIB_PATH'] = dll
+        os.environ['VLC_PLUGIN_PATH']      = str(Path(d) / 'plugins')
+        os.environ['PATH']                 = d + os.pathsep + os.environ.get('PATH', '')
+        if hasattr(os, 'add_dll_directory'):
+            try: os.add_dll_directory(d)
+            except Exception: pass
+        print(f'[VLC] DLL 경로 설정: {dll}', flush=True)
+        return d
+
+    # 1) 레지스트리
     try:
         import winreg
         for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
@@ -31,23 +46,20 @@ def _setup_vlc_path():
                     with winreg.OpenKey(hive, sub) as k:
                         d = winreg.QueryValueEx(k, 'InstallDir')[0]
                         if d and (Path(d) / 'libvlc.dll').exists():
-                            os.environ['PATH'] = d + os.pathsep + os.environ.get('PATH', '')
-                            # Python 3.8+ — DLL 검색 경로 직접 등록
-                            if hasattr(os, 'add_dll_directory'):
-                                os.add_dll_directory(d)
-                            return
+                            return _apply(d)
                 except Exception:
                     pass
     except Exception:
         pass
-    # 레지스트리 실패 시 일반 경로 시도
+
+    # 2) 일반 설치 경로
     for d in (r'C:\Program Files\VideoLAN\VLC',
               r'C:\Program Files (x86)\VideoLAN\VLC'):
         if (Path(d) / 'libvlc.dll').exists():
-            os.environ['PATH'] = d + os.pathsep + os.environ.get('PATH', '')
-            if hasattr(os, 'add_dll_directory'):
-                os.add_dll_directory(d)
-            return
+            return _apply(d)
+
+    print('[VLC] libvlc.dll 를 찾지 못했습니다 — VLC가 설치되어 있나요?', flush=True)
+    return None
 
 _setup_vlc_path()
 try:

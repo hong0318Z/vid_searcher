@@ -1624,6 +1624,9 @@ class VidSort(tk.Tk):
                     '반드시 JSON만 출력: {"대표태그": ["통합될태그1", "통합될태그2"], ...}\n\n'
                     + tags_str
                 )
+                # ── LLM 호출 ────────────────────────
+                err_msg = [None]
+                result  = {}
                 try:
                     raw = client._chat(
                         [{"role": "system",
@@ -1636,25 +1639,53 @@ class VidSort(tk.Tk):
                     brace = raw.find('{')
                     if brace > 0: raw = raw[brace:]
                     result = json.loads(raw.strip())
+                    if not isinstance(result, dict):
+                        result = {}
                 except Exception as ex:
-                    prog.after(0, prog.destroy)
-                    prog.after(0, lambda: messagebox.showerror('오류', f'LLM 오류: {ex}'))
+                    err_msg[0] = str(ex)
+
+                win.after(0, prog.destroy)
+
+                if err_msg[0]:
+                    win.after(0, lambda m=err_msg[0]:
+                              messagebox.showerror('LLM 오류', m, parent=win))
                     return
 
-                # 유효한 그룹만 필터 (대표 태그와 통합 태그 모두 기존 태그여야 함)
-                all_set = set(all_t)
+                # ── 태그 매칭 (대소문자/공백 무시) ───
+                # lower → 원본 매핑
+                low2orig = {t.strip().lower(): t for t in all_t}
+
                 groups = {}
-                for rep, members in result.items():
-                    valid = [m for m in members if m != rep and m in all_set]
-                    if valid and rep in all_set:
+                for rep_raw, members_raw in result.items():
+                    # 대표 태그: LLM이 반환한 이름이 실제 태그에 있는지 확인
+                    rep_key = rep_raw.strip().lower()
+                    rep = low2orig.get(rep_key)
+                    if not rep:
+                        # 대표 태그가 목록에 없으면 멤버 중 하나를 대표로
+                        for m in (members_raw or []):
+                            mk = m.strip().lower()
+                            if mk in low2orig:
+                                rep = low2orig[mk]
+                                members_raw = [x for x in members_raw if x != m]
+                                break
+                    if not rep:
+                        continue
+                    # 유효한 멤버만 필터
+                    valid = []
+                    for m in (members_raw or []):
+                        mk = m.strip().lower()
+                        orig = low2orig.get(mk)
+                        if orig and orig != rep:
+                            valid.append(orig)
+                    if valid:
                         groups[rep] = valid
 
-                prog.after(0, prog.destroy)
                 if not groups:
-                    prog.after(0, lambda: messagebox.showinfo(
-                        '태그 통합', 'LLM이 통합할 유사 태그를 찾지 못했습니다.'))
+                    win.after(0, lambda: messagebox.showinfo(
+                        '태그 통합', 'LLM이 통합할 유사 태그를 찾지 못했습니다.\n'
+                        '(태그가 이미 잘 정리되어 있거나, 비슷한 태그가 없을 수 있습니다)'))
                     return
-                prog.after(0, lambda: _show_merge_ui(groups))
+                win.after(0, lambda g=groups: _show_merge_ui(g))
 
             threading.Thread(target=worker, daemon=True).start()
 

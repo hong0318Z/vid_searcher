@@ -17,6 +17,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
+# VLC 인라인 플레이어 (python-vlc 설치 시 자동 활성화)
+try:
+    import vlc as _vlc
+    HAS_VLC = True
+except ImportError:
+    HAS_VLC = False
+    _vlc = None
+
 # ─────────────────────────────────────────────────────
 #  CONSTANTS
 # ─────────────────────────────────────────────────────
@@ -2817,13 +2825,19 @@ class VidSort(tk.Tk):
         import shutil as _shutil
 
         # 현재 목록에서 인덱스 찾기 (이전/다음 탐색용)
-        _vlist  = list(self._videos)       # 스냅샷
-        _cur    = [next((i for i,v in enumerate(_vlist) if v['path']==path), 0)]
-        _proc   = [None]                   # mpv 프로세스 참조
+        _vlist   = list(self._videos)      # 스냅샷
+        _cur     = [next((i for i,v in enumerate(_vlist) if v['path']==path), 0)]
+        _proc    = [None]   # mpv 프로세스
+        _mp      = [None]   # vlc.MediaPlayer
+        _inst    = [None]   # vlc.Instance
+        _paused  = [False]
+        _seeking = [False]
 
         HAS_MPV   = bool(_shutil.which('mpv'))
         IS_X11    = bool(os.environ.get('DISPLAY'))
-        CAN_EMBED = HAS_MPV and IS_X11 and sys.platform not in ('win32','darwin')
+        CAN_MPV   = HAS_MPV and IS_X11 and sys.platform not in ('win32', 'darwin')
+        CAN_VLC   = HAS_VLC
+        CAN_EMBED = CAN_VLC or CAN_MPV
 
         win = tk.Toplevel(self)
         win.title('뷰어 / 편집')
@@ -2844,19 +2858,64 @@ class VidSort(tk.Tk):
         player_frame = tk.Frame(left, bg='#000000')
         player_frame.pack(fill='both', expand=True)
 
-        ctrl_bar = tk.Frame(left, bg='#0a0a14', height=36)
+        ctrl_bar = tk.Frame(left, bg='#0a0a14')
         ctrl_bar.pack(fill='x', side='bottom')
-        ctrl_bar.pack_propagate(False)
 
-        nav_lbl = tk.Label(ctrl_bar, text='', bg='#0a0a14', fg='#666',
+        # ── 1행: 내비게이션 ─────────────────────
+        nav_row = tk.Frame(ctrl_bar, bg='#0a0a14', height=34)
+        nav_row.pack(fill='x')
+        nav_row.pack_propagate(False)
+
+        nav_lbl = tk.Label(nav_row, text='', bg='#0a0a14', fg='#666',
                            font=('Consolas', 9))
         nav_lbl.pack(side='left', padx=10)
+
+        # ── 2행: VLC 미디어 컨트롤 (CAN_VLC 시 표시) ──
+        _seek_var = tk.DoubleVar(value=0)
+        _vol_var  = tk.IntVar(value=80)
+        _pp_text  = tk.StringVar(value='⏸')
+        _time_lbl = [None]
+        _seek_w   = [None]
+
+        if CAN_VLC:
+            vlc_row = tk.Frame(ctrl_bar, bg='#060612', height=30)
+            vlc_row.pack(fill='x')
+            vlc_row.pack_propagate(False)
+            # 버튼 자리만 잡아두고, 실제 command는 함수 정의 후 연결
+            _pp_btn  = ttk.Button(vlc_row, textvariable=_pp_text, width=3)
+            _pp_btn.pack(side='left', padx=(6, 2), pady=3)
+            _st_btn  = ttk.Button(vlc_row, text='⏹', width=2)
+            _st_btn.pack(side='left', padx=2)
+            tl = tk.Label(vlc_row, text='--:-- / --:--',
+                          bg='#060612', fg='#777', font=('Consolas', 8))
+            tl.pack(side='left', padx=6)
+            _time_lbl[0] = tl
+            sw = ttk.Scale(vlc_row, variable=_seek_var, from_=0, to=1000,
+                           orient='horizontal')
+            sw.pack(side='left', fill='x', expand=True, padx=4)
+            _seek_w[0] = sw
+            tk.Label(vlc_row, text='🔊', bg='#060612', fg='#555',
+                     font=('Consolas', 9)).pack(side='right', padx=(0, 2))
+            vol_sw = ttk.Scale(vlc_row, variable=_vol_var, from_=0, to=100,
+                               orient='horizontal', length=68)
+            vol_sw.pack(side='right', padx=(0, 10))
 
         def _kill():
             if _proc[0]:
                 try: _proc[0].terminate()
                 except: pass
                 _proc[0] = None
+            if _mp[0]:
+                try:
+                    _mp[0].stop()
+                    _mp[0].release()
+                except: pass
+                _mp[0] = None
+            if _inst[0]:
+                try: _inst[0].release()
+                except: pass
+                _inst[0] = None
+            _paused[0] = False
 
         def _launch_ext(p):
             if sys.platform == 'win32':    os.startfile(p)
@@ -2901,24 +2960,105 @@ class VidSort(tk.Tk):
                      ).place(relx=0.5, rely=0.62, anchor='center')
             player_frame.bind('<Double-Button-1>', lambda e: _launch_ext(p))
 
+        # ── VLC 헬퍼 함수들 ────────────────────────
+        def _update_seek():
+            """VLC 재생 위치를 seek bar / time label에 반영 (500ms 주기)"""
+            if not win.winfo_exists():
+                return
+            mp = _mp[0]
+            if mp and mp.is_playing() or (mp and _paused[0]):
+                pos = mp.get_position()   # 0.0 ~ 1.0
+                if not _seeking[0]:
+                    _seek_var.set(pos * 1000)
+                if _time_lbl[0]:
+                    t  = max(0, int(mp.get_time() / 1000))
+                    ln = mp.get_length()
+                    d  = max(0, int(ln / 1000)) if ln > 0 else 0
+                    _time_lbl[0].config(
+                        text=f'{fmt_dur(t)} / {fmt_dur(d) if d else "--:--"}')
+            win.after(500, _update_seek)
+
+        def _toggle_pause():
+            mp = _mp[0]
+            if not mp:
+                return
+            mp.pause()
+            _paused[0] = not _paused[0]
+            _pp_text.set('▶' if _paused[0] else '⏸')
+
+        def _stop_vlc():
+            _kill()
+            _show_thumb(_vlist[_cur[0]]['path'])
+            _pp_text.set('⏸')
+            _seek_var.set(0)
+            if _time_lbl[0]:
+                _time_lbl[0].config(text='--:-- / --:--')
+
+        def _seek_vlc():
+            mp = _mp[0]
+            if mp:
+                mp.set_position(_seek_var.get() / 1000.0)
+
+        def _set_vol(*_):
+            mp = _mp[0]
+            if mp:
+                mp.audio_set_volume(int(_vol_var.get()))
+
+        # seek bar 드래그 이벤트
+        if CAN_VLC and _seek_w[0]:
+            _seek_w[0].bind('<ButtonPress-1>',
+                            lambda e: _seeking.__setitem__(0, True))
+            _seek_w[0].bind('<ButtonRelease-1>',
+                            lambda e: (_seek_vlc(), _seeking.__setitem__(0, False)))
+            _vol_var.trace_add('write', _set_vol)
+            # 버튼 command 연결 (이제 함수 정의됨)
+            _pp_btn.configure(command=_toggle_pause)
+            _st_btn.configure(command=_stop_vlc)
+
         def _play(p):
             _kill()
-            if CAN_EMBED:
-                # 기존 썸네일 위젯 제거
-                for w in player_frame.winfo_children():
-                    w.destroy()
-                player_frame.update_idletasks()
+            _pp_text.set('⏸')
+            _paused[0] = False
+            for w in player_frame.winfo_children():
+                w.destroy()
+            player_frame.update_idletasks()
+
+            if CAN_VLC:
+                try:
+                    inst = _vlc.Instance()
+                    _inst[0] = inst
+                    mp = inst.media_player_new()
+                    _mp[0] = mp
+                    mp.audio_set_volume(int(_vol_var.get()))
+                    media = inst.media_new(p)
+                    mp.set_media(media)
+                    wid = player_frame.winfo_id()
+                    if sys.platform == 'win32':
+                        mp.set_hwnd(wid)
+                    elif sys.platform == 'darwin':
+                        mp.set_nsobject(wid)
+                    else:
+                        mp.set_xwindow(wid)
+                    mp.play()
+                    _seek_var.set(0)
+                    win.after(600, _update_seek)   # 안정화 후 업데이터 시작
+                    return
+                except Exception:
+                    pass  # VLC 실패 시 아래 경로로
+
+            if CAN_MPV:
                 wid = player_frame.winfo_id()
                 try:
                     _proc[0] = subprocess.Popen(
                         ['mpv', f'--wid={wid}', '--no-terminal', '--no-border',
                          '--keep-open=yes', '--force-window=yes', p],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception as ex:
-                    _show_thumb(p)
-            else:
-                # 썸네일만 표시 — 재생은 썸네일 클릭 또는 ▶ 외부 앱 버튼으로
-                _show_thumb(p)
+                    return
+                except Exception:
+                    pass
+
+            # 폴백: 썸네일만 표시
+            _show_thumb(p)
 
         # ── 오른쪽: 메타데이터 편집 패널 ────────
         right = tk.Frame(paned, bg='#0d0d14', width=380)
@@ -3102,13 +3242,16 @@ class VidSort(tk.Tk):
                 _load(p)
                 _play(p)
 
-        ttk.Button(ctrl_bar, text='◀ 이전',
+        ttk.Button(nav_row, text='◀ 이전',
                    command=lambda: _go(-1)).pack(side='left', padx=4, pady=4)
-        ttk.Button(ctrl_bar, text='다음 ▶',
+        ttk.Button(nav_row, text='다음 ▶',
                    command=lambda: _go(1)).pack(side='left', padx=4)
-        ttk.Button(ctrl_bar, text='▶ 외부 앱',
+        ttk.Button(nav_row, text='▶ 외부 앱',
                    command=lambda: _launch_ext(_vlist[_cur[0]]['path'])
                    ).pack(side='right', padx=8)
+        if CAN_VLC:
+            tk.Label(nav_row, text='VLC', bg='#0a0a14', fg='#3a3a5a',
+                     font=('Consolas', 7)).pack(side='right', padx=4)
 
         # ── 패널 데이터 로드 함수 ────────────────
         def _load(p):

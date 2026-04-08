@@ -493,10 +493,16 @@ class DB:
             self.conn.commit()
 
     def rename_tag(self, old_tag: str, new_tag: str):
-        """태그명 일괄 변경 (모든 파일의 태그 + tag_meta)"""
+        """태그명 일괄 변경 (모든 파일의 태그 + tag_meta).
+        이미 new_tag가 있는 파일은 old_tag만 삭제 (중복 방지)."""
         with self.lock:
+            # 1) old 태그가 있는 파일에 new 태그 삽입 (이미 있으면 무시)
             self.conn.execute(
-                "UPDATE tags SET tag=? WHERE tag=?", (new_tag, old_tag))
+                "INSERT OR IGNORE INTO tags(path, tag) "
+                "SELECT path, ? FROM tags WHERE tag=?", (new_tag, old_tag))
+            # 2) old 태그 삭제
+            self.conn.execute("DELETE FROM tags WHERE tag=?", (old_tag,))
+            # 3) tag_meta 이전
             self.conn.execute(
                 "UPDATE tag_meta SET tag=? WHERE tag=?", (new_tag, old_tag))
             self.conn.commit()
@@ -1617,13 +1623,17 @@ class VidSort(tk.Tk):
                 tags_str = '\n'.join(f'{i+1}. {t}' for i, t in enumerate(all_t))
                 prompt = (
                     '아래 태그 목록을 분석해서, 동일하거나 매우 유사한 의미의 태그끼리 그룹으로 묶어주세요.\n'
-                    '예: "여교사"↔"여선생", "巨乳"↔"거유"↔"큰가슴", "anal"↔"항문" 등\n'
+                    '예: "anal"↔"항문"↔"肛門", "巨乳"↔"거유"↔"큰가슴", "여교사"↔"여선생" 등\n'
                     '완전히 다른 태그는 절대 같은 그룹에 넣지 마세요.\n'
-                    '그룹에 대표 태그 1개를 정하고, 나머지는 통합될 태그로 지정하세요.\n'
+                    '대표 태그는 반드시 한국어로 정하세요. 목록에 한국어 태그가 있으면 그걸 쓰고,\n'
+                    '없으면 적절한 한국어로 번역해서 새로 만드세요 (예: "anal" → 대표: "항문").\n'
                     '그룹이 없으면 빈 객체 {} 반환.\n'
-                    '반드시 JSON만 출력: {"대표태그": ["통합될태그1", "통합될태그2"], ...}\n\n'
+                    '반드시 JSON만 출력: {"한국어대표태그": ["통합될태그1", "통합될태그2"], ...}\n\n'
                     + tags_str
                 )
+                # ── LLM 호출 ────────────────────────
+                err_msg = [None]
+                result  = {}
                 try:
                     raw = client._chat(
                         [{"role": "system",
@@ -1636,25 +1646,51 @@ class VidSort(tk.Tk):
                     brace = raw.find('{')
                     if brace > 0: raw = raw[brace:]
                     result = json.loads(raw.strip())
+                    if not isinstance(result, dict):
+                        result = {}
                 except Exception as ex:
-                    prog.after(0, prog.destroy)
-                    prog.after(0, lambda: messagebox.showerror('오류', f'LLM 오류: {ex}'))
+                    err_msg[0] = str(ex)
+
+                win.after(0, prog.destroy)
+
+                if err_msg[0]:
+                    win.after(0, lambda m=err_msg[0]:
+                              messagebox.showerror('LLM 오류', m, parent=win))
                     return
 
-                # 유효한 그룹만 필터 (대표 태그와 통합 태그 모두 기존 태그여야 함)
-                all_set = set(all_t)
+                # ── 태그 매칭 (대소문자/공백 무시) ───
+                # lower → 원본 매핑 (기존 태그만)
+                low2orig = {t.strip().lower(): t for t in all_t}
+
                 groups = {}
-                for rep, members in result.items():
-                    valid = [m for m in members if m != rep and m in all_set]
-                    if valid and rep in all_set:
+                for rep_raw, members_raw in result.items():
+                    rep = rep_raw.strip()
+                    if not rep:
+                        continue
+                    # 멤버: 기존 태그 목록에서 매칭 (대소문자 무시)
+                    # 대표 태그 자신도 기존 태그면 멤버에서 제외
+                    rep_key = rep.lower()
+                    valid = []
+                    for m in (members_raw or []):
+                        mk = m.strip().lower()
+                        orig = low2orig.get(mk)
+                        # 대표 태그와 같으면(대소문자 무시) 제외
+                        if orig and mk != rep_key:
+                            valid.append(orig)
+                    # 기존 태그 중 대표와 같은 이름도 멤버로 (한국어 신규 대표의 경우)
+                    existing_rep = low2orig.get(rep_key)
+                    if existing_rep and existing_rep != rep:
+                        # LLM이 대소문자 다르게 반환 → 원본 이름 사용
+                        rep = existing_rep
+                    if valid:
                         groups[rep] = valid
 
-                prog.after(0, prog.destroy)
                 if not groups:
-                    prog.after(0, lambda: messagebox.showinfo(
-                        '태그 통합', 'LLM이 통합할 유사 태그를 찾지 못했습니다.'))
+                    win.after(0, lambda: messagebox.showinfo(
+                        '태그 통합', 'LLM이 통합할 유사 태그를 찾지 못했습니다.\n'
+                        '(태그가 이미 잘 정리되어 있거나, 비슷한 태그가 없을 수 있습니다)'))
                     return
-                prog.after(0, lambda: _show_merge_ui(groups))
+                win.after(0, lambda g=groups: _show_merge_ui(g))
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1731,10 +1767,8 @@ class VidSort(tk.Tk):
             ttk.Button(bf, text='취소', command=mw.destroy).pack(side='left', padx=6)
 
         btn_f = tk.Frame(win, bg='#0d0d14'); btn_f.pack(pady=4)
-        ttk.Button(btn_f, text='🔗 AI 태그 통합',
+        ttk.Button(btn_f, text='🔗 AI 태그 통합 (한국어 정리)',
                    command=_llm_merge_tags).pack(side='left', padx=6)
-        ttk.Button(btn_f, text='🌐 LLM 태그 번역 (일본어→한국어)',
-                   command=_llm_translate_tags).pack(side='left', padx=6)
         ttk.Button(btn_f, text='닫기', command=win.destroy).pack(side='left', padx=6)
 
         tk.Label(win, text=f'총 {len(tags_data)}개 태그',

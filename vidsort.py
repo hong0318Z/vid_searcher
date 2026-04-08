@@ -1695,61 +1695,86 @@ class VidSort(tk.Tk):
 
         def _show_merge_ui(groups):
             mw = tk.Toplevel(win); mw.title('🔗 태그 통합 확인')
-            mw.configure(bg='#0d0d14'); mw.geometry('520x500')
-            mw.resizable(True, True); mw.minsize(400, 360); mw.grab_set()
+            mw.configure(bg='#0d0d14'); mw.geometry('560x520')
+            mw.resizable(True, True); mw.minsize(420, 380); mw.grab_set()
 
             tk.Label(mw, text=f'AI 태그 통합 제안  ({len(groups)}개 그룹)',
                      bg='#0d0d14', fg='#dcdcf0',
                      font=('Consolas', 11, 'bold')).pack(pady=(14, 2))
-            tk.Label(mw, text='체크된 항목만 통합됩니다. 통합될 태그는 대표 태그로 변경됩니다.',
-                     bg='#0d0d14', fg='#666', font=('Consolas', 8)).pack(pady=(0, 8))
+            tk.Label(mw, text='체크 → 통합 실행 / 대표 태그 이름은 직접 수정 가능',
+                     bg='#0d0d14', fg='#666', font=('Consolas', 8)).pack(pady=(0, 6))
 
-            cv = tk.Canvas(mw, bg='#0d0d14', highlightthickness=0)
-            sb = ttk.Scrollbar(mw, orient='vertical', command=cv.yview)
-            cv.configure(yscrollcommand=sb.set)
-            sb.pack(side='right', fill='y')
-            cv.pack(fill='both', expand=True, padx=8)
+            # ── 스크롤 가능한 리스트 ──────────────────
+            wrap = tk.Frame(mw, bg='#0d0d14')
+            wrap.pack(fill='both', expand=True, padx=10)
+            vsb = ttk.Scrollbar(wrap, orient='vertical')
+            vsb.pack(side='right', fill='y')
+            cv = tk.Canvas(wrap, bg='#0d0d14', highlightthickness=0,
+                           yscrollcommand=vsb.set)
+            cv.pack(side='left', fill='both', expand=True)
+            vsb.config(command=cv.yview)
+
             inner = tk.Frame(cv, bg='#0d0d14')
-            cw = cv.create_window((0, 0), window=inner, anchor='nw')
-            inner.bind('<Configure>', lambda e: (
-                cv.configure(scrollregion=cv.bbox('all')),
-                cv.itemconfig(cw, width=cv.winfo_width())))
-            cv.bind('<Configure>', lambda e: cv.itemconfig(cw, width=cv.winfo_width()))
+            cw = cv.create_window(0, 0, anchor='nw', window=inner)
 
+            def _inner_cfg(e):
+                cv.configure(scrollregion=cv.bbox('all'))
+            def _cv_cfg(e):
+                cv.itemconfigure(cw, width=e.width)   # e.width 사용 (winfo_width 대신)
+            inner.bind('<Configure>', _inner_cfg)
+            cv.bind('<Configure>', _cv_cfg)
+            cv.bind('<MouseWheel>',
+                    lambda e: cv.yview_scroll(int(-1*(e.delta/120)), 'units'))
+
+            # ── 그룹별 행 ────────────────────────────
+            # check_vars: {원본rep: (BooleanVar, StringVar(편집된rep), members)}
             check_vars = {}
             for rep, members in groups.items():
                 row = tk.Frame(inner, bg='#131320',
                                highlightthickness=1, highlightbackground='#2a2a3d')
-                row.pack(fill='x', padx=6, pady=3)
-                var = tk.BooleanVar(value=True)
-                check_vars[rep] = (var, members)
-                hdr = tk.Frame(row, bg='#131320')
-                hdr.pack(fill='x', padx=6, pady=(6, 2))
-                tk.Checkbutton(hdr, variable=var, bg='#131320',
-                               activebackground='#131320',
-                               selectcolor='#131320').pack(side='left')
-                tk.Label(hdr, text=f'대표: ', bg='#131320', fg='#888',
-                         font=('Consolas', 9)).pack(side='left')
-                tk.Label(hdr, text=rep, bg='#131320', fg='#7c6ff7',
-                         font=('Consolas', 10, 'bold')).pack(side='left')
-                tk.Label(row,
-                         text='  통합될 태그: ' + ',  '.join(members),
-                         bg='#131320', fg='#cc8844',
-                         font=('Consolas', 8), wraplength=460, justify='left'
-                         ).pack(anchor='w', padx=12, pady=(0, 6))
+                row.pack(fill='x', padx=4, pady=3)
 
+                var = tk.BooleanVar(value=True)
+                rep_var = tk.StringVar(value=rep)
+                check_vars[rep] = (var, rep_var, members)
+
+                hdr = tk.Frame(row, bg='#131320')
+                hdr.pack(fill='x', padx=8, pady=(7, 2))
+
+                # 체크박스: relief=solid 로 항상 보이게
+                tk.Checkbutton(hdr, variable=var,
+                               bg='#131320', activebackground='#1e1e32',
+                               selectcolor='#7c6ff7',
+                               relief='flat', cursor='hand2'
+                               ).pack(side='left', padx=(0, 4))
+
+                tk.Label(hdr, text='대표:', bg='#131320', fg='#888',
+                         font=('Consolas', 9)).pack(side='left', padx=(0, 4))
+
+                # 대표 태그 직접 편집 가능한 Entry
+                rep_ent = ttk.Entry(hdr, textvariable=rep_var,
+                                    font=('Consolas', 10), width=18)
+                rep_ent.pack(side='left')
+
+                tk.Label(row,
+                         text='  → ' + ',  '.join(members),
+                         bg='#131320', fg='#cc8844',
+                         font=('Consolas', 8), wraplength=480, justify='left'
+                         ).pack(anchor='w', padx=12, pady=(0, 7))
+
+            # ── 버튼 ─────────────────────────────────
             def apply_merge():
-                to_do = [(rep, members) for rep, (var, members) in check_vars.items()
-                         if var.get()]
+                to_do = [(rep_var.get().strip(), members)
+                         for _, (var, rep_var, members) in check_vars.items()
+                         if var.get() and rep_var.get().strip()]
                 if not to_do:
                     mw.destroy(); return
                 cnt = 0
-                for rep, members in to_do:
+                for new_rep, members in to_do:
                     for old in members:
-                        self.db.rename_tag(old, rep)
+                        self.db.rename_tag(old, new_rep)
                         cnt += 1
                 mw.destroy()
-                # 태그 목록 새로고침
                 new_data = list(self.db.all_tags_with_desc())
                 tags_data.clear(); tags_data.extend(new_data)
                 lb.delete(0, 'end')

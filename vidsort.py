@@ -203,7 +203,7 @@ class DB:
 
     # ── 핵심: SQL 기반 페이지 쿼리 ─────────────
     def query_page(self, active_exts, folder, tag, sort, short_filter,
-                   search, offset, limit, min_dur=0):
+                   search, offset, limit, min_dur=0, folder_search=False):
         import sys
         print(f"[query_page] active_exts={active_exts} folder={folder} "
               f"tag={tag} sort={sort} short={short_filter} "
@@ -244,10 +244,16 @@ class DB:
         use_tag_join = bool(tag or search)
         if search:
             lq = f'%{search.lower()}%'
-            where.append(
-                "(LOWER(f.name) LIKE ? OR LOWER(f.alias) LIKE ? "
-                "OR LOWER(t.tag) LIKE ? OR LOWER(f.folder) LIKE ?)")
-            params += [lq, lq, lq, lq]
+            if folder_search:
+                where.append(
+                    "(LOWER(f.name) LIKE ? OR LOWER(f.alias) LIKE ? "
+                    "OR LOWER(t.tag) LIKE ? OR LOWER(f.folder) LIKE ?)")
+                params += [lq, lq, lq, lq]
+            else:
+                where.append(
+                    "(LOWER(f.name) LIKE ? OR LOWER(f.alias) LIKE ? "
+                    "OR LOWER(t.tag) LIKE ?)")
+                params += [lq, lq, lq]
         if tag:
             where.append("t.tag = ?")
             params.append(tag)
@@ -1016,6 +1022,7 @@ class VidSort(tk.Tk):
         self.tag_var          = tk.StringVar(value='')
         self.sort_var         = tk.StringVar(value='이름')
         self.short_filter_var = tk.BooleanVar(value=False)
+        self.folder_search_var= tk.BooleanVar(value=False)
         self.thumb_step_var   = tk.IntVar(value=DEFAULT_THUMB_STEP)
         self.debug_var        = tk.BooleanVar(value=False)
         self.min_dur_var      = tk.IntVar(value=0)
@@ -1090,7 +1097,13 @@ class VidSort(tk.Tk):
         se.pack(side='left',ipady=3)
         se.bind('<Escape>',lambda e: self.search_var.set(''))
         tk.Label(sw,text='파일명·별칭·태그',bg='#1a1a28',
-                 fg='#444',font=('Consolas',8)).pack(side='left',padx=8)
+                 fg='#444',font=('Consolas',8)).pack(side='left',padx=(8,2))
+        tk.Checkbutton(sw, text='폴더명', variable=self.folder_search_var,
+                       bg='#1a1a28', fg='#555', selectcolor='#1a1a28',
+                       activebackground='#1a1a28', font=('Consolas',8),
+                       cursor='hand2',
+                       command=lambda: self.after(0, self._reload)
+                       ).pack(side='left')
 
         self.lbl_ff=tk.Label(top,text='',bg='#08080f',font=('Consolas',9))
         self.lbl_ff.pack(side='right',padx=10)
@@ -1581,7 +1594,145 @@ class VidSort(tk.Tk):
 
             threading.Thread(target=worker, daemon=True).start()
 
+        def _llm_merge_tags():
+            client = self._get_llm_client()
+            if not client: return
+            all_t = [tag for tag, _ in tags_data]
+            if len(all_t) < 2:
+                messagebox.showinfo('태그 통합', '태그가 2개 이상 필요합니다.')
+                return
+
+            # LLM으로 유사 태그 그룹 탐색
+            prog = tk.Toplevel(win); prog.title('태그 통합 분석 중')
+            prog.configure(bg='#0d0d14'); prog.geometry('400x120')
+            prog.grab_set()
+            tk.Label(prog, text='LLM이 유사 태그를 분석 중입니다...',
+                     bg='#0d0d14', fg='#7c6ff7',
+                     font=('Consolas', 10, 'bold')).pack(pady=(22, 6))
+            lbl_pr = tk.Label(prog, text=f'태그 {len(all_t)}개 전송 중',
+                              bg='#0d0d14', fg='#aaa', font=('Consolas', 9))
+            lbl_pr.pack()
+
+            def worker():
+                tags_str = '\n'.join(f'{i+1}. {t}' for i, t in enumerate(all_t))
+                prompt = (
+                    '아래 태그 목록을 분석해서, 동일하거나 매우 유사한 의미의 태그끼리 그룹으로 묶어주세요.\n'
+                    '예: "여교사"↔"여선생", "巨乳"↔"거유"↔"큰가슴", "anal"↔"항문" 등\n'
+                    '완전히 다른 태그는 절대 같은 그룹에 넣지 마세요.\n'
+                    '그룹에 대표 태그 1개를 정하고, 나머지는 통합될 태그로 지정하세요.\n'
+                    '그룹이 없으면 빈 객체 {} 반환.\n'
+                    '반드시 JSON만 출력: {"대표태그": ["통합될태그1", "통합될태그2"], ...}\n\n'
+                    + tags_str
+                )
+                try:
+                    raw = client._chat(
+                        [{"role": "system",
+                          "content": "당신은 태그 정리 전문가입니다. JSON만 출력하세요."},
+                         {"role": "user", "content": prompt}],
+                        max_tokens=2000
+                    )
+                    if '```' in raw:
+                        raw = raw.split('```')[1].lstrip('json').strip()
+                    brace = raw.find('{')
+                    if brace > 0: raw = raw[brace:]
+                    result = json.loads(raw.strip())
+                except Exception as ex:
+                    prog.after(0, prog.destroy)
+                    prog.after(0, lambda: messagebox.showerror('오류', f'LLM 오류: {ex}'))
+                    return
+
+                # 유효한 그룹만 필터 (대표 태그와 통합 태그 모두 기존 태그여야 함)
+                all_set = set(all_t)
+                groups = {}
+                for rep, members in result.items():
+                    valid = [m for m in members if m != rep and m in all_set]
+                    if valid and rep in all_set:
+                        groups[rep] = valid
+
+                prog.after(0, prog.destroy)
+                if not groups:
+                    prog.after(0, lambda: messagebox.showinfo(
+                        '태그 통합', 'LLM이 통합할 유사 태그를 찾지 못했습니다.'))
+                    return
+                prog.after(0, lambda: _show_merge_ui(groups))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _show_merge_ui(groups):
+            mw = tk.Toplevel(win); mw.title('🔗 태그 통합 확인')
+            mw.configure(bg='#0d0d14'); mw.geometry('520x500')
+            mw.resizable(True, True); mw.minsize(400, 360); mw.grab_set()
+
+            tk.Label(mw, text=f'AI 태그 통합 제안  ({len(groups)}개 그룹)',
+                     bg='#0d0d14', fg='#dcdcf0',
+                     font=('Consolas', 11, 'bold')).pack(pady=(14, 2))
+            tk.Label(mw, text='체크된 항목만 통합됩니다. 통합될 태그는 대표 태그로 변경됩니다.',
+                     bg='#0d0d14', fg='#666', font=('Consolas', 8)).pack(pady=(0, 8))
+
+            cv = tk.Canvas(mw, bg='#0d0d14', highlightthickness=0)
+            sb = ttk.Scrollbar(mw, orient='vertical', command=cv.yview)
+            cv.configure(yscrollcommand=sb.set)
+            sb.pack(side='right', fill='y')
+            cv.pack(fill='both', expand=True, padx=8)
+            inner = tk.Frame(cv, bg='#0d0d14')
+            cw = cv.create_window((0, 0), window=inner, anchor='nw')
+            inner.bind('<Configure>', lambda e: (
+                cv.configure(scrollregion=cv.bbox('all')),
+                cv.itemconfig(cw, width=cv.winfo_width())))
+            cv.bind('<Configure>', lambda e: cv.itemconfig(cw, width=cv.winfo_width()))
+
+            check_vars = {}
+            for rep, members in groups.items():
+                row = tk.Frame(inner, bg='#131320',
+                               highlightthickness=1, highlightbackground='#2a2a3d')
+                row.pack(fill='x', padx=6, pady=3)
+                var = tk.BooleanVar(value=True)
+                check_vars[rep] = (var, members)
+                hdr = tk.Frame(row, bg='#131320')
+                hdr.pack(fill='x', padx=6, pady=(6, 2))
+                tk.Checkbutton(hdr, variable=var, bg='#131320',
+                               activebackground='#131320',
+                               selectcolor='#131320').pack(side='left')
+                tk.Label(hdr, text=f'대표: ', bg='#131320', fg='#888',
+                         font=('Consolas', 9)).pack(side='left')
+                tk.Label(hdr, text=rep, bg='#131320', fg='#7c6ff7',
+                         font=('Consolas', 10, 'bold')).pack(side='left')
+                tk.Label(row,
+                         text='  통합될 태그: ' + ',  '.join(members),
+                         bg='#131320', fg='#cc8844',
+                         font=('Consolas', 8), wraplength=460, justify='left'
+                         ).pack(anchor='w', padx=12, pady=(0, 6))
+
+            def apply_merge():
+                to_do = [(rep, members) for rep, (var, members) in check_vars.items()
+                         if var.get()]
+                if not to_do:
+                    mw.destroy(); return
+                cnt = 0
+                for rep, members in to_do:
+                    for old in members:
+                        self.db.rename_tag(old, rep)
+                        cnt += 1
+                mw.destroy()
+                # 태그 목록 새로고침
+                new_data = list(self.db.all_tags_with_desc())
+                tags_data.clear(); tags_data.extend(new_data)
+                lb.delete(0, 'end')
+                for t, _ in tags_data:
+                    lb.insert('end', '  ' + t)
+                self._reload_sidebar()
+                messagebox.showinfo('태그 통합 완료',
+                                    f'{len(to_do)}개 그룹, {cnt}개 태그 통합 완료')
+
+            bf = tk.Frame(mw, bg='#0d0d14')
+            bf.pack(pady=8)
+            ttk.Button(bf, text='✔ 통합 실행', style='Acc.TButton',
+                       command=apply_merge).pack(side='left', padx=6)
+            ttk.Button(bf, text='취소', command=mw.destroy).pack(side='left', padx=6)
+
         btn_f = tk.Frame(win, bg='#0d0d14'); btn_f.pack(pady=4)
+        ttk.Button(btn_f, text='🔗 AI 태그 통합',
+                   command=_llm_merge_tags).pack(side='left', padx=6)
         ttk.Button(btn_f, text='🌐 LLM 태그 번역 (일본어→한국어)',
                    command=_llm_translate_tags).pack(side='left', padx=6)
         ttk.Button(btn_f, text='닫기', command=win.destroy).pack(side='left', padx=6)
@@ -1651,26 +1802,27 @@ class VidSort(tk.Tk):
 
     # ── 핵심: SQL 쿼리로 데이터 가져오기 ─────────
     def _reload(self):
-        active_exts = self._active_exts()
-        folder  = self.folder_var.get()
-        tag     = self.tag_var.get()
-        sort    = self.sort_var.get()
-        short   = self.short_filter_var.get()
-        search  = self.search_var.get().strip()
-        min_dur = self.min_dur_var.get()
+        active_exts   = self._active_exts()
+        folder        = self.folder_var.get()
+        tag           = self.tag_var.get()
+        sort          = self.sort_var.get()
+        short         = self.short_filter_var.get()
+        search        = self.search_var.get().strip()
+        min_dur       = self.min_dur_var.get()
+        folder_search = self.folder_search_var.get()
 
         threading.Thread(
             target=self._bg_query,
             args=(active_exts, folder, tag, sort, short, search,
-                  self._offset, min_dur),
+                  self._offset, min_dur, folder_search),
             daemon=True).start()
 
     def _bg_query(self, active_exts, folder, tag, sort, short, search,
-                  offset, min_dur=0):
+                  offset, min_dur=0, folder_search=False):
         rows, total = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
-            offset, PAGE_SIZE, min_dur=min_dur)
+            offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search)
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
         self.after(0, lambda: self._on_query_done(rows, total, tags_map))

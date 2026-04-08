@@ -1225,7 +1225,7 @@ class VidSort(tk.Tk):
         main=tk.Frame(self,bg='#0d0d14'); main.pack(fill='both',expand=True)
 
         # 사이드바
-        self.sidebar=tk.Frame(main,bg='#0a0a12',width=220)
+        self.sidebar=tk.Frame(main,bg='#0a0a12',width=265)
         self.sidebar.pack(side='left',fill='y'); self.sidebar.pack_propagate(False)
         self._build_sidebar()
 
@@ -1335,7 +1335,8 @@ class VidSort(tk.Tk):
 
         tag_outer = tk.Frame(self.sidebar, bg='#0a0a12')
         tag_outer.pack(fill='both', expand=True, padx=4)
-        tag_canvas = tk.Canvas(tag_outer, bg='#0a0a12', highlightthickness=0)
+        self._tag_canvas = tk.Canvas(tag_outer, bg='#0a0a12', highlightthickness=0)
+        tag_canvas = self._tag_canvas
         tag_vsb    = ttk.Scrollbar(tag_outer, orient='vertical', command=tag_canvas.yview)
         tag_canvas.configure(yscrollcommand=tag_vsb.set)
         tag_vsb.pack(side='right', fill='y')
@@ -1344,8 +1345,12 @@ class VidSort(tk.Tk):
         tag_canvas.create_window((0, 0), window=self._tag_btn_frame, anchor='nw')
         self._tag_btn_frame.bind('<Configure>',
             lambda e: tag_canvas.configure(scrollregion=tag_canvas.bbox('all')))
+        # Windows / macOS
         tag_canvas.bind('<MouseWheel>',
             lambda e: tag_canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+        # Linux
+        tag_canvas.bind('<Button-4>', lambda e: tag_canvas.yview_scroll(-1, 'units'))
+        tag_canvas.bind('<Button-5>', lambda e: tag_canvas.yview_scroll(1, 'units'))
 
         ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
 
@@ -1413,6 +1418,20 @@ class VidSort(tk.Tk):
         tags = self.db.all_tags()
         self.tag_cb['values'] = ['']+tags
 
+        def _fwd_scroll(e, cv=self._tag_canvas):
+            """버튼 위 마우스휠을 태그 캔버스로 포워딩"""
+            if e.num == 4:
+                cv.yview_scroll(-1, 'units')
+            elif e.num == 5:
+                cv.yview_scroll(1, 'units')
+            else:
+                cv.yview_scroll(-1 * (e.delta // 120), 'units')
+
+        def _add_scroll(w):
+            w.bind('<MouseWheel>', _fwd_scroll)
+            w.bind('<Button-4>',   _fwd_scroll)
+            w.bind('<Button-5>',   _fwd_scroll)
+
         # 전체 버튼
         all_btn = tk.Button(
             self._tag_btn_frame, text='전체',
@@ -1420,6 +1439,7 @@ class VidSort(tk.Tk):
             bd=0, padx=10, pady=5, cursor='hand2', anchor='w',
             command=lambda:(self.tag_var.set(''), self._show_all()))
         all_btn.pack(fill='x', pady=1)
+        _add_scroll(all_btn)
 
         for tag in tags:
             t = tag
@@ -1432,6 +1452,7 @@ class VidSort(tk.Tk):
             btn.pack(fill='x', pady=1)
             btn.bind('<Enter>', lambda e,b=btn: b.config(bg='#2a2a3d'))
             btn.bind('<Leave>', lambda e,b=btn: b.config(bg='#1a1a28'))
+            _add_scroll(btn)
 
     def _sb_folder(self,e):
         sel=self.fl.curselection()

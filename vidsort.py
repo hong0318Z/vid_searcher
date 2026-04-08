@@ -554,6 +554,52 @@ class DB:
             self.conn.execute("DELETE FROM tag_meta WHERE tag=?", (tag,))
             self.conn.commit()
 
+    def recommend_search(self, tags: list, keywords: list,
+                         active_exts: list, limit: int = 150) -> list:
+        """AI 추천 전용 검색: 태그 OR 키워드 매칭, 랜덤 정렬.
+        태그 매칭 우선 → 부족하면 키워드 보충."""
+        if not active_exts:
+            return []
+
+        ph_exts = ','.join('?' * len(active_exts))
+        results = {}  # path -> row (중복 제거)
+
+        # 1) 태그 매칭
+        if tags:
+            ph_tags = ','.join('?' * len(tags))
+            rows = self.conn.execute(f"""
+                SELECT DISTINCT f.* FROM files f
+                JOIN tags t ON f.path = t.path
+                WHERE f.ext IN ({ph_exts})
+                  AND t.tag IN ({ph_tags})
+                ORDER BY RANDOM()
+                LIMIT ?
+            """, list(active_exts) + list(tags) + [limit]).fetchall()
+            for r in self._dicts(rows):
+                results[r['path']] = r
+
+        # 2) 키워드 보충 (이름·alias·폴더명)
+        if keywords and len(results) < limit:
+            need = limit - len(results)
+            for kw in keywords[:6]:
+                if len(results) >= limit:
+                    break
+                lq = f'%{kw.lower()}%'
+                rows = self.conn.execute(f"""
+                    SELECT f.* FROM files f
+                    WHERE f.ext IN ({ph_exts})
+                      AND (LOWER(f.name)   LIKE ?
+                           OR LOWER(f.alias)  LIKE ?
+                           OR LOWER(f.folder) LIKE ?)
+                    ORDER BY RANDOM()
+                    LIMIT ?
+                """, list(active_exts) + [lq, lq, lq, need]).fetchall()
+                for r in self._dicts(rows):
+                    if r['path'] not in results:
+                        results[r['path']] = r
+
+        return list(results.values())
+
     def get_all_for_thumbs(self, folder=None):
         if folder:
             rows = self.conn.execute(
@@ -1200,107 +1246,158 @@ class VidSort(tk.Tk):
         self.lbl_status=tk.Label(sb,text='준비',bg='#08080f',fg='#444',font=('Consolas',9))
         self.lbl_status.pack(side='left',padx=10)
 
+    def _make_collapsible(self, parent, title, initially_open=True):
+        """접기/펼치기 가능한 섹션 헤더 + 콘텐츠 프레임 반환.
+        반환: (header_frame, content_frame)"""
+        is_open = tk.BooleanVar(value=initially_open)
+
+        hdr = tk.Frame(parent, bg='#0e0e1a', cursor='hand2')
+        hdr.pack(fill='x', padx=0, pady=(2, 0))
+
+        arrow_lbl = tk.Label(hdr, text='▼' if initially_open else '▶',
+                             bg='#0e0e1a', fg='#555', font=('Consolas', 8))
+        arrow_lbl.pack(side='left', padx=(8, 2), pady=3)
+        tk.Label(hdr, text=title, bg='#0e0e1a', fg='#555',
+                 font=('Consolas', 9, 'bold')).pack(side='left', pady=3)
+
+        body = tk.Frame(parent, bg='#0a0a12')
+        if initially_open:
+            body.pack(fill='x', padx=0)
+
+        def toggle(_=None):
+            if is_open.get():
+                body.pack_forget()
+                arrow_lbl.config(text='▶')
+                is_open.set(False)
+            else:
+                body.pack(fill='x', padx=0)
+                arrow_lbl.config(text='▼')
+                is_open.set(True)
+
+        hdr.bind('<Button-1>', toggle)
+        for child in hdr.winfo_children():
+            child.bind('<Button-1>', toggle)
+
+        return hdr, body
+
     def _build_sidebar(self):
-        # 폴더 섹션
-        tk.Label(self.sidebar,text='📁  폴더',bg='#0a0a12',fg='#555',
-                 font=('Consolas',9,'bold')).pack(anchor='w',padx=10,pady=(12,4))
-        self.fl=tk.Listbox(self.sidebar,bg='#0a0a12',fg='#999',
-                           selectbackground='#7c6ff7',font=('Consolas',9),
-                           borderwidth=0,highlightthickness=0,activestyle='none')
-        self.fl.pack(fill='both',expand=True,padx=4)
-        self.fl.bind('<<ListboxSelect>>',self._sb_folder)
+        # ── 폴더 섹션 ──────────────────────────
+        _, fold_body = self._make_collapsible(self.sidebar, '📁  폴더', True)
+
+        self.fl = tk.Listbox(fold_body, bg='#0a0a12', fg='#999',
+                             selectbackground='#7c6ff7', font=('Consolas', 9),
+                             borderwidth=0, highlightthickness=0, activestyle='none',
+                             height=5)
+        self.fl.pack(fill='x', padx=4, pady=(4, 2))
+        self.fl.bind('<<ListboxSelect>>', self._sb_folder)
         self.fl.bind('<Button-3>', self._fl_ctx)
 
-        bf=tk.Frame(self.sidebar,bg='#0a0a12'); bf.pack(fill='x',padx=6,pady=4)
-        ttk.Button(bf,text='➕',command=self._add_folder).pack(side='left',fill='x',expand=True,padx=2)
-        ttk.Button(bf,text='✕',command=self._remove_folder).pack(side='left',fill='x',expand=True,padx=2)
-        ttk.Button(bf,text='📊',command=self._show_folder_overview).pack(side='left',padx=2)
+        bf = tk.Frame(fold_body, bg='#0a0a12')
+        bf.pack(fill='x', padx=6, pady=(0, 6))
+        ttk.Button(bf, text='➕', command=self._add_folder
+                   ).pack(side='left', fill='x', expand=True, padx=2)
+        ttk.Button(bf, text='✕', command=self._remove_folder
+                   ).pack(side='left', fill='x', expand=True, padx=2)
+        ttk.Button(bf, text='📊', command=self._show_folder_overview
+                   ).pack(side='left', padx=2)
 
-        # 전체 보기 버튼
-        ttk.Button(self.sidebar,text='전체 보기',
-                   command=self._show_all).pack(fill='x',padx=6,pady=(0,4))
-        ttk.Button(self.sidebar,text='🎲 오늘의 추천',
-                   command=self._show_daily_pick).pack(fill='x',padx=6,pady=(0,2))
-        ttk.Button(self.sidebar,text='🔄 전체 폴더 재스캔',
-                   command=self._rescan_all_folders).pack(fill='x',padx=6,pady=(0,2))
-        ttk.Button(self.sidebar,text='🌐 갤러리 뷰',
-                   command=self._gallery_view).pack(fill='x',padx=6,pady=(0,6))
+        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
 
-        ttk.Separator(self.sidebar).pack(fill='x',padx=8,pady=4)
+        # ── 퀵 액션 ─────────────────────────────
+        qa = tk.Frame(self.sidebar, bg='#0a0a12')
+        qa.pack(fill='x', padx=6, pady=(4, 4))
+        row1 = tk.Frame(qa, bg='#0a0a12'); row1.pack(fill='x', pady=1)
+        row2 = tk.Frame(qa, bg='#0a0a12'); row2.pack(fill='x', pady=1)
+        ttk.Button(row1, text='전체 보기',
+                   command=self._show_all).pack(side='left', fill='x', expand=True, padx=(0, 2))
+        ttk.Button(row1, text='🎲 오늘의 추천',
+                   command=self._show_daily_pick).pack(side='left', fill='x', expand=True)
+        ttk.Button(row2, text='🔄 재스캔',
+                   command=self._rescan_all_folders).pack(side='left', fill='x', expand=True, padx=(0, 2))
+        ttk.Button(row2, text='🌐 갤러리',
+                   command=self._gallery_view).pack(side='left', fill='x', expand=True)
 
-        # 태그 버튼 패널
-        tag_hdr = tk.Frame(self.sidebar, bg='#0a0a12')
-        tag_hdr.pack(fill='x', padx=6, pady=(4,2))
-        tk.Label(tag_hdr,text='🏷  태그',bg='#0a0a12',fg='#555',
-                 font=('Consolas',9,'bold')).pack(side='left',padx=4)
-        ttk.Button(tag_hdr,text='관리',
+        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+
+        # ── 🎯 AI 영상 추천 (강조) ───────────────
+        ttk.Button(self.sidebar, text='🎯  AI 영상 추천', style='Acc.TButton',
+                   command=self._ai_recommend_dlg).pack(fill='x', padx=6, pady=(6, 6))
+
+        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+
+        # ── 태그 패널 ────────────────────────────
+        tag_hdr_f = tk.Frame(self.sidebar, bg='#0a0a12')
+        tag_hdr_f.pack(fill='x', padx=6, pady=(4, 2))
+        tk.Label(tag_hdr_f, text='🏷  태그', bg='#0a0a12', fg='#555',
+                 font=('Consolas', 9, 'bold')).pack(side='left', padx=4)
+        ttk.Button(tag_hdr_f, text='관리',
                    command=self._tag_manage_dlg).pack(side='right')
 
-        # 스크롤 가능한 태그 버튼 영역
-        tag_outer = tk.Frame(self.sidebar,bg='#0a0a12')
-        tag_outer.pack(fill='both',expand=True,padx=4)
-        tag_canvas = tk.Canvas(tag_outer,bg='#0a0a12',highlightthickness=0)
-        tag_vsb    = ttk.Scrollbar(tag_outer,orient='vertical',command=tag_canvas.yview)
+        tag_outer = tk.Frame(self.sidebar, bg='#0a0a12')
+        tag_outer.pack(fill='both', expand=True, padx=4)
+        tag_canvas = tk.Canvas(tag_outer, bg='#0a0a12', highlightthickness=0)
+        tag_vsb    = ttk.Scrollbar(tag_outer, orient='vertical', command=tag_canvas.yview)
         tag_canvas.configure(yscrollcommand=tag_vsb.set)
-        tag_vsb.pack(side='right',fill='y')
-        tag_canvas.pack(fill='both',expand=True)
-        self._tag_btn_frame = tk.Frame(tag_canvas,bg='#0a0a12')
-        tag_canvas.create_window((0,0),window=self._tag_btn_frame,anchor='nw')
+        tag_vsb.pack(side='right', fill='y')
+        tag_canvas.pack(fill='both', expand=True)
+        self._tag_btn_frame = tk.Frame(tag_canvas, bg='#0a0a12')
+        tag_canvas.create_window((0, 0), window=self._tag_btn_frame, anchor='nw')
         self._tag_btn_frame.bind('<Configure>',
             lambda e: tag_canvas.configure(scrollregion=tag_canvas.bbox('all')))
         tag_canvas.bind('<MouseWheel>',
-            lambda e: tag_canvas.yview_scroll(-1*(e.delta//120),'units'))
+            lambda e: tag_canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
 
-        ttk.Separator(self.sidebar).pack(fill='x',padx=8,pady=6)
+        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
 
-        # ── 포맷 필터 섹션 ──────────────────────
-        tk.Label(self.sidebar,text='🎬  포맷 필터',bg='#0a0a12',fg='#555',
-                 font=('Consolas',9,'bold')).pack(anchor='w',padx=10,pady=(0,4))
+        # ── 포맷 필터 (접기/펼치기, 기본 접힘) ───
+        _, fmt_body = self._make_collapsible(self.sidebar, '🎬  포맷 필터', False)
 
-        fmt_frame=tk.Frame(self.sidebar,bg='#0a0a12')
-        fmt_frame.pack(fill='x',padx=6)
+        fmt_frame = tk.Frame(fmt_body, bg='#0a0a12')
+        fmt_frame.pack(fill='x', padx=6, pady=(4, 2))
+        for i, (label, ext) in enumerate(FORMAT_LIST):
+            r, c = i // 2, i % 2
+            tk.Checkbutton(fmt_frame, text=label, variable=self._fmt_vars[ext],
+                           bg='#0a0a12', fg='#999', selectcolor='#7c6ff7',
+                           activebackground='#0a0a12', activeforeground='#dcdcf0',
+                           font=('Consolas', 8), cursor='hand2'
+                           ).grid(row=r, column=c, sticky='w', padx=4, pady=1)
 
-        # 2열 배치
-        for i,(label,ext) in enumerate(FORMAT_LIST):
-            row=i//2; col=i%2
-            cb=tk.Checkbutton(fmt_frame,text=label,variable=self._fmt_vars[ext],
-                              bg='#0a0a12',fg='#999',selectcolor='#0a0a12',
-                              activebackground='#0a0a12',activeforeground='#dcdcf0',
-                              font=('Consolas',8),cursor='hand2')
-            cb.grid(row=row,column=col,sticky='w',padx=4,pady=1)
+        bf2 = tk.Frame(fmt_body, bg='#0a0a12')
+        bf2.pack(fill='x', padx=6, pady=(2, 2))
+        ttk.Button(bf2, text='전체 ON',
+                   command=lambda: [v.set(True) for v in self._fmt_vars.values()]
+                   ).pack(side='left', fill='x', expand=True, padx=2)
+        ttk.Button(bf2, text='전체 OFF',
+                   command=lambda: [v.set(False) for v in self._fmt_vars.values()]
+                   ).pack(side='left', fill='x', expand=True, padx=2)
+        ttk.Button(fmt_body, text='✅  포맷 적용', style='Acc.TButton',
+                   command=self._apply_format).pack(fill='x', padx=6, pady=(2, 6))
 
-        # 전체선택/해제
-        bf2=tk.Frame(self.sidebar,bg='#0a0a12'); bf2.pack(fill='x',padx=6,pady=(4,2))
-        ttk.Button(bf2,text='전체 ON',
-                   command=lambda:[v.set(True) for v in self._fmt_vars.values()]
-                   ).pack(side='left',fill='x',expand=True,padx=2)
-        ttk.Button(bf2,text='전체 OFF',
-                   command=lambda:[v.set(False) for v in self._fmt_vars.values()]
-                   ).pack(side='left',fill='x',expand=True,padx=2)
+        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
 
-        # 적용 버튼
-        ttk.Button(self.sidebar,text='✅  포맷 적용',style='Acc.TButton',
-                   command=self._apply_format).pack(fill='x',padx=6,pady=(4,8))
+        # ── AI 도구 (접기/펼치기, 기본 접힘) ────
+        _, ai_body = self._make_collapsible(self.sidebar, '🤖  AI 도구', False)
 
-        ttk.Separator(self.sidebar).pack(fill='x',padx=8,pady=6)
+        ai_top = tk.Frame(ai_body, bg='#0a0a12')
+        ai_top.pack(fill='x', padx=6, pady=(4, 2))
+        ttk.Button(ai_top, text='⚙ 설정/토큰',
+                   command=self._llm_settings_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
+        ttk.Button(ai_top, text='🔌 연결 테스트',
+                   command=self._llm_test_dlg).pack(side='left', fill='x', expand=True)
 
-        # ── AI 태그 섹션 ──────────────────────────
-        tk.Label(self.sidebar,text='🤖  AI 태그',bg='#0a0a12',fg='#555',
-                 font=('Consolas',9,'bold')).pack(anchor='w',padx=10,pady=(0,4))
-        ai_f=tk.Frame(self.sidebar,bg='#0a0a12')
-        ai_f.pack(fill='x',padx=6,pady=(0,4))
-        ttk.Button(ai_f,text='⚙ 설정 / 토큰',
-                   command=self._llm_settings_dlg).pack(fill='x',pady=1)
-        ttk.Button(ai_f,text='🔌 연결 테스트',
-                   command=self._llm_test_dlg).pack(fill='x',pady=1)
-        ttk.Button(ai_f,text='▶ AI 자동 태그',style='Acc.TButton',
-                   command=self._llm_auto_tag_dlg).pack(fill='x',pady=(4,1))
-        ttk.Button(ai_f,text='🔍 패턴 분석 → 태그',
-                   command=self._llm_pattern_dlg).pack(fill='x',pady=1)
-        ttk.Button(ai_f,text='🎬 JAV 처리',
-                   command=self._jav_process_dlg).pack(fill='x',pady=(4,1))
-        ttk.Button(ai_f,text='📋 JAV DB 목록',
-                   command=self._jav_db_dlg).pack(fill='x',pady=1)
+        ai_mid = tk.Frame(ai_body, bg='#0a0a12')
+        ai_mid.pack(fill='x', padx=6, pady=1)
+        ttk.Button(ai_mid, text='▶ AI 자동 태그', style='Acc.TButton',
+                   command=self._llm_auto_tag_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
+        ttk.Button(ai_mid, text='🔍 패턴 분석',
+                   command=self._llm_pattern_dlg).pack(side='left', fill='x', expand=True)
+
+        ai_bot = tk.Frame(ai_body, bg='#0a0a12')
+        ai_bot.pack(fill='x', padx=6, pady=(1, 6))
+        ttk.Button(ai_bot, text='🎬 JAV 처리',
+                   command=self._jav_process_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
+        ttk.Button(ai_bot, text='📋 JAV DB',
+                   command=self._jav_db_dlg).pack(side='left', fill='x', expand=True)
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):
@@ -1818,6 +1915,191 @@ class VidSort(tk.Tk):
         except Exception as e:
             messagebox.showerror('웹 갤러리 오류', str(e))
 
+
+    # ─────────────────────────────────────────────────────
+    #  🎯 AI 영상 추천
+    # ─────────────────────────────────────────────────────
+    def _ai_recommend_dlg(self):
+        """자연어로 영상을 요청하면 LLM 2회 호출로 추천 + 가게 점원 설명."""
+        llm = self._get_llm_client()
+        if not llm:
+            return
+
+        win = tk.Toplevel(self)
+        win.title('🎯 AI 영상 추천')
+        win.geometry('620x540')
+        win.configure(bg='#0d0d14')
+        win.resizable(True, True)
+        win.attributes('-topmost', False)
+
+        # ── 입력 영역 ────────────────────────────────────
+        top_f = tk.Frame(win, bg='#0d0d14')
+        top_f.pack(fill='x', padx=16, pady=(14, 6))
+        tk.Label(top_f, text='어떤 영상을 찾으세요?',
+                 bg='#0d0d14', fg='#dcdcf0', font=('Consolas', 11, 'bold')
+                 ).pack(anchor='w', pady=(0, 6))
+
+        inp_f = tk.Frame(top_f, bg='#1a1a28', padx=8, pady=6)
+        inp_f.pack(fill='x')
+        query_var = tk.StringVar()
+        entry = ttk.Entry(inp_f, textvariable=query_var,
+                          font=('Consolas', 11), width=46)
+        entry.pack(side='left', fill='x', expand=True, ipady=4)
+        search_btn = ttk.Button(inp_f, text='🔍 찾기', style='Acc.TButton')
+        search_btn.pack(side='left', padx=(8, 0))
+
+        # ── 진행 상태 라벨 ───────────────────────────────
+        status_lbl = tk.Label(win, text='', bg='#0d0d14', fg='#7c6ff7',
+                              font=('Consolas', 9))
+        status_lbl.pack(anchor='w', padx=16, pady=(0, 4))
+
+        # ── 점원 설명 텍스트 영역 ──────────────────────────
+        msg_f = tk.Frame(win, bg='#0d0d14')
+        msg_f.pack(fill='both', expand=True, padx=16, pady=(0, 6))
+        tk.Label(msg_f, text='🧑‍💼 점원의 추천', bg='#0d0d14', fg='#555',
+                 font=('Consolas', 8, 'bold')).pack(anchor='w')
+        txt_f = tk.Frame(msg_f, bg='#111120')
+        txt_f.pack(fill='both', expand=True, pady=(2, 0))
+        msg_txt = tk.Text(txt_f, bg='#111120', fg='#dcdcf0',
+                          font=('Consolas', 9), wrap='word',
+                          borderwidth=0, highlightthickness=0,
+                          state='disabled', relief='flat')
+        msg_vsb = ttk.Scrollbar(txt_f, orient='vertical', command=msg_txt.yview)
+        msg_txt.configure(yscrollcommand=msg_vsb.set)
+        msg_vsb.pack(side='right', fill='y')
+        msg_txt.pack(fill='both', expand=True, padx=8, pady=6)
+
+        # ── 하단 버튼 영역 ───────────────────────────────
+        bot_f = tk.Frame(win, bg='#0d0d14')
+        bot_f.pack(fill='x', padx=16, pady=(0, 14))
+        load_btn = ttk.Button(bot_f, text='📺 결과 영상 보기 (—)',
+                              style='Acc.TButton', state='disabled')
+        load_btn.pack(side='left')
+        ttk.Button(bot_f, text='닫기', command=win.destroy).pack(side='right')
+
+        # ── 상태 저장 ────────────────────────────────────
+        _state = {'videos': [], 'running': False}
+
+        def _set_msg(text: str):
+            msg_txt.configure(state='normal')
+            msg_txt.delete('1.0', 'end')
+            msg_txt.insert('end', text)
+            msg_txt.configure(state='disabled')
+            msg_txt.see('end')
+
+        def _append_msg(chunk: str):
+            msg_txt.configure(state='normal')
+            msg_txt.insert('end', chunk)
+            msg_txt.configure(state='disabled')
+            msg_txt.see('end')
+
+        def _run(query: str):
+            if not query.strip():
+                return
+            if _state['running']:
+                return
+            _state['running'] = True
+            search_btn.configure(state='disabled')
+            load_btn.configure(state='disabled', text='📺 결과 영상 보기 (—)')
+            _set_msg('')
+            _state['videos'] = []
+
+            def worker():
+                # ── Call 1: 쿼리 분석 ─────────────────
+                win.after(0, lambda: status_lbl.config(
+                    text='[1/2] 🔍 검색 키워드 분석 중...'))
+                try:
+                    tag_pool = self.db.all_tags()
+                    parsed   = llm.recommend_query(query, tag_pool)
+                    tags     = parsed.get('tags', [])
+                    keywords = parsed.get('keywords', [query])
+                    intent   = parsed.get('intent', '')
+                except Exception as e:
+                    win.after(0, lambda err=e: (
+                        status_lbl.config(text=f'오류: {err}'),
+                        setattr(_state, '__setitem__' , None)  # dummy
+                    ))
+                    _state['running'] = False
+                    win.after(0, lambda: search_btn.configure(state='normal'))
+                    return
+
+                # ── DB 검색 + 랜덤 샘플링 ─────────────
+                win.after(0, lambda: status_lbl.config(
+                    text='[DB] 🗃 영상 검색 중...'))
+                active_exts = self._active_exts()
+                candidates  = self.db.recommend_search(
+                    tags, keywords, active_exts, limit=150)
+
+                import random as _random
+                _random.shuffle(candidates)
+                chosen = candidates[:50]
+
+                if not chosen:
+                    win.after(0, lambda: (
+                        status_lbl.config(text='찾은 영상이 없습니다.'),
+                        _set_msg('죄송합니다 손님, 해당 조건에 맞는 영상을 찾지 못했어요. 😓\n다른 키워드로 다시 시도해보시겠어요?'),
+                        search_btn.configure(state='normal'),
+                    ))
+                    _state['running'] = False
+                    return
+
+                # 태그 정보 포함
+                paths    = [v['path'] for v in chosen]
+                tags_map = self.db.get_tags_for_paths(paths)
+                for v in chosen:
+                    v['tags']         = tags_map.get(v['path'], [])
+                    v['duration_str'] = fmt_dur(v.get('duration', 0))
+
+                _state['videos'] = chosen
+                count = len(chosen)
+                win.after(0, lambda n=count: status_lbl.config(
+                    text=f'[2/2] 🧑‍💼 {n}개 영상 발견 — 점원 설명 생성 중...'))
+
+                # ── Call 2: 점원 설명 (스트리밍) ──────
+                win.after(0, lambda: _set_msg(''))
+
+                def on_chunk(piece):
+                    win.after(0, lambda p=piece: _append_msg(p))
+
+                explanation = llm.recommend_explain(query, chosen, on_chunk=on_chunk)
+
+                win.after(0, lambda n=count: (
+                    status_lbl.config(
+                        text=f'✅ 완료 — {n}개 영상을 찾았습니다.  (태그: {", ".join(tags[:4])})'),
+                    load_btn.configure(
+                        state='normal',
+                        text=f'📺 결과 영상 보기 ({n}개)'),
+                    search_btn.configure(state='normal'),
+                ))
+                _state['running'] = False
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _load_results():
+            videos = _state.get('videos', [])
+            if not videos:
+                return
+            paths    = [v['path'] for v in videos]
+            tags_map = {v['path']: v.get('tags', []) for v in videos}
+            self._videos   = videos
+            self._total    = len(videos)
+            self._tags_map = tags_map
+            self._offset   = 0
+            self._sel.clear()
+            self.lbl_stats.config(text=f'표시: {len(videos)}개  (AI 추천)')
+            self._set_status(f'AI 추천 결과 {len(videos)}개')
+            self._update_nav()
+            step = int(self.thumb_step_var.get())
+            tw, th = THUMB_SIZES[step]
+            self.grid_widget.load(videos, tags_map, self._sel,
+                                  tw=tw, th=th, img_cache=self._img_cache,
+                                  debug=self.debug_var.get(), page_offset=0)
+            win.destroy()
+
+        search_btn.configure(command=lambda: _run(query_var.get()))
+        entry.bind('<Return>', lambda _: _run(query_var.get()))
+        load_btn.configure(command=_load_results)
+        entry.focus_set()
 
     def _show_daily_pick(self):
         """태그/별칭 없는 파일 중 랜덤 100개 — 오늘의 추천"""

@@ -193,6 +193,85 @@ class LLMClient:
             pass
         return results
 
+    # ── AI 영상 추천 (2회 호출) ──────────────────
+    def recommend_query(self, user_query: str, tag_pool: list,
+                        on_chunk: callable = None) -> dict:
+        """[1차 호출] 자연어 쿼리 → 검색 태그 + 키워드 JSON 추출.
+        반환: {"tags": [...], "keywords": [...], "intent": "..."}"""
+        tag_list_str = ', '.join(f'"{t}"' for t in tag_pool[:300])
+
+        system = (
+            "당신은 영상 라이브러리 검색 전문가입니다.\n"
+            "사용자의 자연어 검색어를 분석하여 DB 검색에 사용할 태그와 키워드를 추출하세요.\n"
+            "태그는 반드시 주어진 목록에서만 선택하세요. 키워드는 파일명/폴더명에서 찾을 자유 검색어입니다.\n"
+            "반드시 JSON만 출력하세요. 그 외 텍스트는 절대 출력하지 마세요."
+        )
+        user = (
+            f'검색어: "{user_query}"\n\n'
+            f'사용 가능한 태그 목록:\n[{tag_list_str}]\n\n'
+            '응답 형식 (JSON만):\n'
+            '{\n'
+            '  "tags": ["태그1", "태그2"],\n'
+            '  "keywords": ["파일명검색어1", "파일명검색어2"],\n'
+            '  "intent": "검색 의도 한 줄 요약"\n'
+            '}'
+        )
+        try:
+            content, _, _ = self._chat_tracked(
+                [{"role": "system", "content": system},
+                 {"role": "user",   "content": user}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+                on_chunk=on_chunk,
+            )
+            if content.startswith('```'):
+                content = content.split('```')[1].lstrip('json').strip()
+            return json.loads(content.strip())
+        except Exception:
+            # 파싱 실패 시 쿼리 자체를 키워드로
+            return {"tags": [], "keywords": [user_query.strip()], "intent": user_query}
+
+    def recommend_explain(self, user_query: str, videos: list,
+                          on_chunk: callable = None) -> str:
+        """[2차 호출] 찾은 영상 목록을 가게 점원 스타일로 설명.
+        videos: [{"name": ..., "alias": ..., "tags": [...], "duration": ...}, ...]"""
+        lines = []
+        for i, v in enumerate(videos[:50], 1):
+            title = v.get('alias') or v.get('name', '')
+            tags  = ', '.join((v.get('tags') or [])[:5])
+            dur   = v.get('duration_str', '')
+            line  = f"{i}. 『{title}』"
+            if tags:
+                line += f"  [태그: {tags}]"
+            if dur:
+                line += f"  ({dur})"
+            lines.append(line)
+        vid_str = '\n'.join(lines)
+
+        system = (
+            "당신은 동네 작은 영상 가게의 친절하고 유쾌한 점원입니다.\n"
+            "손님이 원하는 영상을 찾아드리는 게 낙이에요.\n"
+            "자연스럽고 친근한 말투로, 마치 실제 가게에서 이야기하듯 설명해주세요.\n"
+            "찾아드린 영상 중 특히 잘 맞을 것 같은 3~5개를 콕 집어서 "
+            "왜 추천하는지 이유도 함께 말해주세요.\n"
+            "전체 목록 기준으로 왜 이것들을 골랐는지도 간략히 설명해주세요.\n"
+            "너무 길지 않게, 자연스럽게 대화하듯 써주세요."
+        )
+        user = (
+            f'손님이 찾으시는 영상: "{user_query}"\n\n'
+            f'제가 찾아드린 영상 ({len(videos[:50])}개):\n{vid_str}\n\n'
+            '가게 점원으로서 이 영상들을 소개해주세요.'
+        )
+        try:
+            content, _, _ = self._chat_tracked(
+                [{"role": "system", "content": system},
+                 {"role": "user",   "content": user}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+                on_chunk=on_chunk,
+            )
+            return content
+        except Exception as e:
+            return f"(설명 생성 실패: {e})"
+
     def _tag_batch(self, filenames: list, tag_pool: list,
                    system_prompt: str) -> list:
         """배치 단위 분류 — 같은 순서의 태그 리스트 반환"""

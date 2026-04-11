@@ -257,7 +257,8 @@ class DB:
 
     # ── 핵심: SQL 기반 페이지 쿼리 ─────────────
     def query_page(self, active_exts, folder, tag, sort, short_filter,
-                   search, offset, limit, min_dur=0, folder_search=False):
+                   search, offset, limit, min_dur=0, folder_search=False,
+                   sort_asc=None):
         import sys
         print(f"[query_page] active_exts={active_exts} folder={folder} "
               f"tag={tag} sort={sort} short={short_filter} "
@@ -315,14 +316,17 @@ class DB:
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
         join_sql  = "LEFT JOIN tags t ON f.path=t.path" if use_tag_join else ""
 
-        # 5) 정렬
-        sort_map = {
-            '이름':    'f.name COLLATE NOCASE ASC',
-            '크기':    'f.size DESC',
-            '날짜추가': 'f.added_at DESC',
-            '재생시간': 'f.duration DESC',
+        # 5) 정렬 — sort_asc=None 이면 항목별 기본 방향 사용
+        _col_map = {
+            '이름':    'f.name COLLATE NOCASE',
+            '크기':    'f.size',
+            '날짜추가': 'f.added_at',
+            '재생시간': 'f.duration',
         }
-        order_sql = sort_map.get(sort, 'f.name COLLATE NOCASE ASC')
+        _default_asc = {'이름': True, '크기': False, '날짜추가': False, '재생시간': False}
+        col = _col_map.get(sort, 'f.name COLLATE NOCASE')
+        asc = sort_asc if sort_asc is not None else _default_asc.get(sort, True)
+        order_sql = f'{col} {"ASC" if asc else "DESC"}'
 
         # tag JOIN 있을 때 중복 방지 — 서브쿼리로 처리 (DISTINCT + ORDER BY 충돌 완전 회피)
         if use_tag_join:
@@ -1127,6 +1131,7 @@ class VidSort(tk.Tk):
         self.folder_var       = tk.StringVar(value='')
         self.tag_var          = tk.StringVar(value='')
         self.sort_var         = tk.StringVar(value='이름')
+        self.sort_asc_var     = tk.BooleanVar(value=True)   # True=오름차순, False=내림차순
         self.short_filter_var = tk.BooleanVar(value=False)
         self.folder_search_var= tk.BooleanVar(value=False)
         self.thumb_step_var   = tk.IntVar(value=DEFAULT_THUMB_STEP)
@@ -1150,7 +1155,16 @@ class VidSort(tk.Tk):
         self._thumb_lbl_n  = None
 
         self.search_var.trace_add('write', lambda *_: self.after(350, self._reload))
-        for v in (self.sort_var, self.short_filter_var):
+        # 정렬 기준 변경 시 방향을 해당 기준의 기본값으로 리셋
+        _sort_default_asc = {'이름': True, '크기': False, '날짜추가': False, '재생시간': False}
+        def _on_sort_change(*_):
+            default = _sort_default_asc.get(self.sort_var.get(), True)
+            self.sort_asc_var.set(default)
+            if hasattr(self, '_sort_dir_btn'):
+                self._sort_dir_btn.config(text='▲' if default else '▼')
+            self.after(50, self._reload)
+        self.sort_var.trace_add('write', _on_sort_change)
+        for v in (self.sort_asc_var, self.short_filter_var):
             v.trace_add('write', lambda *_: self.after(50, self._reload))
 
         self._build_ui()
@@ -1232,7 +1246,14 @@ class VidSort(tk.Tk):
         tk.Label(tb,text='정렬:',bg='#111120',fg='#666',font=('Consolas',9)).pack(side='left',padx=(8,0))
         ttk.Combobox(tb,textvariable=self.sort_var,
                      values=['이름','크기','날짜추가','재생시간'],
-                     width=10,state='readonly',font=('Consolas',9)).pack(side='left',padx=4)
+                     width=10,state='readonly',font=('Consolas',9)).pack(side='left',padx=(4,0))
+        # 오름/내림차순 토글 버튼
+        self._sort_dir_btn = tk.Button(
+            tb, text='▲', bg='#111120', fg='#7c6ff7',
+            font=('Consolas', 10, 'bold'), bd=0, padx=4, pady=2,
+            cursor='hand2', activebackground='#1a1a28',
+            command=self._toggle_sort_dir)
+        self._sort_dir_btn.pack(side='left', padx=(2, 4))
 
         tk.Checkbutton(tb,text='2글자↓ 무시',variable=self.short_filter_var,
                        bg='#111120',fg='#888',selectcolor='#111120',
@@ -2203,6 +2224,12 @@ class VidSort(tk.Tk):
                               debug=self.debug_var.get(),
                               page_offset=0)
 
+    def _toggle_sort_dir(self):
+        asc = not self.sort_asc_var.get()
+        self.sort_asc_var.set(asc)
+        self._sort_dir_btn.config(text='▲' if asc else '▼')
+        self._offset = 0
+
     # ── 포맷 적용 ───────────────────────────────
     def _apply_format(self):
         # 설정 저장
@@ -2221,6 +2248,7 @@ class VidSort(tk.Tk):
         folder        = self.folder_var.get()
         tag           = self.tag_var.get()
         sort          = self.sort_var.get()
+        sort_asc      = self.sort_asc_var.get()
         short         = self.short_filter_var.get()
         search        = self.search_var.get().strip()
         min_dur       = self.min_dur_var.get()
@@ -2229,15 +2257,16 @@ class VidSort(tk.Tk):
         threading.Thread(
             target=self._bg_query,
             args=(active_exts, folder, tag, sort, short, search,
-                  self._offset, min_dur, folder_search),
+                  self._offset, min_dur, folder_search, sort_asc),
             daemon=True).start()
 
     def _bg_query(self, active_exts, folder, tag, sort, short, search,
-                  offset, min_dur=0, folder_search=False):
+                  offset, min_dur=0, folder_search=False, sort_asc=None):
         rows, total = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
-            offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search)
+            offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search,
+            sort_asc=sort_asc)
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
         self.after(0, lambda: self._on_query_done(rows, total, tags_map))
@@ -2308,6 +2337,7 @@ class VidSort(tk.Tk):
         folder  = self.folder_var.get()
         tag     = self.tag_var.get()
         sort    = self.sort_var.get()
+        sort_asc= self.sort_asc_var.get()
         short   = self.short_filter_var.get()
         search  = self.search_var.get().strip()
 
@@ -2316,7 +2346,7 @@ class VidSort(tk.Tk):
         rows, total = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
-            self._offset, PAGE_SIZE, min_dur=min_dur)
+            self._offset, PAGE_SIZE, min_dur=min_dur, sort_asc=sort_asc)
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
 
@@ -2349,23 +2379,25 @@ class VidSort(tk.Tk):
         folder  = self.folder_var.get()
         tag     = self.tag_var.get()
         sort    = self.sort_var.get()
+        sort_asc= self.sort_asc_var.get()
         short   = self.short_filter_var.get()
         search  = self.search_var.get().strip()
 
         self._prefetch_thread = threading.Thread(
             target=self._prefetch_worker,
             args=(active_exts, folder, tag, sort, short, search,
-                  next_offset, tw, th),
+                  next_offset, tw, th, sort_asc),
             daemon=True)
         self._prefetch_thread.start()
 
     def _prefetch_worker(self, active_exts, folder, tag, sort, short,
-                         search, offset, tw, th):
+                         search, offset, tw, th, sort_asc=None):
         """다음 페이지 데이터 쿼리 후 썸네일 이미지 미리 로드"""
         try:
             rows, _ = self.db.query_page(
                 active_exts, folder or None, tag or None,
-                sort, short, search or None, offset, PAGE_SIZE)
+                sort, short, search or None, offset, PAGE_SIZE,
+                sort_asc=sort_asc)
         except: return
 
         for v in rows:

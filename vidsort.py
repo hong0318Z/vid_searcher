@@ -1671,14 +1671,23 @@ class VidSort(tk.Tk):
         lb_sb.pack(side='right', fill='y')
         lb.pack(fill='both', expand=True)
 
-        # ── 오른쪽: 설명 편집 ──
+        # ── 오른쪽: 편집 패널 ──
         right_f = tk.Frame(main_f, bg='#0d0d14')
         right_f.pack(side='left', fill='both', expand=True)
-        tk.Label(right_f, text='선택된 태그', bg='#0d0d14', fg='#888',
+        tk.Label(right_f, text='태그 이름', bg='#0d0d14', fg='#888',
                  font=('Consolas', 9)).pack(anchor='w')
-        lbl_tag = tk.Label(right_f, text='—', bg='#0d0d14', fg='#7c6ff7',
-                           font=('Consolas', 12, 'bold'))
-        lbl_tag.pack(anchor='w', pady=(0, 8))
+
+        # 이름 변경 행
+        rename_f = tk.Frame(right_f, bg='#0d0d14')
+        rename_f.pack(fill='x', pady=(2, 6))
+        rename_var = tk.StringVar()
+        rename_ent = ttk.Entry(rename_f, textvariable=rename_var,
+                               font=('Consolas', 11), width=20)
+        rename_ent.pack(side='left', fill='x', expand=True, padx=(0, 4))
+        rename_btn = ttk.Button(rename_f, text='✏ 이름 변경',
+                                style='Acc.TButton', state='disabled')
+        rename_btn.pack(side='left')
+
         tk.Label(right_f, text='설명', bg='#0d0d14', fg='#888',
                  font=('Consolas', 9)).pack(anchor='w')
         desc_txt = tk.Text(right_f, bg='#1a1a28', fg='#dcdcf0',
@@ -1702,10 +1711,56 @@ class VidSort(tk.Tk):
             if not sel: return
             idx = sel[0]; tag, desc = tags_data[idx]
             cur[0] = idx
-            lbl_tag.config(text=tag)
+            rename_var.set(tag)
+            rename_btn.config(state='normal')
             desc_txt.delete('1.0', 'end')
             desc_txt.insert('1.0', desc)
             save_btn.config(state='normal')
+
+        def do_rename():
+            if cur[0] is None: return
+            old_tag, old_desc = tags_data[cur[0]]
+            new_tag = rename_var.get().strip()
+            if not new_tag or new_tag == old_tag:
+                return
+            # 이미 존재하는 태그로 변경 → 병합 확인
+            existing_names = [t for t, _ in tags_data]
+            if new_tag in existing_names:
+                cnt_old = self.db.conn.execute(
+                    "SELECT COUNT(*) FROM tags WHERE tag=?", (old_tag,)).fetchone()[0]
+                cnt_new = self.db.conn.execute(
+                    "SELECT COUNT(*) FROM tags WHERE tag=?", (new_tag,)).fetchone()[0]
+                if not messagebox.askyesno('태그 병합',
+                        f'"{new_tag}" 태그가 이미 존재합니다.\n\n'
+                        f'• "{old_tag}"  ({cnt_old}개 파일)\n'
+                        f'• "{new_tag}"  ({cnt_new}개 파일)\n\n'
+                        f'두 태그를 "{new_tag}" 으로 병합합니까?',
+                        parent=win):
+                    return
+                self.db.rename_tag(old_tag, new_tag)
+                # tags_data에서 old 항목 제거, new 항목 유지
+                new_idx = existing_names.index(new_tag)
+                tags_data.pop(cur[0])
+                lb.delete(cur[0])
+                # 병합 후 new 항목 선택
+                if new_idx > cur[0]:
+                    new_idx -= 1
+                cur[0] = new_idx
+                lb.selection_clear(0, 'end')
+                lb.selection_set(new_idx)
+                lb.see(new_idx)
+                rename_var.set(new_tag)
+            else:
+                self.db.rename_tag(old_tag, new_tag)
+                tags_data[cur[0]] = (new_tag, old_desc)
+                lb.delete(cur[0])
+                lb.insert(cur[0], '  ' + new_tag)
+                lb.selection_set(cur[0])
+            self._reload_sidebar()
+            self._reload()
+
+        rename_btn.config(command=do_rename)
+        rename_ent.bind('<Return>', lambda e: do_rename())
 
         def save_desc():
             if cur[0] is None: return
@@ -1731,7 +1786,8 @@ class VidSort(tk.Tk):
             tags_data.pop(idx)
             lb.delete(idx)
             cur[0] = None
-            lbl_tag.config(text='—')
+            rename_var.set('')
+            rename_btn.config(state='disabled')
             desc_txt.delete('1.0', 'end')
             save_btn.config(state='disabled')
 

@@ -579,9 +579,12 @@ def _fetch_fc2db(code: str) -> tuple:
     url = f'{FC2DB_BASE}/work/{number}/'
     print(f'[FC2DB] GET {url}', flush=True)
     r = _get(url)
-    print(f'[FC2DB] status={r.status}', flush=True)
-    if r.status != 200:
+    print(f'[FC2DB] status={r.status}  len={len(r.text)}', flush=True)
+    if r.status not in (200, 0):
         return None, f'FC2DB HTTP {r.status}'
+    # 소프트 404 감지: HTML이 5KB 미만이면 미등록 페이지
+    if len(r.text) < 5000:
+        return None, f'FC2DB 미등록 (응답 {len(r.text)}B — DB에 없는 ID)'
 
     s = _soup(r.text)
 
@@ -712,7 +715,7 @@ def fetch_meta_verbose(code: str) -> tuple:
         meta, err_fc2 = _fetch_fc2db(code)
         if meta:
             return meta, ''
-        print(f'[FC2DB] 실패: {err_fc2} → fallback 반환', flush=True)
+        print(f'[FC2DB] {err_fc2} → fallback 반환', flush=True)
         return {
             'code':      code.upper(),
             'title':     code.upper(),

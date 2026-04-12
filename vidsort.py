@@ -334,7 +334,10 @@ class DB:
                 SELECT DISTINCT f.path {join_sql and f'FROM files f {join_sql}' or 'FROM files f'}
                 {where_sql}
             """
-            count_sql = f"SELECT COUNT(*) FROM ({base_sql})"
+            res = self.conn.execute(f"SELECT COUNT(*), SUM(size) FROM files WHERE path IN ({base_sql})", params).fetchone()
+            total = res[0]
+            total_size = res[1] or 0
+            
             data_sql  = f"""
                 SELECT f.* FROM files f
                 WHERE f.path IN ({base_sql})
@@ -343,17 +346,40 @@ class DB:
             """
         else:
             base      = f"FROM files f {where_sql}"
-            count_sql = f"SELECT COUNT(*) {base}"
+            res = self.conn.execute(f"SELECT COUNT(*), SUM(f.size) {base}", params).fetchone()
+            total = res[0]
+            total_size = res[1] or 0
+            
             data_sql  = f"""
                 SELECT f.* {base}
                 ORDER BY {order_sql}
                 LIMIT ? OFFSET ?
             """
 
-        total = self.conn.execute(count_sql, params).fetchone()[0]
         rows  = self.conn.execute(data_sql, params + [limit, offset]).fetchall()
-        print(f"[query_page] total={total} rows={len(rows)} sql={data_sql.strip()[:120]}", flush=True, file=sys.stderr)
-        return self._dicts(rows), total
+        return self._dicts(rows), total, total_size
+
+    def get_duplicates(self):
+        """파일 용량(size)이 완전히 동일한 항목들을 찾아 반환"""
+        sizes = self.conn.execute("""
+            SELECT size FROM files 
+            WHERE size > 1048576 
+            GROUP BY size HAVING COUNT(*) > 1
+            ORDER BY size DESC
+        """).fetchall()
+        
+        if not sizes:
+            return {}
+
+        res = defaultdict(list)
+        for (sz,) in sizes:
+            rows = self.conn.execute("""
+                SELECT path, name, folder, duration, size 
+                FROM files WHERE size = ?
+            """, (sz,)).fetchall()
+            res[sz] = [{'path':r[0], 'name':r[1], 'folder':r[2], 
+                        'duration':r[3], 'size':r[4]} for r in rows]
+        return dict(res)
 
     def get_tags_for_paths(self, paths):
         if not paths: return {}
@@ -1124,6 +1150,9 @@ class VidSort(tk.Tk):
         self._nav_bar  = None
         self._folder_paths = []
 
+
+
+
         # 설정 로드
         cfg = load_cfg()
 
@@ -1406,6 +1435,8 @@ class VidSort(tk.Tk):
         qa.pack(fill='x', padx=6, pady=(4, 4))
         row1 = tk.Frame(qa, bg='#0a0a12'); row1.pack(fill='x', pady=1)
         row2 = tk.Frame(qa, bg='#0a0a12'); row2.pack(fill='x', pady=1)
+        row3 = tk.Frame(qa, bg='#0a0a12'); row3.pack(fill='x', pady=1)
+
         ttk.Button(row1, text='전체 보기',
                    command=self._show_all).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(row1, text='🎲 오늘의 추천',
@@ -1414,8 +1445,8 @@ class VidSort(tk.Tk):
                    command=self._rescan_all_folders).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(row2, text='🌐 갤러리',
                    command=self._gallery_view).pack(side='left', fill='x', expand=True)
-
-        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+        ttk.Button(row3, text='👯 중복 파일 찾기', style='Acc.TButton',
+                   command=self._find_duplicates_dlg).pack(side='left', fill='x', expand=True)
 
         # ── 🎯 AI 영상 추천 (강조) ───────────────
         ttk.Button(self.sidebar, text='🎯  AI 영상 추천', style='Acc.TButton',
@@ -2341,22 +2372,23 @@ class VidSort(tk.Tk):
 
     def _bg_query(self, active_exts, folder, tag, sort, short, search,
                   offset, min_dur=0, folder_search=False, sort_asc=None):
-        rows, total = self.db.query_page(
+        rows, total, total_size = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
             offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search,
             sort_asc=sort_asc)
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
-        self.after(0, lambda: self._on_query_done(rows, total, tags_map))
+        self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map))
 
-    def _on_query_done(self, rows, total, tags_map):
+    def _on_query_done(self, rows, total, total_size, tags_map):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
         self._sel.clear(); self._anchor = None
 
-        self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개')
+        size_str = fmt_size(total_size)
+        self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개  (총 용량: {size_str})')
         self._set_status(f'{total}개 중 {self._offset+1}~{min(self._offset+PAGE_SIZE,total)}번째')
 
         self._update_nav()
@@ -2367,10 +2399,12 @@ class VidSort(tk.Tk):
                               debug=self.debug_var.get(),
                               page_offset=self._offset)
 
-        # 다음 페이지 프리페치 시작
         next_offset = self._offset + PAGE_SIZE
         if next_offset < total:
             self._start_prefetch(next_offset, tw, th)
+
+
+
 
     def _update_nav(self):
         if self._nav_bar and self._nav_bar.winfo_exists():
@@ -2408,7 +2442,6 @@ class VidSort(tk.Tk):
                               page_offset=self._offset)
 
     def _hard_refresh(self):
-        """강제 새로고침 — 메인 스레드에서 DB 직접 쿼리 후 동기 렌더"""
         self._set_status('강제 새로고침 중...')
         self.update_idletasks()
 
@@ -2419,10 +2452,10 @@ class VidSort(tk.Tk):
         sort_asc= self.sort_asc_var.get()
         short   = self.short_filter_var.get()
         search  = self.search_var.get().strip()
-
-        # 메인 스레드에서 직접 쿼리 (스레드 타이밍 문제 없음)
         min_dur = self.min_dur_var.get()
-        rows, total = self.db.query_page(
+
+        # 🔥 여기서 3개(total_size 추가)를 받도록 수정됨
+        rows, total, total_size = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
             self._offset, PAGE_SIZE, min_dur=min_dur, sort_asc=sort_asc)
@@ -2434,14 +2467,14 @@ class VidSort(tk.Tk):
         self._tags_map = tags_map
         self._sel.clear(); self._anchor = None
 
-        self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개')
+        size_str = fmt_size(total_size)
+        self.lbl_stats.config(text=f'표시: {len(rows)}개  전체: {total}개  (총 용량: {size_str})')
         self._set_status(f'새로고침 완료 — {total}개 중 {len(rows)}개')
 
         self._update_nav()
         step = int(self.thumb_step_var.get())
         tw, th = THUMB_SIZES[step]
 
-        # 캔버스 완전 초기화 후 동기 렌더
         self.grid_widget.hard_load(rows, tags_map, self._sel,
                                    tw=tw, th=th, img_cache=self._img_cache,
                                    debug=self.debug_var.get(),
@@ -2471,9 +2504,9 @@ class VidSort(tk.Tk):
 
     def _prefetch_worker(self, active_exts, folder, tag, sort, short,
                          search, offset, tw, th, sort_asc=None):
-        """다음 페이지 데이터 쿼리 후 썸네일 이미지 미리 로드"""
         try:
-            rows, _ = self.db.query_page(
+            # 🔥 기존 rows, _ = ... 부분에서 3개(rows, _, _)를 받도록 수정됨
+            rows, _, _ = self.db.query_page(
                 active_exts, folder or None, tag or None,
                 sort, short, search or None, offset, PAGE_SIZE,
                 sort_asc=sort_asc)
@@ -3614,6 +3647,141 @@ class VidSort(tk.Tk):
         messagebox.showinfo('완료',
             f'썸네일 {deleted}개 삭제 완료\n다시 썸네일을 생성하려면 📊 → 미생성 썸네일 생성을 누르세요.')
         self._reload()
+
+
+                # ── 중복 파일 찾기 ────────────────────────────
+    def _find_duplicates_dlg(self):
+        dupes = self.db.get_duplicates()
+        if not dupes:
+            messagebox.showinfo('중복 파일 찾기', '용량이 완전히 동일한 중복 의심 파일이 없습니다.')
+            return
+
+        win = tk.Toplevel(self)
+        win.title('👯 중복 파일 관리')
+        win.configure(bg='#0d0d14')
+        win.geometry('900x600')
+        win.grab_set()
+
+        total_files = sum(len(items) for items in dupes.values())
+        total_wasted = sum(sz * (len(items) - 1) for sz, items in dupes.items())
+
+        tk.Label(win, text=f'중복 의심 파일 발견: {len(dupes)}그룹 ({total_files}개 파일)',
+                 bg='#0d0d14', fg='#dcdcf0', font=('Consolas', 12, 'bold')).pack(pady=(12, 4))
+        tk.Label(win, text=f'낭비되는 용량: 약 {fmt_size(total_wasted)}\n(용량이 완전히 동일한 파일끼리 묶었습니다. 파일명을 확인 후 삭제하세요)',
+                 bg='#0d0d14', fg='#888', font=('Consolas', 9)).pack(pady=(0, 8))
+
+        tv_f = tk.Frame(win, bg='#0d0d14')
+        tv_f.pack(fill='both', expand=True, padx=12, pady=4)
+        
+        tv_vsb = ttk.Scrollbar(tv_f, orient='vertical')
+        tv_vsb.pack(side='right', fill='y')
+        
+        cols = ('name', 'folder', 'size', 'duration')
+        tv = ttk.Treeview(tv_f, columns=cols, show='tree headings', 
+                          selectmode='extended', yscrollcommand=tv_vsb.set)
+        
+        tv.heading('#0', text='그룹/상태', anchor='w')
+        tv.heading('name', text='파일명', anchor='w')
+        tv.heading('folder', text='폴더', anchor='w')
+        tv.heading('size', text='용량', anchor='center')
+        tv.heading('duration', text='시간', anchor='center')
+        
+        tv.column('#0', width=80, stretch=False)
+        tv.column('name', width=350, minwidth=200)
+        tv.column('folder', width=200, minwidth=100)
+        tv.column('size', width=80, stretch=False, anchor='center')
+        tv.column('duration', width=80, stretch=False, anchor='center')
+        
+        tv.pack(fill='both', expand=True)
+        tv_vsb.config(command=tv.yview)
+
+        _iid_path_map = {}
+        
+        def load_tree():
+            for iid in tv.get_children():
+                tv.delete(iid)
+            _iid_path_map.clear()
+            
+            for size, items in dupes.items():
+                if len(items) < 2: continue
+                grp_iid = tv.insert('', 'end', text='📂 그룹', 
+                                    values=(f'동일 용량: {fmt_size(size)}', '', '', ''),
+                                    tags=('group',))
+                for item in items:
+                    path = item['path']
+                    c_iid = tv.insert(grp_iid, 'end', text='  📄', 
+                                      values=(item['name'], Path(item['folder']).name, 
+                                              fmt_size(size), fmt_dur(item['duration'])))
+                    _iid_path_map[c_iid] = path
+                tv.item(grp_iid, open=True)
+                
+        tv.tag_configure('group', foreground='#7c6ff7', font=('Consolas', 9, 'bold'))
+        load_tree()
+
+        def on_double_click(e):
+            sel = tv.selection()
+            if not sel: return
+            path = _iid_path_map.get(sel[0])
+            if path: self._open(path)
+
+        def on_rclick(e):
+            iid = tv.identify_row(e.y)
+            if iid:
+                if iid not in tv.selection():
+                    tv.selection_set(iid)
+                path = _iid_path_map.get(iid)
+                if not path: return
+                m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                            activebackground='#7c6ff7', activeforeground='#fff')
+                m.add_command(label='▶  재생 (기본 앱)', command=lambda: self._open(path))
+                m.add_command(label='🗂  탐색기에서 폴더 열기', command=lambda: self._reveal(path))
+                m.tk_popup(e.x_root, e.y_root)
+
+        tv.bind('<Double-Button-1>', on_double_click)
+        tv.bind('<Button-3>', on_rclick)
+
+        bf = tk.Frame(win, bg='#0d0d14')
+        bf.pack(fill='x', padx=12, pady=(4, 12))
+        
+        tk.Label(bf, text='팁: 항목을 더블클릭하면 영상을 확인해볼 수 있습니다.', 
+                 bg='#0d0d14', fg='#555', font=('Consolas', 8)).pack(side='left')
+
+        def delete_selected():
+            sel = tv.selection()
+            paths_to_delete = [p for iid in sel if (p := _iid_path_map.get(iid))]
+            
+            if not paths_to_delete:
+                messagebox.showinfo('알림', '삭제할 개별 파일(📄)을 선택해주세요.\\n(그룹 전체 선택은 무시됩니다)')
+                return
+                
+            if not messagebox.askyesno('경고', 
+                f'정말 {len(paths_to_delete)}개의 파일을 디스크에서 영구 삭제하시겠습니까?\\n\\n'
+                f'(휴지통으로 가지 않고 즉시 삭제됩니다!)', icon='warning'):
+                return
+                
+            deleted_count = 0
+            for path in paths_to_delete:
+                try:
+                    target = Path(longpath(path))
+                    if target.exists():
+                        target.unlink()
+                    self.db.remove(path)
+                    tf = thumb_file(path)
+                    if tf.exists(): tf.unlink()
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"삭제 실패: {path} - {e}")
+            
+            messagebox.showinfo('완료', f'{deleted_count}개의 파일을 삭제했습니다.')
+            win.destroy()
+            self._reload_sidebar()
+            self._reload()
+            self.after(200, self._find_duplicates_dlg)
+
+        ttk.Button(bf, text='닫기', command=win.destroy).pack(side='right', padx=4)
+        ttk.Button(bf, text='🗑 선택한 파일 디스크에서 완전 삭제', 
+                   command=delete_selected).pack(side='right', padx=4)
+
     def _auto_group_dialog(self):
         self._set_status('키워드 분석 중...')
         threading.Thread(target=self._run_auto_group,daemon=True).start()

@@ -164,8 +164,12 @@ _BASE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VidSort Gallery</title>
+
+<link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+
 <style>
-:root{--bg:#111;--bg2:#1a1a1a;--bg3:#222;--acc:#ff9000;--acc2:#e07800;
+/* 플레이어 메인 컬러를 VidSort 테마(주황색)로 맞춤 */
+:root{--plyr-color-main: #ff9000; --bg:#111;--bg2:#1a1a1a;--bg3:#222;--acc:#ff9000;--acc2:#e07800;
       --txt:#fff;--sub:#aaa;--brd:#333;--card:#1e1e1e}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',Arial,sans-serif;min-height:100vh}
@@ -272,8 +276,23 @@ a{color:inherit;text-decoration:none}
 .tag-pill.sel{background:var(--acc);border-color:var(--acc);
   color:#000;font-weight:700}
 /* VIDEO PLAYER PAGE */
+/* VIDEO PLAYER PAGE */
 .player-wrap{background:#000;border-radius:8px;overflow:hidden;margin-bottom:16px}
 .player-wrap video{width:100%;display:block;max-height:72vh}
+/* 전체화면일 때는 최대 높이 제한 해제 */
+.plyr--fullscreen-active video { max-height: none !important; }
+/* Plyr 전체화면 최적화 */
+.plyr--fullscreen-active .plyr__video-wrapper {
+  height: 100% !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.plyr--fullscreen-active video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain; /* 비율 유지하며 화면에 꽉 차게 (여백 최소화) */
+}
 .player-meta{background:var(--bg2);border-radius:8px;padding:16px;margin-bottom:16px}
 .player-meta h1{font-size:18px;font-weight:700;margin-bottom:10px;line-height:1.4}
 .player-meta .meta-row{display:flex;gap:20px;flex-wrap:wrap;
@@ -330,6 +349,9 @@ function openNative(vid_id){
 }
 </script>
 __SCRIPTS__
+
+<script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
+
 </body>
 </html>"""
 
@@ -475,9 +497,9 @@ _VIDEO = _BASE.replace('__BODY__', """
   <div style="display:grid;grid-template-columns:1fr 300px;gap:20px">
     <div>
       <div class="player-wrap">
-        <video id="vp" controls autoplay preload="metadata"
-               src="/stream/{{ v.id }}">
-          브라우저가 HTML5 비디오를 지원하지 않습니다.
+        <video id="vp" playsinline controls data-poster="/thumb/{{ v.id }}">
+          <source src="/stream/{{ v.id }}" type="video/mp4" />
+          브라우저가 비디오를 지원하지 않습니다.
         </video>
       </div>
       <div class="player-meta">
@@ -523,17 +545,24 @@ _VIDEO = _BASE.replace('__BODY__', """
   </div>
 </div>
 """).replace('__SCRIPTS__', '''<script>
-// 키보드 단축키
-document.addEventListener('keydown',function(e){
-  const vp=document.getElementById('vp');
-  if(!vp)return;
-  if(e.code==='Space'){e.preventDefault();vp.paused?vp.play():vp.pause()}
-  if(e.code==='ArrowRight')vp.currentTime+=10;
-  if(e.code==='ArrowLeft')vp.currentTime-=10;
-  if(e.code==='ArrowUp'){e.preventDefault();vp.volume=Math.min(1,vp.volume+.1)}
-  if(e.code==='ArrowDown'){e.preventDefault();vp.volume=Math.max(0,vp.volume-.1)}
-  if(e.code==='KeyF'){if(!document.fullscreenElement)vp.requestFullscreen();
-                      else document.exitFullscreen()}
+// Plyr 플레이어 초기화 및 확장 기능 설정
+document.addEventListener('DOMContentLoaded', () => {
+  const player = new Plyr('#vp', {
+    keyboard: { focused: true, global: true }, // 방향키, 스페이스바 전역 단축키 
+    controls: [
+      'play-large', // 중앙의 큰 재생 버튼
+      'restart',    // 처음부터 다시 재생
+      'play',       // 하단 재생/일시정지
+      'progress',   // 탐색 바
+      'current-time', 'duration', // 시간
+      'mute', 'volume', // 볼륨 컨트롤
+      'settings',   // 톱니바퀴 (배속 설정 등)
+      'pip',        // 화면 속 화면 (PIP)
+      'fullscreen'  // 전체화면
+    ],
+    settings: ['speed'], // 설정 메뉴에 배속 조절 활성화
+    speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] }, // 배속 옵션
+  });
 });
 </script>
 ''')

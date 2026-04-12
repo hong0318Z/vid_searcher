@@ -300,9 +300,10 @@ class DB:
         if search:
             lq = f'%{search.lower()}%'
             if folder_search:
+                # 💡 핵심 수정: f.folder 대신 f.path 전체 경로를 검색하도록 변경
                 where.append(
                     "(LOWER(f.name) LIKE ? OR LOWER(f.alias) LIKE ? "
-                    "OR LOWER(t.tag) LIKE ? OR LOWER(f.folder) LIKE ?)")
+                    "OR LOWER(t.tag) LIKE ? OR LOWER(f.path) LIKE ?)")
                 params += [lq, lq, lq, lq]
             else:
                 where.append(

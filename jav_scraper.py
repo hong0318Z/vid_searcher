@@ -386,7 +386,6 @@ def _fetch_javbus(code: str) -> tuple:
         if result['title']:
             return result, ''
         return None, 'Javbus 제목 파싱 실패 (HTML 구조 변경 가능성)'
-        return None, 'Javbus 제목 파싱 실패'
 
     except Exception as e:
         import traceback
@@ -696,18 +695,90 @@ def _fetch_fc2db(code: str) -> tuple:
 #  FC2PPVDB (fc2ppvdb.com) — 로그인 필요, 가장 풍부한 메타
 # ─────────────────────────────────────────────────
 FC2PPVDB_BASE    = 'https://fc2ppvdb.com/public'
-_ppvdb_sess      = None   # curl_cffi/httpx 세션 (쿠키 유지)
+_ppvdb_sess      = None
 _ppvdb_logged_in = False
 _ppvdb_email     = ''
 _ppvdb_password  = ''
 
+# 🔥 테스트 코드와 100% 동일한 순수 헤더 (전역 _HEADERS 오염 방지)
+_PPVDB_HDRS_BASE = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'),
+    'Accept-Language': 'ja,ko;q=0.9,en-US;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+}
+
+class _PPVDBSession:
+    """테스트 코드의 Session 클래스를 그대로 이식한 독립 세션"""
+    def __init__(self):
+        if _HAS_CFFI:
+            from curl_cffi.requests import Session as _CSession
+            self._s = _CSession(impersonate='chrome110', verify=False)
+            self.engine = 'cffi'
+        elif _HAS_HTTPX:
+            self._s = httpx.Client(follow_redirects=True, verify=False, timeout=20)
+            self.engine = 'httpx'
+        else:
+            import http.cookiejar as _cj, ssl as _ssl, urllib.request as _ur
+            jar = _cj.CookieJar()
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False; ctx.verify_mode = _ssl.CERT_NONE
+            self._s = _ur.build_opener(_ur.HTTPCookieProcessor(jar), _ur.HTTPSHandler(context=ctx))
+            self.engine = 'urllib'
+
+    def get(self, url, headers=None):
+        h = {**_PPVDB_HDRS_BASE, 'Accept': 'text/html,*/*', **(headers or {})}
+        if self.engine == 'cffi':
+            r = self._s.get(url, headers=h, timeout=20)
+            return r.status_code, r.text
+        elif self.engine == 'httpx':
+            r = self._s.get(url, headers=h)
+            return r.status_code, r.text
+        else:
+            import urllib.request as _ur, urllib.error as _ue
+            req = _ur.Request(url, headers=h)
+            try:
+                with self._s.open(req, timeout=20) as r:
+                    return r.status, r.read().decode('utf-8', errors='replace')
+            except _ue.HTTPError as e:
+                return e.code, e.read().decode('utf-8', errors='replace')
+            except Exception:
+                return 0, ''
+
+    def post(self, url, data: dict, headers=None):
+        h = {**_PPVDB_HDRS_BASE,
+             'Content-Type': 'application/x-www-form-urlencoded',
+             'Origin': 'https://fc2ppvdb.com',
+             'Referer': f'{FC2PPVDB_BASE}/login',
+             **(headers or {})}
+        if self.engine == 'cffi':
+            r = self._s.post(url, data=data, headers=h, timeout=20)
+            return r.status_code, r.text
+        elif self.engine == 'httpx':
+            r = self._s.post(url, data=data, headers=h)
+            return r.status_code, r.text
+        else:
+            import urllib.request as _ur, urllib.error as _ue
+            encoded = urllib.parse.urlencode(data).encode()
+            req = _ur.Request(url, data=encoded, headers=h)
+            try:
+                with self._s.open(req, timeout=20) as r:
+                    return r.status, r.read().decode('utf-8', errors='replace')
+            except _ue.HTTPError as e:
+                return e.code, e.read().decode('utf-8', errors='replace')
+            except Exception:
+                return 0, ''
+
+
 def set_fc2ppvdb_credentials(email: str, password: str):
-    """앱 시작 시 또는 설정 저장 시 호출 — 자격증명 변경 시 재로그인."""
     global _ppvdb_email, _ppvdb_password, _ppvdb_logged_in
     if email != _ppvdb_email or password != _ppvdb_password:
-        _ppvdb_logged_in = False   # 재로그인 필요
+        _ppvdb_logged_in = False
     _ppvdb_email    = email
     _ppvdb_password = password
+
 
 def _ppvdb_login() -> bool:
     global _ppvdb_sess, _ppvdb_logged_in
@@ -718,136 +789,78 @@ def _ppvdb_login() -> bool:
 
     print(f'[FC2PPVDB] 로그인 시도 ({_ppvdb_email})', flush=True)
     try:
-        if _HAS_CFFI:
-            from curl_cffi.requests import Session as _CSession
-            _ppvdb_sess = _CSession(impersonate='chrome110', verify=False)
-            def _do_get(url, headers=None):
-                r = _ppvdb_sess.get(url, headers={**_HEADERS, **(headers or {})}, timeout=20)
-                return r.status_code, r.text
-            def _do_post(url, data, headers=None):
-                r = _ppvdb_sess.post(url, data=data,
-                                     headers={**_HEADERS, **(headers or {})}, timeout=20)
-                return r.status_code, r.text
-        elif _HAS_HTTPX:
-            _ppvdb_sess = httpx.Client(follow_redirects=True, verify=False, timeout=20,
-                                       headers=_HEADERS)
-            def _do_get(url, headers=None):
-                r = _ppvdb_sess.get(url, headers=headers or {})
-                return r.status_code, r.text
-            def _do_post(url, data, headers=None):
-                r = _ppvdb_sess.post(url, data=data, headers=headers or {})
-                return r.status_code, r.text
-        else:
-            # urllib — Cloudflare 차단 가능성 높음, 시도는 해봄
-            import http.cookiejar as _cj, ssl as _ssl
-            _jar  = _cj.CookieJar()
-            _ctx  = _ssl.create_default_context()
-            _ctx.check_hostname = False; _ctx.verify_mode = _ssl.CERT_NONE
-            import urllib.request as _ur
-            _ppvdb_sess = _ur.build_opener(
-                _ur.HTTPCookieProcessor(_jar),
-                _ur.HTTPSHandler(context=_ctx))
-            def _do_get(url, headers=None):
-                h = {**_HEADERS, **(headers or {})}
-                req = _ur.Request(url, headers=h)
-                try:
-                    with _ppvdb_sess.open(req, timeout=20) as r:
-                        return r.status, r.read().decode('utf-8', errors='replace')
-                except Exception as e:
-                    return 0, ''
-            def _do_post(url, data, headers=None):
-                h = {**_HEADERS, **(headers or {}),
-                     'Content-Type': 'application/x-www-form-urlencoded'}
-                body = urllib.parse.urlencode(data).encode()
-                req  = _ur.Request(url, data=body, headers=h)
-                try:
-                    with _ppvdb_sess.open(req, timeout=20) as r:
-                        return r.status, r.read().decode('utf-8', errors='replace')
-                except Exception:
-                    return 0, ''
-
-        # CSRF 토큰 획득
-        status, html = _do_get(f'{FC2PPVDB_BASE}/login')
+        # 매 로그인 시도마다 깨끗한 독립 세션 생성
+        _ppvdb_sess = _PPVDBSession()
+        
+        status, html = _ppvdb_sess.get(f'{FC2PPVDB_BASE}/login')
         if status != 200 or not html:
             print(f'[FC2PPVDB] 로그인 페이지 실패 (status={status})', flush=True)
             return False
+            
         csrf = ''
         for pat in [r'<meta name="csrf-token" content="([^"]+)"',
-                    r'name="_token"[^>]+value="([^"]+)"']:
+                    r'name="_token"[^>]+value="([^"]+)"',
+                    r'"csrfToken":"([^"]+)"']:
             m = re.search(pat, html)
             if m:
                 csrf = m.group(1); break
+                
         if not csrf:
             print('[FC2PPVDB] CSRF 토큰 없음 (Cloudflare 차단?)', flush=True)
             return False
 
-        # 로그인 POST
-        post_headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin':   'https://fc2ppvdb.com',
-            'Referer':  f'{FC2PPVDB_BASE}/login',
-        }
-        status2, html2 = _do_post(f'{FC2PPVDB_BASE}/login',
-                                   {'_token': csrf,
-                                    'email': _ppvdb_email,
-                                    'password': _ppvdb_password},
-                                   headers=post_headers)
+        status2, html2 = _ppvdb_sess.post(f'{FC2PPVDB_BASE}/login', {
+            '_token': csrf, 'email': _ppvdb_email, 'password': _ppvdb_password
+        })
+        
         if 'ログアウト' in html2 or 'logout' in html2.lower():
             _ppvdb_logged_in = True
             print('[FC2PPVDB] 로그인 성공', flush=True)
             return True
+            
         print(f'[FC2PPVDB] 로그인 실패 (status={status2})', flush=True)
         return False
-
+        
     except Exception as e:
         print(f'[FC2PPVDB] 로그인 예외: {e}', flush=True)
         return False
 
 
 def _fetch_fc2ppvdb(code: str) -> tuple:
-    """FC2-PPV 코드 → fc2ppvdb.com API 조회.
-    (meta_dict | None, error_str) 반환
-    set_fc2ppvdb_credentials() 로 사전에 자격증명 설정 필요.
-    """
     global _ppvdb_logged_in
 
     if not _ppvdb_email:
-        return None, 'FC2PPVDB 계정 미설정 (설정 → FC2PPVDB 이메일/비밀번호 입력)'
+        return None, 'FC2PPVDB 계정 미설정'
 
     m = re.search(r'FC2-PPV-(\d+)', code.upper())
     if not m:
         return None, f'FC2-PPV 코드 형식 오류: {code}'
     number = m.group(1)
 
-    # 세션이 없거나 로그인 안 됨 → 로그인
     if not _ppvdb_logged_in or _ppvdb_sess is None:
         if not _ppvdb_login():
-            return None, 'FC2PPVDB 로그인 실패 (이메일/비밀번호 확인)'
+            return None, 'FC2PPVDB 로그인 실패'
 
+    # 🔥 [핵심 비법] 테스트 코드(STEP 3)처럼 API 호출 전 일반 페이지 먼저 방문!
+    # 서버에 '나 브라우저로 접속한 사람이야'라고 흔적(쿠키/로그)을 남깁니다.
+    html_url = f'{FC2PPVDB_BASE}/articles/{number}'
+    print(f'[FC2PPVDB] GET {html_url} (사전 방문)', flush=True)
+    try:
+        _ppvdb_sess.get(html_url, headers={'Referer': f'{FC2PPVDB_BASE}/'})
+        time.sleep(random.uniform(0.5, 1.5))  # 사람처럼 0.5~1.5초 대기
+    except Exception:
+        pass
+
+    # 이제 안심하고 원본 API 주소 호출 (테스트 코드 STEP 5)
     url = f'{FC2PPVDB_BASE}/articles/article-info?videoid={number}'
-    print(f'[FC2PPVDB] GET {url}', flush=True)
+    print(f'[FC2PPVDB] GET {url} (API 호출)', flush=True)
 
     try:
-        if _HAS_CFFI or _HAS_HTTPX:
-            r = _ppvdb_sess.get(url, headers={
-                **_HEADERS,
-                'Accept': 'application/json, text/plain, */*',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': f'{FC2PPVDB_BASE}/articles/{number}',
-            }, timeout=20)
-            status, text = r.status_code, r.text
-        else:
-            import urllib.request as _ur
-            req = _ur.Request(url, headers={
-                **_HEADERS,
-                'Accept': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-            })
-            try:
-                with _ppvdb_sess.open(req, timeout=20) as resp:
-                    status, text = resp.status, resp.read().decode('utf-8', errors='replace')
-            except Exception:
-                status, text = 0, ''
+        status, text = _ppvdb_sess.get(url, headers={
+            'Accept': 'application/json, text/plain, */*',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': html_url,
+        })
     except Exception as e:
         return None, f'FC2PPVDB 요청 예외: {e}'
 
@@ -855,18 +868,21 @@ def _fetch_fc2ppvdb(code: str) -> tuple:
     if status != 200:
         return None, f'FC2PPVDB HTTP {status}'
 
-    try:
-        data = json.loads(text)
-    except Exception:
-        return None, 'FC2PPVDB JSON 파싱 실패'
+    if text.strip().startswith('{') or text.strip().startswith('['):
+        try:
+            data = json.loads(text)
+        except Exception:
+            return None, 'FC2PPVDB JSON 파싱 실패'
+    else:
+        print(f'[FC2PPVDB] 응답이 JSON이 아닙니다. 앞부분: {text[:200]}...', flush=True)
+        return None, 'FC2PPVDB 응답 오류'
 
-    # 세션 만료 감지 → 1회 재로그인 후 재시도
     if data.get('isLoggedIn', 1) == 0:
         print('[FC2PPVDB] 세션 만료 → 재로그인', flush=True)
         _ppvdb_logged_in = False
         if not _ppvdb_login():
             return None, 'FC2PPVDB 세션 만료 후 재로그인 실패'
-        return _fetch_fc2ppvdb(code)   # 1회 재귀
+        return _fetch_fc2ppvdb(code)
 
     art = data.get('article') or {}
     if not art:
@@ -874,7 +890,7 @@ def _fetch_fc2ppvdb(code: str) -> tuple:
 
     title = (art.get('title') or '').strip()
     if not title:
-        return None, f'FC2PPVDB: {code} 제목 없음 (미등록 ID)'
+        return None, f'FC2PPVDB: {code} 제목 없음'
 
     tags       = [t['name'] for t in (art.get('tags') or []) if t.get('name')]
     actresses  = [a['name'] for a in (art.get('actresses') or []) if a.get('name')]
@@ -882,7 +898,6 @@ def _fetch_fc2ppvdb(code: str) -> tuple:
     image_url  = art.get('image_url', '') or ''
     if image_url.startswith('/'):
         image_url = f'https://fc2ppvdb.com{image_url}'
-    # no-image 경로는 빈 문자열로
     if 'no-image' in image_url:
         image_url = ''
 
@@ -899,7 +914,6 @@ def _fetch_fc2ppvdb(code: str) -> tuple:
     }
     print(f'[FC2PPVDB] 제목="{title}" 배우={actresses[:2]} 태그={tags[:5]}', flush=True)
     return result, ''
-
 
 # ─────────────────────────────────────────────────
 #  공개 API
@@ -996,6 +1010,10 @@ def scraper_engine() -> str:
 # ─────────────────────────────────────────────────
 if __name__ == '__main__':
     import sys, json
+    
+    # 테스트용 임시 하드코딩 (필요시 이메일/비밀번호 변경 후 사용)
+    # set_fc2ppvdb_credentials("test@email.com", "password")
+    
     code_arg = sys.argv[1] if len(sys.argv) > 1 else ''
     if not code_arg:
         print('사용법: python jav_scraper.py <AV코드>  예) python jav_scraper.py PRED-123')

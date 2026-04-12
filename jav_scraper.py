@@ -557,10 +557,143 @@ def _fetch_r18(code: str) -> tuple:
         return None, msg
 
 # ─────────────────────────────────────────────────
+#  FC2DB (fc2db.net) — FC2-PPV 전용 스크래퍼
+# ─────────────────────────────────────────────────
+FC2DB_BASE = 'https://fc2db.net'
+
+def _fetch_fc2db(code: str) -> tuple:
+    """FC2-PPV 코드 → fc2db.net 스크래핑.
+    (meta_dict | None, error_str) 반환
+
+    URL 패턴: FC2-PPV-4876937 → https://fc2db.net/work/4876937/
+    """
+    if not _HAS_BS4:
+        return None, 'beautifulsoup4 미설치'
+
+    # FC2-PPV-XXXXXXX 에서 숫자 추출
+    m = re.search(r'FC2-PPV-(\d+)', code.upper())
+    if not m:
+        return None, f'FC2-PPV 코드 형식 오류: {code}'
+    number = m.group(1)
+
+    url = f'{FC2DB_BASE}/work/{number}/'
+    print(f'[FC2DB] GET {url}', flush=True)
+    r = _get(url)
+    print(f'[FC2DB] status={r.status}', flush=True)
+    if r.status != 200:
+        return None, f'FC2DB HTTP {r.status}'
+
+    s = _soup(r.text)
+
+    # ── JSON-LD 빠른 파싱 ──
+    title = ''
+    cover_url = ''
+    date = ''
+    for script in s.find_all('script', type='application/ld+json'):
+        try:
+            ld = json.loads(script.string or '')
+            # 단일 객체
+            if isinstance(ld, dict):
+                items = ld.get('@graph', [ld])
+                for item in items:
+                    if isinstance(item, dict) and item.get('@type') in (
+                            'VideoObject', 'Movie', 'Product'):
+                        title     = (item.get('name') or '').strip()
+                        cover_url = item.get('thumbnailUrl', '')
+                        date      = (item.get('uploadDate') or
+                                     item.get('datePublished') or '')[:10]
+                        if title:
+                            break
+            if title:
+                break
+        except Exception:
+            pass
+
+    # ── HTML 보완 파싱 ──
+    if not title:
+        # <h2 class="... font-extrabold ..."> 내부 <a>
+        for sel in ('h2.font-extrabold a', 'h2.text-xl a',
+                    'h1.font-extrabold a', 'h1 a', 'h2 a'):
+            el = s.select_one(sel)
+            if el:
+                title = el.get_text(strip=True)
+                if title:
+                    break
+
+    if not title:
+        return None, f'FC2DB에서 {code} 제목 파싱 실패 (HTML 구조 변경 가능성)'
+
+    # ── 태그 파싱 ──
+    # <a href="...work-tags..."> 또는 <a href="...tag...">
+    tags = []
+    seen = set()
+    for a in s.select('a[href*="work-tags"], a[href*="/tag/"]'):
+        tag_text = a.get_text(strip=True)
+        if tag_text and tag_text not in seen:
+            tags.append(tag_text)
+            seen.add(tag_text)
+
+    # ── 커버 이미지 ──
+    if not cover_url:
+        for sel in ('img.wp-post-image', 'article img[src*="fc2db"]',
+                    '.wp-post-image', 'article img', 'figure img'):
+            img = s.select_one(sel)
+            if img:
+                src = img.get('src') or img.get('data-src', '')
+                if src and ('fc2db' in src or 'img.' in src):
+                    cover_url = src
+                    break
+
+    # ── 판매자 (채널/셀러) ──
+    seller = ''
+    for sel in ('a[href*="/seller/"]', 'a[href*="/channel/"]',
+                'a[href*="/maker/"]'):
+        a_el = s.select_one(sel)
+        if a_el:
+            sp = a_el.select_one('span.font-medium, span')
+            seller = sp.get_text(strip=True) if sp else a_el.get_text(strip=True)
+            if seller:
+                break
+
+    # ── dt/dd 그리드: 販売日, 収録時間 ──
+    if not date:
+        for dt in s.select('dt'):
+            if '販売日' in dt.get_text():
+                dd = dt.find_next_sibling('dd')
+                if dd:
+                    date = dd.get_text(strip=True)
+                break
+
+    duration_str = ''
+    for dt in s.select('dt'):
+        if '収録時間' in dt.get_text():
+            dd = dt.find_next_sibling('dd')
+            if dd:
+                duration_str = dd.get_text(strip=True)
+            break
+
+    genres = ['FC2', 'FC2-PPV', '아마추어'] + tags
+
+    result = {
+        'code':         code.upper(),
+        'source':       'fc2db',
+        'title':        title,
+        'actresses':    [],
+        'genres':       genres,
+        'studio':       seller,
+        'date':         date,
+        'cover_url':    cover_url,
+        'duration_str': duration_str,
+    }
+    print(f'[FC2DB] 제목="{title}" 태그={tags[:5]} 판매자="{seller}"', flush=True)
+    return result, ''
+
+
+# ─────────────────────────────────────────────────
 #  공개 API
 # ─────────────────────────────────────────────────
 def fetch_meta(code: str) -> dict | None:
-    """오프라인 → R18.dev → JavDB → Javbus 순서로 조회. 실패 시 None."""
+    """오프라인 → FC2DB(FC2전용) → R18.dev → JavDB → Javbus 순서로 조회. 실패 시 None."""
     meta, _ = fetch_meta_verbose(code)
     return meta
 
@@ -568,14 +701,18 @@ def fetch_meta_verbose(code: str) -> tuple:
     """(meta_dict | None, error_str). 최종 실패 원인 포함.
 
     조회 순서:
-      0) FC2-PPV 코드이면 바로 fallback 메타 반환 (외부 DB 미지원)
+      0) FC2-PPV 코드이면 fc2db.net 스크래핑 시도 → 실패 시 fallback 반환
       1) 오프라인 JSON  (jav_offline.json)
       2) R18.dev JSON API  (FANZA 공식, 빠르고 안정적)
       3) JavDB 스크래핑
       4) Javbus 스크래핑
     """
-    # 0) FC2-PPV — R18/JavDB/Javbus 모두 인덱스 없음 → 최소 메타 즉시 반환
+    # 0) FC2-PPV — fc2db.net 스크래핑 우선, 실패 시 최소 메타 반환
     if code.upper().startswith('FC2-PPV-'):
+        meta, err_fc2 = _fetch_fc2db(code)
+        if meta:
+            return meta, ''
+        print(f'[FC2DB] 실패: {err_fc2} → fallback 반환', flush=True)
         return {
             'code':      code.upper(),
             'title':     code.upper(),

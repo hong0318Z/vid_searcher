@@ -501,6 +501,24 @@ class DB:
         return self.conn.execute(
             f"SELECT COUNT(*) FROM files WHERE {cond}").fetchone()[0]
 
+    def get_fc2_fallback_list(self, limit: int = 1000):
+        """fc2-fallback 소스로 저장된 FC2-PPV 항목 반환 (재스크래핑 대상)"""
+        rows = self.conn.execute("""
+            SELECT path, name, jav_raw FROM files
+            WHERE (jav_raw LIKE '%fc2-fallback%'
+                   OR (UPPER(name) LIKE '%FC2%PPV%' AND (jav_raw IS NULL OR jav_raw='')))
+            ORDER BY name COLLATE NOCASE
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return self._dicts(rows)
+
+    def update_jav_raw(self, path: str, raw_json: str):
+        """jav_raw 업데이트 (jav_done 상태 유지)"""
+        with self.lock:
+            self.conn.execute("UPDATE files SET jav_raw=? WHERE path=?",
+                              (raw_json, path))
+            self.conn.commit()
+
     def remove(self,path):
         with self.lock:
             self.conn.execute("DELETE FROM files WHERE path=?",(path,))
@@ -5016,6 +5034,8 @@ class VidSort(tk.Tk):
         ttk.Button(btn_f, text='🌐 태그 번역 (LLM)',
                    style='Acc.TButton',
                    command=lambda: _translate_tags()).pack(side='right', padx=4)
+        ttk.Button(btn_f, text='🔄 FC2 재스크래핑',
+                   command=lambda: _fc2_migrate()).pack(side='right', padx=4)
         ttk.Button(btn_f, text='전체 선택',
                    command=lambda: tv.selection_set(tv.get_children())).pack(side='right', padx=4)
         ttk.Button(btn_f, text='닫기',
@@ -5130,6 +5150,87 @@ class VidSort(tk.Tk):
                 win.after(0, _done)
 
             threading.Thread(target=_worker, daemon=True).start()
+
+        # ── FC2 재스크래핑 ──
+        def _fc2_migrate():
+            fallback_rows = self.db.get_fc2_fallback_list(limit=500)
+            if not fallback_rows:
+                messagebox.showinfo('FC2 재스크래핑',
+                    'fc2-fallback 항목이 없습니다.\n'
+                    '(이미 모두 fc2db.net에서 정상 스크래핑된 상태)', parent=win)
+                return
+            n_total = len(fallback_rows)
+            if not messagebox.askyesno('FC2 재스크래핑',
+                    f'{n_total}개 FC2-PPV 항목을 fc2db.net에서 재스크래핑합니다.\n'
+                    '기존 alias/태그는 유지되고 jav_raw만 업데이트됩니다.\n계속하시겠습니까?',
+                    parent=win):
+                return
+
+            prog_win = tk.Toplevel(win)
+            prog_win.title('FC2 재스크래핑 중...')
+            prog_win.configure(bg='#0d0d14')
+            prog_win.geometry('460x150')
+            prog_win.grab_set()
+            tk.Label(prog_win, text='fc2db.net에서 메타데이터를 가져오는 중...',
+                     bg='#0d0d14', fg='#dcdcf0', font=('Consolas', 9)).pack(pady=(16, 4))
+            pb2 = ttk.Progressbar(prog_win, length=420, mode='determinate',
+                                  maximum=max(n_total, 1))
+            pb2.pack(padx=20, pady=4)
+            lbl_f = tk.Label(prog_win, text='', bg='#0d0d14', fg='#7c6ff7',
+                             font=('Consolas', 8))
+            lbl_f.pack()
+            lbl_fc2_result = tk.Label(prog_win, text='', bg='#0d0d14', fg='#aaa',
+                                      font=('Consolas', 8))
+            lbl_fc2_result.pack()
+
+            def _fc2_worker():
+                import re as _re
+                ok_count = 0
+                fail_count = 0
+                for idx, row in enumerate(fallback_rows):
+                    path = row['path']
+                    name = row.get('name', '')
+                    # 파일명에서 FC2-PPV 코드 추출
+                    m = _re.search(r'FC2-PPV-(\d+)', name.upper())
+                    if not m:
+                        m = _re.search(r'FC2[-_]?PPV[-_]?(\d{4,8})', name.upper())
+                    code = f'FC2-PPV-{m.group(1)}' if m else None
+
+                    def _upd(i=idx, nm=name):
+                        pb2['value'] = i + 1
+                        lbl_f.config(text=f'{i+1}/{n_total}  {nm[:45]}')
+                    prog_win.after(0, _upd)
+
+                    if not code:
+                        fail_count += 1
+                        continue
+
+                    try:
+                        meta, _ = jav_scraper._fetch_fc2db(code)
+                        if meta and meta.get('title') and meta.get('source') == 'fc2db':
+                            self.db.update_jav_raw(path, json.dumps(meta, ensure_ascii=False))
+                            ok_count += 1
+                            def _ok_upd(ok=ok_count, fail=fail_count):
+                                lbl_fc2_result.config(
+                                    text=f'성공: {ok}개  실패: {fail}개', fg='#4dffb4')
+                            prog_win.after(0, _ok_upd)
+                        else:
+                            fail_count += 1
+                    except Exception:
+                        fail_count += 1
+
+                def _finish(ok=ok_count, fail=fail_count):
+                    try: prog_win.destroy()
+                    except Exception: pass
+                    _load()  # 목록 새로고침
+                    messagebox.showinfo('FC2 재스크래핑 완료',
+                        f'재스크래핑 결과\n\n'
+                        f'✅ 성공: {ok}개\n'
+                        f'❌ 실패: {fail}개 (fc2db에 없거나 접속 실패)',
+                        parent=win)
+                prog_win.after(0, _finish)
+
+            threading.Thread(target=_fc2_worker, daemon=True).start()
 
         # 초기 로드
         _load()

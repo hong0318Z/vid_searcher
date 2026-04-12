@@ -1135,6 +1135,11 @@ class VidSort(tk.Tk):
         self._llm_prompt   = cfg.get('llm_prompt', '')  # 비어 있으면 llm_api 기본값 사용
         self._llm_stop     = threading.Event()
 
+        # ── FC2PPVDB 계정 ──────────────────────────
+        self._fc2ppvdb_email    = cfg.get('fc2ppvdb_email', '')
+        self._fc2ppvdb_password = cfg.get('fc2ppvdb_password', '')
+        self._apply_fc2ppvdb_creds()
+
         # 포맷 체크박스 변수 (설정에서 복원)
         self._fmt_vars = {}
         saved_fmts = cfg.get('formats', {})
@@ -3691,12 +3696,22 @@ class VidSort(tk.Tk):
                    style='Acc.TButton',command=apply).pack(pady=10)
 
     # ── LLM / AI 태그 ───────────────────────────
+    def _apply_fc2ppvdb_creds(self):
+        try:
+            import jav_scraper
+            jav_scraper.set_fc2ppvdb_credentials(
+                self._fc2ppvdb_email, self._fc2ppvdb_password)
+        except ImportError:
+            pass
+
     def _save_llm_cfg(self):
         cfg = load_cfg()
-        cfg['llm_token']    = self._llm_token
-        cfg['llm_model']    = self._llm_model
-        cfg['llm_endpoint'] = self._llm_endpoint
-        cfg['llm_prompt']   = self._llm_prompt
+        cfg['llm_token']         = self._llm_token
+        cfg['llm_model']         = self._llm_model
+        cfg['llm_endpoint']      = self._llm_endpoint
+        cfg['llm_prompt']        = self._llm_prompt
+        cfg['fc2ppvdb_email']    = self._fc2ppvdb_email
+        cfg['fc2ppvdb_password'] = self._fc2ppvdb_password
         save_cfg(cfg)
 
     def _get_llm_client(self):
@@ -3750,7 +3765,18 @@ class VidSort(tk.Tk):
         tk.Label(win, text='엔드포인트: https://api.githubcopilot.com',
                  bg='#0d0d14', fg='#3a3a5c', font=('Consolas', 7)).pack()
 
-        ttk.Separator(win).pack(fill='x', padx=16, pady=10)
+        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
+
+        # ── FC2PPVDB 계정 ──────────────────────────
+        tk.Label(win, text='FC2PPVDB 계정 (FC2-PPV 스크래핑용)',
+                 bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w', padx=22)
+        v_fc2_email = _row('이메일:',     self._fc2ppvdb_email,    '')
+        v_fc2_pw    = _row('비밀번호:',   self._fc2ppvdb_password, '', show='*')
+        tk.Label(win, text='fc2ppvdb.com 계정 — 없으면 FC2 스크래핑 불가',
+                 bg='#0d0d14', fg='#3a3a5c', font=('Consolas', 7)).pack()
+
+        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
 
         # ── 태그 분류 프롬프트 편집 ───────────────
         ph = tk.Frame(win, bg='#0d0d14'); ph.pack(fill='x', padx=20)
@@ -3779,11 +3805,13 @@ class VidSort(tk.Tk):
             self._llm_endpoint = (v_endpoint.get().strip()
                                   or 'https://api.githubcopilot.com')
             entered = prompt_txt.get('1.0', 'end').strip()
-            # 기본값과 동일하면 빈 문자열 저장 (항상 최신 기본값 따라가게)
             self._llm_prompt = '' if entered == DEFAULT_SYSTEM_PROMPT else entered
+            self._fc2ppvdb_email    = v_fc2_email.get().strip()
+            self._fc2ppvdb_password = v_fc2_pw.get().strip()
             self._save_llm_cfg()
+            self._apply_fc2ppvdb_creds()
             win.destroy()
-            messagebox.showinfo('저장', 'AI 설정이 저장되었습니다.')
+            messagebox.showinfo('저장', 'AI / FC2PPVDB 설정이 저장되었습니다.')
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=10)
         ttk.Button(bf, text='💾 저장', style='Acc.TButton',

@@ -237,6 +237,34 @@ for js_url in js_urls[:2]:
             print(f'    {p}')
     print()
 
+
+# ═══════════════════════════════════════════════
+# STEP 5: article-info API 실제 호출
+# ═══════════════════════════════════════════════
+print('='*55)
+print('STEP 5: article-info API 실제 호출')
+print('='*55)
+
+for test_id in TEST_IDS:
+    url = f'{BASE}/articles/article-info?videoid={test_id}'
+    status, body = sess.get(url, headers={
+        'Accept': 'application/json, text/plain, */*',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': f'{BASE}/articles/{test_id}',
+    })
+    print(f'\n[{test_id}] status={status}  len={len(body)}')
+    if body.strip().startswith('{') or body.strip().startswith('['):
+        try:
+            d = json.loads(body)
+            print('  ★ JSON 전체 응답:')
+            print(json.dumps(d, ensure_ascii=False, indent=2)[:3000])
+        except Exception as e:
+            print(f'  JSON 파싱 실패: {e}')
+            print(f'  원본: {body[:500]}')
+    else:
+        print(f'  HTML/텍스트 응답 (JSON 아님): {body[:300]}')
+
+print()
 print('='*55)
 print('테스트 완료 — 위 결과로 API 엔드포인트 판단')
 print('='*55)

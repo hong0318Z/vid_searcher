@@ -1492,9 +1492,9 @@ class VidSort(tk.Tk):
 
         ai_bot = tk.Frame(ai_body, bg='#0a0a12')
         ai_bot.pack(fill='x', padx=6, pady=(1, 6))
-        ttk.Button(ai_bot, text='🎬 JAV 처리',
+        ttk.Button(ai_bot, text='🌐 웹 자동태그',
                    command=self._jav_process_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
-        ttk.Button(ai_bot, text='📋 JAV DB',
+        ttk.Button(ai_bot, text='📋 웹태그 DB',
                    command=self._jav_db_dlg).pack(side='left', fill='x', expand=True)
 
     # ── SIDEBAR 이벤트 ──────────────────────────
@@ -2716,7 +2716,9 @@ class VidSort(tk.Tk):
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))
         m.add_command(label='📋  복사',             command=lambda:self._clipop('copy',paths))
         m.add_separator()
-        m.add_command(label='🚫  JAV 처리 제외',
+        m.add_command(label='🔄  태그 초기화',
+                      command=lambda: self._reset_tags_dlg(paths))
+        m.add_command(label='🚫  웹 자동태그 제외',
                       command=lambda: self._jav_exclude(paths))
         m.add_command(label='🗑  DB에서 제거',      command=lambda:self._rm_db(paths))
         m.tk_popup(e.x_root,e.y_root)
@@ -4347,11 +4349,24 @@ class VidSort(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _reset_tags_dlg(self, paths):
+        """선택 파일의 태그/별칭/설명/JAV 데이터 초기화 → 웹 자동태그 목록에 다시 나타남"""
+        if not paths:
+            return
+        if not messagebox.askyesno('태그 초기화',
+                f'{len(paths)}개 파일의 태그, 별칭, 설명, JAV 데이터를 모두 초기화합니다.\n'
+                '초기화 후 웹 자동태그 목록에 다시 나타납니다.\n계속하시겠습니까?'):
+            return
+        for p in paths:
+            self.db.reset_jav(p)
+        self._reload_sidebar()
+        self._reload()
+
     def _jav_exclude(self, paths):
         """선택 파일을 JAV 처리 대상에서 제외 (jav_done=1)"""
         for p in paths:
             self.db.set_jav_done(p)
-        messagebox.showinfo('JAV 제외', f'{len(paths)}개 파일을 JAV 처리 대상에서 제외했습니다.')
+        messagebox.showinfo('웹 자동태그 제외', f'{len(paths)}개 파일을 웹 자동태그 대상에서 제외했습니다.')
 
     # ── JAV 처리 ────────────────────────────────
     # 장르 정적 번역 테이블 (LLM 불필요)
@@ -4404,7 +4419,7 @@ class VidSort(tk.Tk):
             return
 
         win = tk.Toplevel(self)
-        win.title('🎬 JAV 메타데이터 처리')
+        win.title('🌐 웹 자동태그')
         win.configure(bg='#0d0d14')
         win.geometry('580x680')
         win.resizable(True, True)
@@ -4481,7 +4496,7 @@ class VidSort(tk.Tk):
             if not sel: return
             m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
                         activebackground='#7c6ff7', activeforeground='#fff')
-            m.add_command(label=f'🚫  JAV 처리 제외 ({len(sel)}개)', command=lambda: _exclude_s_sel())
+            m.add_command(label=f'🚫  웹 자동태그 제외 ({len(sel)}개)', command=lambda: _exclude_s_sel())
             m.tk_popup(e.x_root, e.y_root)
 
         def _exclude_s_sel():

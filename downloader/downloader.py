@@ -98,6 +98,7 @@ class DownloadItem:
     quality:      str          # 표시용 ('최고화질' / '1080p' / '오디오만' 등)
     format_str:   str = ''     # yt-dlp format string (예: 'bestvideo+bestaudio/best')
     custom_title: str = ''     # 사용자 지정 파일명 (빈 문자열이면 사이트 제목 사용)
+    referer:      str = ''     # Referer 헤더 (CDN 403 우회용)
     status:       str = 'pending'   # pending / downloading / merging / done / error / cancelled
     title:        str = ''
     filename:     str = ''
@@ -189,6 +190,11 @@ class Downloader:
             on_warning=lambda m: self.on_log(f'⚠ {m}', YELLOW),
             on_error  =lambda m: self.on_log(f'✕ {m}', RED),
         )
+        # Referer 헤더 — CDN 403 우회
+        http_headers = {}
+        if item.referer:
+            http_headers['Referer'] = item.referer
+
         ydl_opts = {
             'format':            fmt,
             'outtmpl':           outtmpl,
@@ -196,7 +202,7 @@ class Downloader:
             'postprocessor_hooks': [self._postproc_hook],
             'logger':            logger,
             'quiet':             True,
-            'no_warnings':       False,   # 경고는 logger 로 전달
+            'no_warnings':       False,
             'noprogress':        True,
             'ignoreerrors':      False,
             'nocheckcertificate': True,
@@ -205,6 +211,7 @@ class Downloader:
             'concurrent_fragment_downloads': 4,
             'merge_output_format': 'mp4',
             'hls_use_mpegts':    False,
+            **({'http_headers': http_headers} if http_headers else {}),
             **_impersonate_opts(),
         }
 
@@ -559,7 +566,7 @@ class DownloaderApp(tk.Tk):
 
         # URL 입력
         url_row = ttk.Frame(top)
-        url_row.pack(fill='x', pady=(0, 6))
+        url_row.pack(fill='x', pady=(0, 4))
 
         ttk.Label(url_row, text='URL', width=8, anchor='w').pack(side='left')
         self._url_var = tk.StringVar()
@@ -567,9 +574,24 @@ class DownloaderApp(tk.Tk):
         url_entry.pack(side='left', fill='x', expand=True, padx=(4, 4))
         url_entry.bind('<Return>', lambda e: self._analyze_url())
 
-        paste_btn = ttk.Button(url_row, text='붙여넣기',
-                               command=self._paste_url)
-        paste_btn.pack(side='left', padx=(0, 4))
+        ttk.Button(url_row, text='붙여넣기',
+                   command=self._paste_url).pack(side='left', padx=(0, 4))
+
+        # Referer (CDN 403 우회용)
+        ref_row = ttk.Frame(top)
+        ref_row.pack(fill='x', pady=(0, 6))
+
+        ttk.Label(ref_row, text='Referer', width=8, anchor='w',
+                  foreground=FG2).pack(side='left')
+        self._referer_var = tk.StringVar()
+        ref_entry = ttk.Entry(ref_row, textvariable=self._referer_var,
+                              foreground=FG2)
+        ref_entry.pack(side='left', fill='x', expand=True, padx=(4, 4))
+        ref_entry.bind('<Return>', lambda e: self._analyze_url())
+
+        ttk.Label(ref_row,
+                  text='m3u8 직접 입력 시 원본 페이지 URL (403 오류 시)',
+                  foreground=FG2, font=('Segoe UI', 7)).pack(side='left')
 
         # 저장 경로
         dir_row = ttk.Frame(top)
@@ -715,10 +737,12 @@ class DownloaderApp(tk.Tk):
             messagebox.showwarning('경고', '저장 위치를 선택하세요.')
             return
 
+        referer = self._referer_var.get().strip()
+
         self._analyzing = True
         self._analyze_btn.configure(state='disabled')
         self._analyze_lbl.configure(text='분석 중...')
-        self._log_msg(f'분석: {url}')
+        self._log_msg(f'분석: {url}' + (f'  [Referer: {referer}]' if referer else ''))
 
         def _worker():
             # thread-safe 로그 헬퍼 (after로 메인 스레드에 전달)
@@ -730,23 +754,27 @@ class DownloaderApp(tk.Tk):
                 on_error  =lambda m: _tlog(f'✕ {m}', RED),
             )
             try:
+                http_headers = {}
+                if referer:
+                    http_headers['Referer'] = referer
                 opts = {
                     'quiet': True,
-                    'no_warnings': False,   # 경고는 logger 로 전달
+                    'no_warnings': False,
                     'nocheckcertificate': True,
                     'logger': logger,
+                    **({'http_headers': http_headers} if http_headers else {}),
                     **_impersonate_opts(),
                 }
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                self.after(0, lambda: self._on_analyze_done(url, info, save_dir))
+                self.after(0, lambda: self._on_analyze_done(url, info, save_dir, referer))
             except Exception as e:
                 err = str(e)
                 self.after(0, lambda: self._on_analyze_error(err))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_analyze_done(self, url: str, info: dict, save_dir: str):
+    def _on_analyze_done(self, url: str, info: dict, save_dir: str, referer: str = ''):
         self._analyzing = False
         self._analyze_btn.configure(state='normal')
         self._analyze_lbl.configure(text='')
@@ -757,7 +785,7 @@ class DownloaderApp(tk.Tk):
         FormatPickerDialog(
             self, url, info,
             on_confirm=lambda fmt, custom, label:
-                self._enqueue(url, save_dir, fmt, custom, label)
+                self._enqueue(url, save_dir, fmt, custom, label, referer)
         )
 
     def _on_analyze_error(self, err: str):
@@ -767,7 +795,8 @@ class DownloaderApp(tk.Tk):
         self._log_msg(f'분석 오류: {err}', RED)
 
     def _enqueue(self, url: str, save_dir: str,
-                 fmt_str: str, custom_title: str, quality_label: str):
+                 fmt_str: str, custom_title: str, quality_label: str,
+                 referer: str = ''):
         """FormatPickerDialog 확인 후 대기열에 항목 추가"""
         os.makedirs(save_dir, exist_ok=True)
         uid  = str(uuid.uuid4())[:8]
@@ -777,6 +806,7 @@ class DownloaderApp(tk.Tk):
             format_str=fmt_str,
             custom_title=custom_title,
             title=custom_title or url,
+            referer=referer,
         )
         self._items[uid] = item
         display = custom_title or _shorten_url(url)

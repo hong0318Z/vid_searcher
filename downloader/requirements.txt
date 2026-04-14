@@ -1,15 +1,14 @@
 # 스트리밍 다운로더 의존성
+
+# 필수
 yt-dlp>=2024.1.0
 
-# yt-dlp가 내부적으로 ffmpeg을 사용합니다.
-# ffmpeg 설치 (Windows): https://ffmpeg.org/download.html
-#   또는 winget install ffmpeg
-# ffmpeg 설치 (Mac): brew install ffmpeg
-# ffmpeg 설치 (Linux): sudo apt install ffmpeg
-#
-# ffmpeg 없어도 단일 스트림 다운로드는 가능하지만
-# 영상+음성 병합(bestvideo+bestaudio)은 ffmpeg 필요.
+# 권장 — Cloudflare 차단 사이트(FC2, 성인 사이트 등) 403 오류 해결
+# 설치 시 자동으로 impersonation이 활성화되어 별도 설정 불필요
+curl_cffi>=0.7.0
 
-# Cloudflare 차단 우회가 필요한 사이트(예: FC2)는
-# curl_cffi 도 설치 권장:
-# pip install curl_cffi
+# ffmpeg (시스템 패키지, pip 아님)
+# 영상+오디오 자동 병합에 필요. 없으면 단일 스트림만 다운로드 가능.
+# Windows : winget install ffmpeg
+# Mac     : brew install ffmpeg
+# Linux   : sudo apt install ffmpeg

@@ -61,18 +61,20 @@ def save_cfg(cfg: dict):
 # ──────────────────────────────────────────────
 @dataclass
 class DownloadItem:
-    uid:      str
-    url:      str
-    save_dir: str
-    quality:  str          # 'best' / '1080' / '720' / '480' / 'audio'
-    status:   str = 'pending'   # pending / downloading / done / error / cancelled
-    title:    str = ''
-    filename: str = ''
-    progress: float = 0.0  # 0~100
-    speed:    str = ''
-    eta:      str = ''
-    size:     str = ''
-    error:    str = ''
+    uid:          str
+    url:          str
+    save_dir:     str
+    quality:      str          # 표시용 ('최고화질' / '1080p' / '오디오만' 등)
+    format_str:   str = ''     # yt-dlp format string (예: 'bestvideo+bestaudio/best')
+    custom_title: str = ''     # 사용자 지정 파일명 (빈 문자열이면 사이트 제목 사용)
+    status:       str = 'pending'   # pending / downloading / merging / done / error / cancelled
+    title:        str = ''
+    filename:     str = ''
+    progress:     float = 0.0  # 0~100
+    speed:        str = ''
+    eta:          str = ''
+    size:         str = ''
+    error:        str = ''
 
 
 # ──────────────────────────────────────────────
@@ -141,12 +143,18 @@ class Downloader:
         item.status = 'downloading'
         self.on_progress(item)
 
-        # 포맷 선택
-        fmt = _quality_to_format(item.quality)
+        # format_str 이 있으면 우선 사용, 없으면 best fallback
+        fmt = item.format_str if item.format_str else 'bestvideo+bestaudio/best'
+
+        # 파일명: 사용자가 지정한 제목이 있으면 그것을, 없으면 사이트 제목 사용
+        if item.custom_title:
+            outtmpl = os.path.join(item.save_dir, item.custom_title + '.%(ext)s')
+        else:
+            outtmpl = os.path.join(item.save_dir, '%(title)s.%(ext)s')
 
         ydl_opts = {
             'format':            fmt,
-            'outtmpl':           os.path.join(item.save_dir, '%(title)s.%(ext)s'),
+            'outtmpl':           outtmpl,
             'progress_hooks':    [self._hook],
             'postprocessor_hooks': [self._postproc_hook],
             'quiet':             True,
@@ -221,15 +229,210 @@ def _fmt_size(b: int) -> str:
     return f'{b} B'
 
 
-def _quality_to_format(quality: str) -> str:
-    mapping = {
-        'best':  'bestvideo+bestaudio/best',
-        '1080':  'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
-        '720':   'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-        '480':   'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
-        'audio': 'bestaudio/best',
-    }
-    return mapping.get(quality, 'bestvideo+bestaudio/best')
+
+# ──────────────────────────────────────────────
+# 포맷 선택 다이얼로그
+# ──────────────────────────────────────────────
+class FormatPickerDialog(tk.Toplevel):
+    """URL 분석 결과 표시 — 포맷·파일명 선택 후 대기열에 추가"""
+
+    def __init__(self, parent, url: str, info: dict, on_confirm):
+        """
+        on_confirm(fmt_str, custom_title, quality_label) 콜백을 호출한 뒤 닫힘.
+        """
+        super().__init__(parent)
+        self._url = url
+        self._info = info
+        self._on_confirm = on_confirm
+        self._fmt_map: dict[str, str] = {}   # tree iid -> yt-dlp format string
+
+        self.title('스트림 선택')
+        self.configure(bg=BG)
+        self.resizable(True, True)
+        self.geometry('700x480')
+        self.transient(parent)
+        self.grab_set()
+
+        self._build()
+        self.bind('<Return>', lambda e: self._confirm())
+
+    # ── UI 구성 ─────────────────────────────────
+    def _build(self):
+        info      = self._info
+        site_title = info.get('title', self._url)
+        duration   = info.get('duration')
+        uploader   = (info.get('uploader') or info.get('channel')
+                      or info.get('extractor_key', ''))
+
+        # 파일명 편집 행
+        hdr = ttk.Frame(self, padding=(14, 12, 14, 6))
+        hdr.pack(fill='x')
+
+        ttk.Label(hdr, text='파일명  (수정 가능)',
+                  foreground=FG2, font=('Segoe UI', 8)).pack(anchor='w')
+        self._title_var = tk.StringVar(value=_sanitize_filename(site_title))
+        title_e = ttk.Entry(hdr, textvariable=self._title_var,
+                            font=('Segoe UI', 10))
+        title_e.pack(fill='x', pady=(2, 8))
+        title_e.select_range(0, 'end')
+        title_e.focus_set()
+
+        # 메타 정보 (재생시간 / 채널)
+        meta = ttk.Frame(hdr)
+        meta.pack(fill='x', pady=(0, 4))
+        if duration:
+            ttk.Label(meta,
+                      text=f'재생시간: {_fmt_duration(int(duration))}',
+                      foreground=FG2, font=('Segoe UI', 8)
+                      ).pack(side='left', padx=(0, 16))
+        if uploader:
+            ttk.Label(meta, text=f'채널/업로더: {uploader}',
+                      foreground=FG2, font=('Segoe UI', 8)
+                      ).pack(side='left')
+
+        ttk.Separator(self).pack(fill='x')
+
+        # 포맷 목록
+        body = ttk.Frame(self, padding=(14, 8, 14, 6))
+        body.pack(fill='both', expand=True)
+
+        ttk.Label(body, text='포맷 선택  (더블클릭 또는 Enter 로 추가)',
+                  foreground=FG2, font=('Segoe UI', 8)).pack(anchor='w', pady=(0, 4))
+
+        cols = ('resolution', 'ext', 'size', 'codec', 'duration', 'note')
+        self._tree = ttk.Treeview(body, columns=cols, show='headings',
+                                   selectmode='browse', style='Picker.Treeview')
+
+        for cid, head, w, anc in [
+            ('resolution', '해상도',   110, 'center'),
+            ('ext',        '확장자',    55, 'center'),
+            ('size',       '크기',      90, 'center'),
+            ('codec',      '코덱',      90, 'center'),
+            ('duration',   '재생시간',  90, 'center'),
+            ('note',       '비고',     175, 'w'),
+        ]:
+            self._tree.heading(cid, text=head)
+            self._tree.column(cid, width=w, anchor=anc, stretch=(cid == 'note'))
+
+        vsb = ttk.Scrollbar(body, orient='vertical', command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.pack(side='left', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
+
+        self._tree.bind('<Double-1>', lambda e: self._confirm())
+
+        self._fill_formats(info)
+
+        # 버튼 행
+        ttk.Separator(self).pack(fill='x')
+        btn = ttk.Frame(self, padding=(14, 8))
+        btn.pack(fill='x')
+        ttk.Button(btn, text='취소',
+                   command=self.destroy).pack(side='right', padx=(6, 0))
+        ttk.Button(btn, text='대기열에 추가', style='Accent.TButton',
+                   command=self._confirm).pack(side='right')
+
+    # ── 포맷 목록 채우기 ─────────────────────────
+    def _fill_formats(self, info: dict):
+        formats  = info.get('formats', [])
+        duration = info.get('duration')
+        dur_str  = _fmt_duration(int(duration)) if duration else '-'
+
+        # 자동 최고화질 (항상 첫 줄)
+        self._tree.insert('', 'end', iid='auto_best',
+                          values=('자동 최고화질', 'mp4', '-', '-',
+                                  dur_str, '최적 비디오+오디오 자동 병합'))
+        self._fmt_map['auto_best'] = 'bestvideo+bestaudio/best'
+
+        # 복합 포맷 (비디오+오디오 동시 포함)
+        seen_h: set[int] = set()
+        combined = []
+        for f in reversed(formats):
+            h = f.get('height')
+            if (f.get('vcodec', 'none') != 'none'
+                    and f.get('acodec', 'none') != 'none'
+                    and h and h not in seen_h):
+                seen_h.add(h)
+                combined.append(f)
+        combined.sort(key=lambda f: f.get('height', 0), reverse=True)
+
+        for f in combined:
+            iid = f'c_{f["format_id"]}'
+            self._insert_fmt_row(iid, f, dur_str)
+            self._fmt_map[iid] = f['format_id']
+
+        # DASH/HLS 분리 스트림 → 높이별 자동 병합 옵션
+        seen_h2: set[int] = set()
+        video_only = []
+        for f in reversed(formats):
+            h = f.get('height')
+            if (f.get('vcodec', 'none') != 'none'
+                    and f.get('acodec', 'none') == 'none'
+                    and h and h not in seen_h and h not in seen_h2):
+                seen_h2.add(h)
+                video_only.append(f)
+        video_only.sort(key=lambda f: f.get('height', 0), reverse=True)
+
+        for f in video_only:
+            h   = f.get('height', 0)
+            iid = f'd_{h}'
+            self._insert_fmt_row(iid, f, dur_str, note_extra='(자동 병합)')
+            self._fmt_map[iid] = (
+                f'bestvideo[height<={h}]+bestaudio/best[height<={h}]/best'
+            )
+
+        # 오디오 전용 (최고 품질 1개만)
+        audio_fmts = [f for f in formats
+                      if f.get('vcodec', 'none') == 'none'
+                      and f.get('acodec', 'none') != 'none']
+        if audio_fmts:
+            best_a  = max(audio_fmts, key=lambda f: f.get('abr') or 0)
+            abr     = best_a.get('abr', 0)
+            acodec  = (best_a.get('acodec') or '').split('.')[0]
+            size    = best_a.get('filesize') or best_a.get('filesize_approx')
+            note    = f'{abr:.0f} kbps' if abr else ''
+            self._tree.insert('', 'end', iid='audio_only',
+                              values=('오디오만',
+                                      best_a.get('ext', 'm4a'),
+                                      _fmt_size(size) if size else '알 수 없음',
+                                      acodec or '-',
+                                      dur_str, note))
+            self._fmt_map['audio_only'] = 'bestaudio/best'
+
+        # 첫 번째 항목 선택
+        children = self._tree.get_children()
+        if children:
+            self._tree.selection_set(children[0])
+            self._tree.focus(children[0])
+
+    def _insert_fmt_row(self, iid: str, f: dict,
+                        dur_str: str, note_extra: str = ''):
+        h      = f.get('height', 0)
+        w      = f.get('width', 0)
+        res    = f'{w}x{h}' if w and h else (f'{h}p' if h else '?')
+        ext    = f.get('ext', '?')
+        size   = f.get('filesize') or f.get('filesize_approx')
+        vcodec = (f.get('vcodec') or '').split('.')[0] or '?'
+        note   = (f.get('format_note') or '')
+        if note_extra:
+            note = f'{note} {note_extra}'.strip()
+        self._tree.insert('', 'end', iid=iid,
+                          values=(res, ext,
+                                  _fmt_size(size) if size else '알 수 없음',
+                                  vcodec, dur_str, note))
+
+    # ── 확인 ────────────────────────────────────
+    def _confirm(self):
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showwarning('선택 없음', '포맷을 선택하세요.', parent=self)
+            return
+        iid       = sel[0]
+        fmt_str   = self._fmt_map.get(iid, 'bestvideo+bestaudio/best')
+        label     = self._tree.set(iid, 'resolution')   # 표시용 품질 레이블
+        custom    = self._title_var.get().strip()
+        self._on_confirm(fmt_str, custom, label)
+        self.destroy()
 
 
 # ──────────────────────────────────────────────
@@ -248,6 +451,7 @@ class DownloaderApp(tk.Tk):
         self._items: dict[str, DownloadItem] = {}   # uid -> item
         self._workers: dict[str, Downloader] = {}   # uid -> Downloader
         self._ui_queue: queue.Queue = queue.Queue()
+        self._analyzing = False
 
         self._style()
         self._build_ui()
@@ -299,6 +503,16 @@ class DownloaderApp(tk.Tk):
               background=[('selected', ACCENT)],
               foreground=[('selected', 'white')])
 
+        # 포맷 선택 다이얼로그 전용 (행 높이 작게)
+        s.configure('Picker.Treeview', background=BG2, foreground=FG,
+                    fieldbackground=BG2, bordercolor=BORDER,
+                    rowheight=28)
+        s.configure('Picker.Treeview.Heading', background=BG3, foreground=FG2,
+                    bordercolor=BORDER)
+        s.map('Picker.Treeview',
+              background=[('selected', ACCENT)],
+              foreground=[('selected', 'white')])
+
     # ── UI 빌드 ─────────────────────────────────
     def _build_ui(self):
         # ── 상단 입력 패널 ──
@@ -313,7 +527,7 @@ class DownloaderApp(tk.Tk):
         self._url_var = tk.StringVar()
         url_entry = ttk.Entry(url_row, textvariable=self._url_var)
         url_entry.pack(side='left', fill='x', expand=True, padx=(4, 4))
-        url_entry.bind('<Return>', lambda e: self._add_to_queue())
+        url_entry.bind('<Return>', lambda e: self._analyze_url())
 
         paste_btn = ttk.Button(url_row, text='붙여넣기',
                                command=self._paste_url)
@@ -330,21 +544,18 @@ class DownloaderApp(tk.Tk):
         ttk.Button(dir_row, text='폴더 선택',
                    command=self._pick_dir).pack(side='left', padx=(0, 4))
 
-        # 품질 + 추가 버튼
+        # 스트림 분석 버튼 + 상태 레이블
         opt_row = ttk.Frame(top)
         opt_row.pack(fill='x')
 
-        ttk.Label(opt_row, text='품질', width=8, anchor='w').pack(side='left')
-        self._qual_var = tk.StringVar(value='best')
-        qual_cb = ttk.Combobox(opt_row, textvariable=self._qual_var, width=16,
-                               state='readonly',
-                               values=['best', '1080', '720', '480', 'audio only'])
-        qual_cb.pack(side='left', padx=(4, 12))
+        self._analyze_btn = ttk.Button(opt_row, text='🔍 스트림 분석',
+                                        style='Accent.TButton',
+                                        command=self._analyze_url)
+        self._analyze_btn.pack(side='left')
 
-        add_btn = ttk.Button(opt_row, text='+ 대기열 추가',
-                             style='Accent.TButton',
-                             command=self._add_to_queue)
-        add_btn.pack(side='left')
+        self._analyze_lbl = ttk.Label(opt_row, text='',
+                                       foreground=FG2, font=('Segoe UI', 8))
+        self._analyze_lbl.pack(side='left', padx=(10, 0))
 
         # yt-dlp 미설치 경고
         if not HAS_YTDLP:
@@ -443,6 +654,80 @@ class DownloaderApp(tk.Tk):
         self._ctx_menu.add_command(label='📂 폴더 열기', command=self._open_folder)
         self._tree.bind('<Button-3>', self._show_ctx)
 
+    # ── URL 분석 ────────────────────────────────
+    def _analyze_url(self):
+        url = self._url_var.get().strip()
+        if not url:
+            self._log_msg('URL을 입력하세요.', YELLOW)
+            return
+        if not HAS_YTDLP:
+            messagebox.showerror('오류', 'yt-dlp 를 먼저 설치하세요.\npip install yt-dlp')
+            return
+        if self._analyzing:
+            return
+
+        save_dir = self._dir_var.get().strip()
+        if not save_dir:
+            messagebox.showwarning('경고', '저장 위치를 선택하세요.')
+            return
+
+        self._analyzing = True
+        self._analyze_btn.configure(state='disabled')
+        self._analyze_lbl.configure(text='분석 중...')
+        self._log_msg(f'분석: {url}')
+
+        def _worker():
+            try:
+                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True,
+                                        'nocheckcertificate': True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                self.after(0, lambda: self._on_analyze_done(url, info, save_dir))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._on_analyze_error(err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_analyze_done(self, url: str, info: dict, save_dir: str):
+        self._analyzing = False
+        self._analyze_btn.configure(state='normal')
+        self._analyze_lbl.configure(text='')
+        if not info:
+            self._log_msg('영상 정보를 가져올 수 없습니다.', RED)
+            return
+        self._log_msg(f'분석 완료: {info.get("title", url)}')
+        FormatPickerDialog(
+            self, url, info,
+            on_confirm=lambda fmt, custom, label:
+                self._enqueue(url, save_dir, fmt, custom, label)
+        )
+
+    def _on_analyze_error(self, err: str):
+        self._analyzing = False
+        self._analyze_btn.configure(state='normal')
+        self._analyze_lbl.configure(text='')
+        self._log_msg(f'분석 오류: {err}', RED)
+
+    def _enqueue(self, url: str, save_dir: str,
+                 fmt_str: str, custom_title: str, quality_label: str):
+        """FormatPickerDialog 확인 후 대기열에 항목 추가"""
+        os.makedirs(save_dir, exist_ok=True)
+        uid  = str(uuid.uuid4())[:8]
+        item = DownloadItem(
+            uid=uid, url=url, save_dir=save_dir,
+            quality=quality_label,
+            format_str=fmt_str,
+            custom_title=custom_title,
+            title=custom_title or url,
+        )
+        self._items[uid] = item
+        display = custom_title or _shorten_url(url)
+        self._tree.insert('', 'end', iid=uid,
+                          values=(display, quality_label, '0%', '', '', '', '대기'),
+                          tags=('pending',))
+        self._url_var.set('')
+        self._log_msg(f'추가: {display}')
+
     # ── 이벤트 핸들러 ────────────────────────────
     def _paste_url(self):
         try:
@@ -458,34 +743,6 @@ class DownloaderApp(tk.Tk):
             cfg['save_dir'] = d
             save_cfg(cfg)
 
-    def _add_to_queue(self):
-        url = self._url_var.get().strip()
-        if not url:
-            self._log_msg('URL을 입력하세요.', YELLOW)
-            return
-        if not HAS_YTDLP:
-            messagebox.showerror('오류', 'yt-dlp 를 먼저 설치하세요.\npip install yt-dlp')
-            return
-
-        save_dir = self._dir_var.get().strip()
-        if not save_dir:
-            messagebox.showwarning('경고', '저장 위치를 선택하세요.')
-            return
-        os.makedirs(save_dir, exist_ok=True)
-
-        qual_str = self._qual_var.get()
-        quality  = 'audio' if qual_str == 'audio only' else qual_str
-
-        uid  = str(uuid.uuid4())[:8]
-        item = DownloadItem(uid=uid, url=url, save_dir=save_dir,
-                            quality=qual_str, title=url)
-        self._items[uid] = item
-        self._tree.insert('', 'end', iid=uid,
-                          values=(url, qual_str, '0%', '', '', '', '대기'),
-                          tags=('pending',))
-        self._url_var.set('')
-        self._log_msg(f'추가: {url}')
-
     def _start_selected(self):
         sel = self._tree.selection()
         if not sel:
@@ -498,10 +755,6 @@ class DownloaderApp(tk.Tk):
     def _run_download(self, item: DownloadItem):
         if item.uid in self._workers:
             return  # 이미 실행 중
-
-        qual_str = item.quality
-        quality  = 'audio' if qual_str == 'audio only' else qual_str
-        item.quality = quality  # normalize
 
         worker = Downloader(
             item,
@@ -600,7 +853,9 @@ class DownloaderApp(tk.Tk):
         status_label, tag = status_map.get(item.status, (item.status, ''))
         progress_str = f'{item.progress:.0f}%' if item.progress else '0%'
 
-        display_title = item.title if item.title != item.url else _shorten_url(item.url)
+        display_title = (item.custom_title
+                         or (item.title if item.title != item.url
+                             else _shorten_url(item.url)))
 
         self._tree.item(item.uid,
                         values=(display_title, item.quality,
@@ -614,6 +869,23 @@ class DownloaderApp(tk.Tk):
         self._log.insert('end', f'[{t}] {msg}\n')
         self._log.see('end')
         self._log.configure(state='disabled')
+
+
+def _fmt_duration(sec: int) -> str:
+    """초 → H:MM:SS 또는 M:SS 문자열"""
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+    if h:
+        return f'{h}:{m:02d}:{s:02d}'
+    return f'{m}:{s:02d}'
+
+
+def _sanitize_filename(name: str) -> str:
+    """파일명에 사용 불가한 문자 제거 후 최대 200자"""
+    name = re.sub(r'[\\/:*?"<>|]', '_', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name[:200]
 
 
 def _shorten_url(url: str, maxlen: int = 80) -> str:

@@ -3,9 +3,10 @@
 # 필수
 yt-dlp>=2024.1.0
 
-# 권장 — Cloudflare 차단 사이트(FC2, 성인 사이트 등) 403 오류 해결
-# 설치 시 자동으로 impersonation이 활성화되어 별도 설정 불필요
-curl_cffi>=0.7.0
+# 선택 — Cloudflare 차단 사이트 impersonation 우회
+# ⚠ 버전 주의: yt-dlp 2026.03+ 기준 지원 범위가 불분명 (0.9.x, 0.15.x 모두 unsupported 표시됨)
+#   현재 권장: 브라우저 쿠키 방식(--browser chrome)이 더 안정적
+# curl_cffi>=0.5.10,<0.10
 
 # ffmpeg (시스템 패키지, pip 아님)
 # 영상+오디오 자동 병합에 필요. 없으면 단일 스트림만 다운로드 가능.

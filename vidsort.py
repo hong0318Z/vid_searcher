@@ -1317,6 +1317,7 @@ class VidSort(tk.Tk):
         self.lbl_clip=tk.Label(tb,text='',bg='#111120',fg='#ffd166',font=('Consolas',9))
         self.lbl_clip.pack(side='right',padx=8)
         ttk.Button(tb,text='📂 붙여넣기',command=self._paste).pack(side='right',padx=4)
+        ttk.Button(tb,text='📥 다운로더',command=self._open_downloader).pack(side='right',padx=4)
         ttk.Separator(tb,orient='vertical').pack(side='right',fill='y',padx=6,pady=4)
 
         # 짧은 영상 제외 필터
@@ -3531,6 +3532,15 @@ class VidSort(tk.Tk):
         icon='✂' if mode=='cut' else '📋'
         self.lbl_clip.config(
             text=f"{icon} {len(paths)}개 {'잘라내기' if mode=='cut' else '복사'} 대기")
+
+    def _open_downloader(self):
+        """downloader/downloader.py 를 별도 프로세스로 실행."""
+        script = Path(__file__).parent / 'downloader' / 'downloader.py'
+        if not script.exists():
+            messagebox.showerror('오류', f'다운로더를 찾을 수 없습니다.\n{script}')
+            return
+        subprocess.Popen([sys.executable, str(script)],
+                         cwd=str(script.parent))
 
     def _paste(self):
         if not self._clipboard:

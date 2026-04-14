@@ -5,10 +5,16 @@ URL 다운로드 가능 여부 진단 스크립트
 사용법:
   python test_url.py <URL>
   python test_url.py <URL> <Referer>
+  python test_url.py <URL> "" --browser chrome
 
 예시:
   python test_url.py https://kr2.ddalsney.com/video/category/general/450733
+  python test_url.py https://kr2.ddalsney.com/video/... "" --browser chrome
   python test_url.py https://n129.b-cdn.net/.VIDEO/KR_OS152/playlist.m3u8 https://원본사이트.com/
+
+브라우저 쿠키 옵션 (--browser):
+  chrome, firefox, edge, brave
+  → Cloudflare 로그인 필요 사이트에서 세션 쿠키 사용
 """
 import sys
 import json
@@ -36,17 +42,33 @@ except ImportError:
     HAS_CURL_CFFI = False
 
 # ── 인자 파싱 ──────────────────────────────────
-if len(sys.argv) >= 2:
-    url = sys.argv[1]
-else:
-    url = input("\nURL 입력: ").strip()
+args = sys.argv[1:]
 
-referer = sys.argv[2] if len(sys.argv) >= 3 else ""
+if not args:
+    url = input("\nURL 입력: ").strip()
+else:
+    url = args[0]
+
+referer = ""
+browser = ""
+
+i = 1
+while i < len(args):
+    if args[i] == '--browser' and i + 1 < len(args):
+        browser = args[i + 1]
+        i += 2
+    elif not referer and not args[i].startswith('--'):
+        referer = args[i]
+        i += 1
+    else:
+        i += 1
 
 print(f"\n{'='*60}")
 print(f"URL     : {url}")
 if referer:
     print(f"Referer : {referer}")
+if browser:
+    print(f"브라우저 쿠키: {browser}")
 print(f"{'='*60}\n")
 
 # ── yt-dlp 옵션 ────────────────────────────────
@@ -62,6 +84,10 @@ if HAS_CURL_CFFI:
 
 if referer:
     opts['http_headers'] = {'Referer': referer}
+
+if browser:
+    opts['cookiesfrombrowser'] = (browser, None, None, None)
+    print(f"[INFO] 브라우저 쿠키 사용: {browser}")
 
 # ── 분석 실행 ──────────────────────────────────
 print("[분석 중...]\n")

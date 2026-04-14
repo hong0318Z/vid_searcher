@@ -105,6 +105,7 @@ class DownloadItem:
     format_str:   str = ''     # yt-dlp format string (예: 'bestvideo+bestaudio/best')
     custom_title: str = ''     # 사용자 지정 파일명 (빈 문자열이면 사이트 제목 사용)
     referer:      str = ''     # Referer 헤더 (CDN 403 우회용)
+    cookie_browser: str = ''  # 브라우저 쿠키 소스 ('chrome'/'firefox'/'edge' 등)
     status:       str = 'pending'   # pending / downloading / merging / done / error / cancelled
     title:        str = ''
     filename:     str = ''
@@ -218,6 +219,8 @@ class Downloader:
             'merge_output_format': 'mp4',
             'hls_use_mpegts':    False,
             **({'http_headers': http_headers} if http_headers else {}),
+            **({'cookiesfrombrowser': (item.cookie_browser, None, None, None)}
+               if item.cookie_browser else {}),
             **_impersonate_opts(),
         }
 
@@ -585,7 +588,7 @@ class DownloaderApp(tk.Tk):
 
         # Referer (CDN 403 우회용)
         ref_row = ttk.Frame(top)
-        ref_row.pack(fill='x', pady=(0, 6))
+        ref_row.pack(fill='x', pady=(0, 4))
 
         ttk.Label(ref_row, text='Referer', width=8, anchor='w',
                   foreground=FG2).pack(side='left')
@@ -597,6 +600,21 @@ class DownloaderApp(tk.Tk):
 
         ttk.Label(ref_row,
                   text='m3u8 직접 입력 시 원본 페이지 URL (403 오류 시)',
+                  foreground=FG2, font=('Segoe UI', 7)).pack(side='left')
+
+        # 브라우저 쿠키 (Cloudflare 로그인 사이트 우회)
+        cookie_row = ttk.Frame(top)
+        cookie_row.pack(fill='x', pady=(0, 6))
+
+        ttk.Label(cookie_row, text='쿠키', width=8, anchor='w',
+                  foreground=FG2).pack(side='left')
+        self._browser_var = tk.StringVar(value='없음')
+        browser_cb = ttk.Combobox(cookie_row, textvariable=self._browser_var,
+                                  state='readonly', width=12,
+                                  values=['없음', 'chrome', 'firefox', 'edge', 'brave'])
+        browser_cb.pack(side='left', padx=(4, 4))
+        ttk.Label(cookie_row,
+                  text='Cloudflare 차단 사이트 — 로그인된 브라우저 쿠키 사용 (없음 = 미사용)',
                   foreground=FG2, font=('Segoe UI', 7)).pack(side='left')
 
         # 저장 경로
@@ -748,11 +766,19 @@ class DownloaderApp(tk.Tk):
             return
 
         referer = self._referer_var.get().strip()
+        browser = self._browser_var.get().strip()
+        if browser == '없음':
+            browser = ''
 
         self._analyzing = True
         self._analyze_btn.configure(state='disabled')
         self._analyze_lbl.configure(text='분석 중...')
-        self._log_msg(f'분석: {url}' + (f'  [Referer: {referer}]' if referer else ''))
+        log_extra = ''
+        if referer:
+            log_extra += f'  [Referer: {referer}]'
+        if browser:
+            log_extra += f'  [쿠키: {browser}]'
+        self._log_msg(f'분석: {url}' + log_extra)
 
         def _worker():
             # thread-safe 로그 헬퍼 (after로 메인 스레드에 전달)
@@ -773,18 +799,20 @@ class DownloaderApp(tk.Tk):
                     'nocheckcertificate': True,
                     'logger': logger,
                     **({'http_headers': http_headers} if http_headers else {}),
+                    **({'cookiesfrombrowser': (browser, None, None, None)} if browser else {}),
                     **_impersonate_opts(),
                 }
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                self.after(0, lambda: self._on_analyze_done(url, info, save_dir, referer))
+                self.after(0, lambda: self._on_analyze_done(url, info, save_dir, referer, browser))
             except Exception as e:
                 err = str(e)
                 self.after(0, lambda: self._on_analyze_error(err))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_analyze_done(self, url: str, info: dict, save_dir: str, referer: str = ''):
+    def _on_analyze_done(self, url: str, info: dict, save_dir: str,
+                         referer: str = '', browser: str = ''):
         self._analyzing = False
         self._analyze_btn.configure(state='normal')
         self._analyze_lbl.configure(text='')
@@ -795,7 +823,7 @@ class DownloaderApp(tk.Tk):
         FormatPickerDialog(
             self, url, info,
             on_confirm=lambda fmt, custom, label:
-                self._enqueue(url, save_dir, fmt, custom, label, referer)
+                self._enqueue(url, save_dir, fmt, custom, label, referer, browser)
         )
 
     def _on_analyze_error(self, err: str):
@@ -806,7 +834,7 @@ class DownloaderApp(tk.Tk):
 
     def _enqueue(self, url: str, save_dir: str,
                  fmt_str: str, custom_title: str, quality_label: str,
-                 referer: str = ''):
+                 referer: str = '', cookie_browser: str = ''):
         """FormatPickerDialog 확인 후 대기열에 항목 추가"""
         os.makedirs(save_dir, exist_ok=True)
         uid  = str(uuid.uuid4())[:8]
@@ -817,6 +845,7 @@ class DownloaderApp(tk.Tk):
             custom_title=custom_title,
             title=custom_title or url,
             referer=referer,
+            cookie_browser=cookie_browser,
         )
         self._items[uid] = item
         display = custom_title or _shorten_url(url)

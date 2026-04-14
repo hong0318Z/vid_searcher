@@ -116,6 +116,31 @@ def _get_tag_groups(limit_tags=6, vids_per_tag=6):
     return groups
 
 
+def _get_shorts(offset=0, limit=20, tag=None):
+    """세로 영상(height > width, thumb_ok=1) 목록. (id, title, dur_str) 반환."""
+    c  = _conn()
+    wh = ["f.width > 0", "f.height > f.width", "f.thumb_ok = 1"]
+    pa = []
+    if tag:
+        wh.append("f.path IN (SELECT path FROM tags WHERE tag=?)")
+        pa.append(tag)
+    where = "WHERE " + " AND ".join(wh)
+    total = c.execute(
+        f"SELECT COUNT(*) FROM files f {where}", pa).fetchone()[0]
+    rows  = c.execute(
+        f"SELECT f.path, f.name, f.alias, f.duration "
+        f"FROM files f {where} ORDER BY f.added_at DESC LIMIT ? OFFSET ?",
+        pa + [limit, offset]).fetchall()
+    out = []
+    for path, name, alias, duration in rows:
+        out.append({
+            'id':      _vid_id(path),
+            'title':   alias or name,
+            'dur_str': _fmt_dur(duration),
+        })
+    return out, total
+
+
 def _get_related(vid_id, limit=16):
     path = _get_path(vid_id)
     if not path: return []
@@ -340,6 +365,7 @@ a{color:inherit;text-decoration:none}
     <a href="/" class="{{ 'act' if nav=='home' else '' }}">홈</a>
     <a href="/tags" class="{{ 'act' if nav=='tags' else '' }}">카테고리</a>
     <a href="/search" class="{{ 'act' if nav=='search' else '' }}">검색</a>
+    <a href="/shorts" class="{{ 'act' if nav=='shorts' else '' }}">Shorts</a>
   </nav>
 </header>
 __BODY__
@@ -566,6 +592,167 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>
 ''')
+
+_SHORTS = _BASE.replace('__BODY__', """
+<script id="shorts-init" type="application/json">
+  {"videos": {{ initial_videos|safe }}, "total": {{ total }}, "tag": "{{ tag|e }}"}
+</script>
+<div id="shorts-root">
+  {% if tag %}
+  <div id="shorts-badge">Shorts: {{ tag }}&nbsp;<a href="/shorts">× 전체</a></div>
+  {% endif %}
+  {% if total == 0 %}
+  <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+              color:#555;text-align:center;font-size:16px">
+    <div style="font-size:48px;margin-bottom:16px">📱</div>
+    세로(portrait) 영상이 없습니다.<br>
+    <small style="color:#444">썸네일이 생성된 height&gt;width 영상이 있어야 합니다.</small>
+  </div>
+  {% endif %}
+  <div id="shorts-feed"></div>
+  <div id="shorts-spinner"><span></span><span></span><span></span></div>
+</div>
+""").replace('__SCRIPTS__', """<style>
+body:has(#shorts-root){overflow:hidden}
+#shorts-root{position:fixed;top:56px;left:0;right:0;bottom:0;overflow:hidden}
+#shorts-feed{height:100%;overflow-y:scroll;scroll-snap-type:y mandatory;
+  scroll-behavior:smooth;-webkit-overflow-scrolling:touch}
+.si{width:100%;height:100%;scroll-snap-align:start;scroll-snap-stop:always;
+  background:#000;position:relative;display:flex;align-items:center;justify-content:center}
+.si video{height:100%;width:auto;max-width:100%;object-fit:contain;
+  position:relative;z-index:2;display:block}
+.si .si-thumb{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  z-index:1;transition:opacity .3s}
+.si.playing .si-thumb{opacity:0}
+.si-overlay{position:absolute;bottom:0;left:0;right:60px;padding:48px 16px 20px;
+  background:linear-gradient(transparent,rgba(0,0,0,.72));pointer-events:none;z-index:3}
+.si-title{font-size:14px;font-weight:700;color:#fff;margin-bottom:3px;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.si-dur{font-size:12px;color:var(--acc);font-weight:700}
+.si-actions{position:absolute;right:10px;bottom:70px;display:flex;
+  flex-direction:column;gap:12px;z-index:3}
+.si-btn{width:42px;height:42px;border-radius:50%;
+  background:rgba(255,255,255,.18);backdrop-filter:blur(4px);
+  border:none;color:#fff;font-size:16px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:background .15s;text-decoration:none}
+.si-btn:hover{background:rgba(255,255,255,.35)}
+#shorts-spinner{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);
+  display:none;gap:6px;align-items:center}
+#shorts-spinner span{width:8px;height:8px;border-radius:50%;background:var(--acc);
+  animation:sdot .7s infinite alternate}
+#shorts-spinner span:nth-child(2){animation-delay:.15s}
+#shorts-spinner span:nth-child(3){animation-delay:.3s}
+@keyframes sdot{from{opacity:.3;transform:scale(.8)}to{opacity:1;transform:scale(1)}}
+#shorts-badge{position:fixed;top:62px;right:12px;background:var(--acc);
+  color:#000;font-size:12px;font-weight:700;padding:4px 10px;
+  border-radius:12px;z-index:200}
+#shorts-badge a{color:#000;margin-left:6px}
+</style>
+<script>
+(function(){
+  var FEED=document.getElementById('shorts-feed');
+  var SPINNER=document.getElementById('shorts-spinner');
+  var HALF=10, AHEAD=5, BATCH=20;
+
+  var init=JSON.parse(document.getElementById('shorts-init').textContent);
+  var all=init.videos, total=init.total, TAG=init.tag;
+  var fetched=all.length, loading=false, curIdx=0;
+  var domMap=new Map();
+
+  function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+  function makeSlot(vid,idx){
+    var d=document.createElement('div');
+    d.className='si'; d.dataset.idx=idx; d.dataset.id=vid.id;
+    var img=document.createElement('img');
+    img.className='si-thumb'; img.src='/thumb/'+vid.id; img.loading='lazy';
+    var v=document.createElement('video');
+    v.loop=true; v.playsInline=true; v.preload='none';
+    var ov=document.createElement('div'); ov.className='si-overlay';
+    ov.innerHTML='<div class="si-title">'+esc(vid.title)+'</div>'
+      +(vid.dur_str?'<div class="si-dur">'+esc(vid.dur_str)+'</div>':'');
+    var ac=document.createElement('div'); ac.className='si-actions';
+    ac.innerHTML='<button class="si-btn" title="시스템 플레이어"'
+      +' onclick="event.stopPropagation();openNative(\''+vid.id+'\')">&#128194;</button>'
+      +'<a href="/video/'+vid.id+'" class="si-btn" title="상세 정보">&#8505;</a>';
+    d.append(img,v,ov,ac);
+    return d;
+  }
+
+  function refreshDOM(){
+    var lo=Math.max(0,curIdx-HALF), hi=Math.min(all.length-1,curIdx+HALF);
+    domMap.forEach(function(el,i){
+      if(i<lo||i>hi){obs.unobserve(el);el.remove();domMap.delete(i);}
+    });
+    for(var i=lo;i<=hi;i++){
+      if(!domMap.has(i)){
+        var el=makeSlot(all[i],i);
+        var ref=null;
+        domMap.forEach(function(e,j){if(j>i&&(!ref||j<ref[0]))ref=[j,e];});
+        FEED.insertBefore(el,ref?ref[1]:null);
+        domMap.set(i,el); obs.observe(el);
+      }
+    }
+  }
+
+  var obs=new IntersectionObserver(function(entries){
+    entries.forEach(function(ent){
+      var el=ent.target, idx=+el.dataset.idx;
+      var vid=el.querySelector('video');
+      if(ent.isIntersecting&&ent.intersectionRatio>=0.5){
+        curIdx=idx;
+        if(!vid.src){vid.src='/stream/'+el.dataset.id;vid.preload='auto';}
+        vid.play().catch(function(){});
+        el.classList.add('playing');
+        refreshDOM(); maybeLoadMore();
+      } else {
+        vid.pause(); el.classList.remove('playing');
+        if(Math.abs(idx-curIdx)>HALF){vid.removeAttribute('src');vid.load();}
+      }
+    });
+  },{root:FEED,threshold:0.5});
+
+  async function maybeLoadMore(){
+    if(loading||fetched>=total) return;
+    if(curIdx<all.length-AHEAD) return;
+    loading=true; SPINNER.style.display='flex';
+    try{
+      var tq=TAG?'&tag='+encodeURIComponent(TAG):'';
+      var res=await fetch('/api/shorts?offset='+fetched+'&limit='+BATCH+tq);
+      var d=await res.json();
+      all.push.apply(all,d.videos); total=d.total; fetched=all.length;
+      refreshDOM();
+    }catch(e){console.error('Shorts fetch error',e);}
+    finally{loading=false; SPINNER.style.display='none';}
+  }
+
+  function scrollTo(idx){
+    idx=Math.max(0,Math.min(all.length-1,idx));
+    var el=domMap.get(idx);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowDown'||e.key==='ArrowRight'){e.preventDefault();scrollTo(curIdx+1);}
+    else if(e.key==='ArrowUp'||e.key==='ArrowLeft'){e.preventDefault();scrollTo(curIdx-1);}
+  });
+  FEED.addEventListener('wheel',function(e){
+    e.preventDefault(); scrollTo(curIdx+(e.deltaY>0?1:-1));
+  },{passive:false});
+  var ty0=0;
+  FEED.addEventListener('touchstart',function(e){ty0=e.touches[0].clientY;},{passive:true});
+  FEED.addEventListener('touchend',function(e){
+    var dy=ty0-e.changedTouches[0].clientY;
+    if(Math.abs(dy)>50) scrollTo(curIdx+(dy>0?1:-1));
+  },{passive:true});
+
+  refreshDOM();
+})();
+</script>
+""")
+
 # ─────────────────────────────────────────────────
 #  공통 Jinja2 매크로
 # ─────────────────────────────────────────────────
@@ -680,6 +867,23 @@ def search_page():
             (v['path'],)).fetchall()]
     return _render(_SEARCH, nav='search', q=q, videos=vids,
                    total=total, page=pg, pages=(total+PER-1)//PER)
+
+@app.route('/shorts')
+def shorts_page():
+    import json
+    tag = request.args.get('tag', '').strip() or None
+    vids, total = _get_shorts(offset=0, limit=20, tag=tag)
+    return _render(_SHORTS, nav='shorts',
+                   initial_videos=json.dumps(vids),
+                   total=total, tag=tag or '')
+
+@app.route('/api/shorts')
+def api_shorts():
+    offset = int(request.args.get('offset', 0))
+    limit  = min(int(request.args.get('limit', 20)), 50)
+    tag    = request.args.get('tag', '').strip() or None
+    vids, total = _get_shorts(offset=offset, limit=limit, tag=tag)
+    return jsonify({'videos': vids, 'total': total, 'offset': offset})
 
 @app.route('/video/<vid_id>')
 def video_page(vid_id):

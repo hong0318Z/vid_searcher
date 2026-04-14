@@ -1165,6 +1165,9 @@ class VidSort(tk.Tk):
         self._llm_prompt   = cfg.get('llm_prompt', '')  # 비어 있으면 llm_api 기본값 사용
         self._llm_stop     = threading.Event()
 
+        # ── 더블클릭 동작 ──────────────────────────
+        self._dblclick_action = cfg.get('dblclick_action', 'viewer')  # 'viewer' | 'player'
+
         # ── FC2PPVDB 계정 ──────────────────────────
         self._fc2ppvdb_email    = cfg.get('fc2ppvdb_email', '')
         self._fc2ppvdb_password = cfg.get('fc2ppvdb_password', '')
@@ -1362,7 +1365,7 @@ class VidSort(tk.Tk):
         self._right=tk.Frame(main,bg='#0d0d14')
         self._right.pack(side='left',fill='both',expand=True)
         self.grid_widget=CanvasGrid(self._right,
-                                    on_open=self._viewer_dlg,
+                                    on_open=self._on_grid_open,
                                     on_ctx=self._ctx,
                                     on_click=self._click)
         self.grid_widget.pack(fill='both',expand=True)
@@ -3013,6 +3016,13 @@ class VidSort(tk.Tk):
                    ).pack(pady=8)
 
     # ── INLINE VIEWER / EDITOR ──────────────────
+    def _on_grid_open(self, path):
+        """더블클릭 동작 — 설정에 따라 뷰어/편집 패널 또는 외부 플레이어 실행."""
+        if self._dblclick_action == 'player':
+            self._open(path)
+        else:
+            self._viewer_dlg(path)
+
     def _viewer_dlg(self, path):
         """영상 플레이어 + 메타데이터 인라인 편집 창.
         Linux X11 + mpv 있으면 임베딩, 없으면 썸네일+외부 재생."""
@@ -3891,6 +3901,7 @@ class VidSort(tk.Tk):
         cfg['llm_prompt']        = self._llm_prompt
         cfg['fc2ppvdb_email']    = self._fc2ppvdb_email
         cfg['fc2ppvdb_password'] = self._fc2ppvdb_password
+        cfg['dblclick_action']   = self._dblclick_action
         save_cfg(cfg)
 
     def _get_llm_client(self):
@@ -3957,6 +3968,19 @@ class VidSort(tk.Tk):
 
         ttk.Separator(win).pack(fill='x', padx=16, pady=8)
 
+        # ── 더블클릭 동작 ──────────────────────────
+        dc_f = tk.Frame(win, bg='#0d0d14'); dc_f.pack(fill='x', padx=20, pady=3)
+        tk.Label(dc_f, text='클릭 시 실행:', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9), width=14, anchor='e').pack(side='left')
+        v_dblclick = tk.StringVar(value=self._dblclick_action)
+        for val, label in [('viewer', '뷰어/편집 패널'), ('player', '외부 플레이어')]:
+            tk.Radiobutton(dc_f, text=label, variable=v_dblclick, value=val,
+                           bg='#0d0d14', fg='#dcdcf0', selectcolor='#1e1e30',
+                           activebackground='#0d0d14', activeforeground='#dcdcf0',
+                           font=('Consolas', 9)).pack(side='left', padx=8)
+
+        ttk.Separator(win).pack(fill='x', padx=16, pady=8)
+
         # ── 태그 분류 프롬프트 편집 ───────────────
         ph = tk.Frame(win, bg='#0d0d14'); ph.pack(fill='x', padx=20)
         tk.Label(ph, text='태그 분류 프롬프트 (비워두면 기본값 사용):',
@@ -3987,10 +4011,11 @@ class VidSort(tk.Tk):
             self._llm_prompt = '' if entered == DEFAULT_SYSTEM_PROMPT else entered
             self._fc2ppvdb_email    = v_fc2_email.get().strip()
             self._fc2ppvdb_password = v_fc2_pw.get().strip()
+            self._dblclick_action   = v_dblclick.get()
             self._save_llm_cfg()
             self._apply_fc2ppvdb_creds()
             win.destroy()
-            messagebox.showinfo('저장', 'AI / FC2PPVDB 설정이 저장되었습니다.')
+            messagebox.showinfo('저장', '설정이 저장되었습니다.')
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=10)
         ttk.Button(bf, text='💾 저장', style='Acc.TButton',

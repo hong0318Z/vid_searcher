@@ -27,10 +27,16 @@ except ImportError:
     HAS_YTDLP = False
 
 try:
-    import curl_cffi  # noqa — Cloudflare 우회용
-    HAS_CURL_CFFI = True
+    import curl_cffi as _curl_cffi_mod
+    _ver = tuple(int(x) for x in _curl_cffi_mod.__version__.split('.')[:2])
+    # yt-dlp는 curl_cffi 0.5.x ~ 0.9.x 만 지원. 0.10+ 는 API 변경으로 unsupported.
+    HAS_CURL_CFFI = _ver < (0, 10)
+    CURL_CFFI_VERSION = _curl_cffi_mod.__version__
+    CURL_CFFI_UNSUPPORTED = not HAS_CURL_CFFI
 except ImportError:
     HAS_CURL_CFFI = False
+    CURL_CFFI_VERSION = None
+    CURL_CFFI_UNSUPPORTED = False
 
 
 def _impersonate_opts() -> dict:
@@ -623,11 +629,15 @@ class DownloaderApp(tk.Tk):
                      text='⚠  yt-dlp 가 설치되어 있지 않습니다.  →  pip install yt-dlp',
                      bg=BG, fg=YELLOW, font=('Segoe UI', 9)).pack(fill='x', pady=(4, 0))
 
-        # curl_cffi 미설치 안내 (Cloudflare 사이트 필요)
-        if not HAS_CURL_CFFI:
+        # curl_cffi 버전 경고
+        if CURL_CFFI_UNSUPPORTED:
             tk.Label(top,
-                     text='ℹ  Cloudflare 사이트(FC2 등) 다운로드 실패 시: '
-                          'pip install curl_cffi',
+                     text=f'⚠  curl_cffi {CURL_CFFI_VERSION} 은 yt-dlp와 호환 안 됨 (Cloudflare 우회 불가)'
+                          '  →  pip install "curl_cffi>=0.5.10,<0.10"',
+                     bg=BG, fg=YELLOW, font=('Segoe UI', 8)).pack(fill='x', pady=(2, 0))
+        elif not HAS_CURL_CFFI:
+            tk.Label(top,
+                     text='ℹ  Cloudflare 사이트 403 오류 시: pip install "curl_cffi>=0.5.10,<0.10"',
                      bg=BG, fg=FG2, font=('Segoe UI', 8)).pack(fill='x', pady=(2, 0))
 
         ttk.Separator(self).pack(fill='x')

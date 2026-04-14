@@ -23,10 +23,16 @@ except ImportError:
 
 try:
     import curl_cffi
-    print(f"[OK] curl_cffi {curl_cffi.__version__}  (Cloudflare 우회 가능)")
-    HAS_CURL_CFFI = True
+    _ver = tuple(int(x) for x in curl_cffi.__version__.split('.')[:2])
+    if _ver < (0, 10):
+        print(f"[OK] curl_cffi {curl_cffi.__version__}  (Cloudflare 우회 가능)")
+        HAS_CURL_CFFI = True
+    else:
+        print(f"[WARN] curl_cffi {curl_cffi.__version__} 은 yt-dlp 미지원 버전 → Cloudflare 우회 불가")
+        print(f"       해결: pip install \"curl_cffi>=0.5.10,<0.10\"")
+        HAS_CURL_CFFI = False
 except ImportError:
-    print("[WARN] curl_cffi 미설치  →  pip install curl_cffi")
+    print("[WARN] curl_cffi 미설치  →  pip install \"curl_cffi>=0.5.10,<0.10\"")
     HAS_CURL_CFFI = False
 
 # ── 인자 파싱 ──────────────────────────────────

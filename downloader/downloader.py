@@ -28,9 +28,10 @@ except ImportError:
 
 try:
     import curl_cffi as _curl_cffi_mod
-    _ver = tuple(int(x) for x in _curl_cffi_mod.__version__.split('.')[:2])
-    # yt-dlp는 curl_cffi 0.5.x ~ 0.9.x 만 지원. 0.10+ 는 API 변경으로 unsupported.
-    HAS_CURL_CFFI = _ver < (0, 10)
+    _ver = tuple(int(x) for x in _curl_cffi_mod.__version__.split('.')[:3])
+    # yt-dlp 2026.x 기준: curl_cffi 0.5.10 ~ 0.8.x 만 지원.
+    # 0.9.0+ 은 내부 API 변경으로 yt-dlp가 unsupported 처리함.
+    HAS_CURL_CFFI = (0, 5, 10) <= _ver < (0, 9, 0)
     CURL_CFFI_VERSION = _curl_cffi_mod.__version__
     CURL_CFFI_UNSUPPORTED = not HAS_CURL_CFFI
 except ImportError:
@@ -104,8 +105,9 @@ class DownloadItem:
     quality:      str          # 표시용 ('최고화질' / '1080p' / '오디오만' 등)
     format_str:   str = ''     # yt-dlp format string (예: 'bestvideo+bestaudio/best')
     custom_title: str = ''     # 사용자 지정 파일명 (빈 문자열이면 사이트 제목 사용)
-    referer:      str = ''     # Referer 헤더 (CDN 403 우회용)
+    referer:        str = ''   # Referer 헤더 (CDN 403 우회용)
     cookie_browser: str = ''  # 브라우저 쿠키 소스 ('chrome'/'firefox'/'edge' 등)
+    cookie_file:    str = ''  # Netscape 쿠키 파일 경로 (브라우저 쿠키보다 우선)
     status:       str = 'pending'   # pending / downloading / merging / done / error / cancelled
     title:        str = ''
     filename:     str = ''
@@ -219,8 +221,9 @@ class Downloader:
             'merge_output_format': 'mp4',
             'hls_use_mpegts':    False,
             **({'http_headers': http_headers} if http_headers else {}),
+            **({'cookiefile': item.cookie_file} if item.cookie_file else {}),
             **({'cookiesfrombrowser': (item.cookie_browser, None, None, None)}
-               if item.cookie_browser else {}),
+               if item.cookie_browser and not item.cookie_file else {}),
             **_impersonate_opts(),
         }
 
@@ -609,20 +612,40 @@ class DownloaderApp(tk.Tk):
                   text='m3u8 직접 입력 시 원본 페이지 URL (403 오류 시)',
                   foreground=FG2, font=('Segoe UI', 7)).pack(side='left')
 
-        # 브라우저 쿠키 (Cloudflare 로그인 사이트 우회)
+        # 쿠키 — Cloudflare 우회용 (파일 우선, 없으면 브라우저 자동 추출)
         cookie_row = ttk.Frame(top)
-        cookie_row.pack(fill='x', pady=(0, 6))
+        cookie_row.pack(fill='x', pady=(0, 2))
 
-        ttk.Label(cookie_row, text='쿠키', width=8, anchor='w',
+        ttk.Label(cookie_row, text='쿠키 파일', width=8, anchor='w',
+                  foreground=FG2).pack(side='left')
+        self._cookie_file_var = tk.StringVar()
+        ttk.Entry(cookie_row, textvariable=self._cookie_file_var,
+                  foreground=FG2).pack(side='left', fill='x', expand=True, padx=(4, 4))
+        ttk.Button(cookie_row, text='선택',
+                   command=self._pick_cookie_file).pack(side='left', padx=(0, 4))
+        ttk.Button(cookie_row, text='✕',
+                   command=lambda: self._cookie_file_var.set('')).pack(side='left')
+
+        cookie_hint = ttk.Frame(top)
+        cookie_hint.pack(fill='x', pady=(0, 2))
+        ttk.Label(cookie_hint, text='         ', width=8).pack(side='left')
+        tk.Label(cookie_hint,
+                 text='Cloudflare 차단 사이트: 브라우저에서 사이트 열고 쿠키 내보내기 확장 → Netscape 형식 .txt 저장',
+                 bg=BG, fg=FG2, font=('Segoe UI', 7)).pack(side='left')
+
+        cookie_row2 = ttk.Frame(top)
+        cookie_row2.pack(fill='x', pady=(0, 6))
+
+        ttk.Label(cookie_row2, text='또는 브라우저', width=8, anchor='w',
                   foreground=FG2).pack(side='left')
         self._browser_var = tk.StringVar(value='없음')
-        browser_cb = ttk.Combobox(cookie_row, textvariable=self._browser_var,
+        browser_cb = ttk.Combobox(cookie_row2, textvariable=self._browser_var,
                                   state='readonly', width=12,
-                                  values=['없음', 'chrome', 'firefox', 'edge', 'brave'])
-        browser_cb.pack(side='left', padx=(4, 4))
-        ttk.Label(cookie_row,
-                  text='Cloudflare 차단 사이트용  ⚠ Chrome 127+은 DPAPI 미지원 → Firefox/Edge 권장',
-                  foreground=YELLOW, font=('Segoe UI', 7)).pack(side='left')
+                                  values=['없음', 'firefox', 'edge', 'chrome', 'brave'])
+        browser_cb.pack(side='left', padx=(4, 8))
+        tk.Label(cookie_row2,
+                 text='⚠ Chrome 127+은 미지원(DPAPI) → Firefox/Edge 권장  |  쿠키 파일 지정 시 이 옵션 무시됨',
+                 bg=BG, fg=YELLOW, font=('Segoe UI', 7)).pack(side='left')
 
         # 저장 경로
         dir_row = ttk.Frame(top)
@@ -772,8 +795,9 @@ class DownloaderApp(tk.Tk):
             messagebox.showwarning('경고', '저장 위치를 선택하세요.')
             return
 
-        referer = self._referer_var.get().strip()
-        browser = self._browser_var.get().strip()
+        referer     = self._referer_var.get().strip()
+        cookie_file = self._cookie_file_var.get().strip()
+        browser     = '' if cookie_file else self._browser_var.get().strip()
         if browser == '없음':
             browser = ''
 
@@ -783,12 +807,13 @@ class DownloaderApp(tk.Tk):
         log_extra = ''
         if referer:
             log_extra += f'  [Referer: {referer}]'
-        if browser:
+        if cookie_file:
+            log_extra += f'  [쿠키파일]'
+        elif browser:
             log_extra += f'  [쿠키: {browser}]'
         self._log_msg(f'분석: {url}' + log_extra)
 
         def _worker():
-            # thread-safe 로그 헬퍼 (after로 메인 스레드에 전달)
             def _tlog(msg, color=FG2):
                 self.after(0, lambda m=msg, c=color: self._log_msg(m, c))
 
@@ -806,12 +831,14 @@ class DownloaderApp(tk.Tk):
                     'nocheckcertificate': True,
                     'logger': logger,
                     **({'http_headers': http_headers} if http_headers else {}),
+                    **({'cookiefile': cookie_file} if cookie_file else {}),
                     **({'cookiesfrombrowser': (browser, None, None, None)} if browser else {}),
                     **_impersonate_opts(),
                 }
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                self.after(0, lambda: self._on_analyze_done(url, info, save_dir, referer, browser))
+                self.after(0, lambda: self._on_analyze_done(
+                    url, info, save_dir, referer, browser, cookie_file))
             except Exception as e:
                 err = str(e)
                 self.after(0, lambda: self._on_analyze_error(err))
@@ -819,7 +846,7 @@ class DownloaderApp(tk.Tk):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_analyze_done(self, url: str, info: dict, save_dir: str,
-                         referer: str = '', browser: str = ''):
+                         referer: str = '', browser: str = '', cookie_file: str = ''):
         self._analyzing = False
         self._analyze_btn.configure(state='normal')
         self._analyze_lbl.configure(text='')
@@ -830,7 +857,7 @@ class DownloaderApp(tk.Tk):
         FormatPickerDialog(
             self, url, info,
             on_confirm=lambda fmt, custom, label:
-                self._enqueue(url, save_dir, fmt, custom, label, referer, browser)
+                self._enqueue(url, save_dir, fmt, custom, label, referer, browser, cookie_file)
         )
 
     def _on_analyze_error(self, err: str):
@@ -854,7 +881,7 @@ class DownloaderApp(tk.Tk):
 
     def _enqueue(self, url: str, save_dir: str,
                  fmt_str: str, custom_title: str, quality_label: str,
-                 referer: str = '', cookie_browser: str = ''):
+                 referer: str = '', cookie_browser: str = '', cookie_file: str = ''):
         """FormatPickerDialog 확인 후 대기열에 항목 추가"""
         os.makedirs(save_dir, exist_ok=True)
         uid  = str(uuid.uuid4())[:8]
@@ -866,6 +893,7 @@ class DownloaderApp(tk.Tk):
             title=custom_title or url,
             referer=referer,
             cookie_browser=cookie_browser,
+            cookie_file=cookie_file,
         )
         self._items[uid] = item
         display = custom_title or _shorten_url(url)
@@ -881,6 +909,14 @@ class DownloaderApp(tk.Tk):
             self._url_var.set(self.clipboard_get())
         except Exception:
             pass
+
+    def _pick_cookie_file(self):
+        p = filedialog.askopenfilename(
+            title='쿠키 파일 선택 (Netscape 형식 .txt)',
+            filetypes=[('텍스트 파일', '*.txt'), ('모든 파일', '*.*')],
+            initialdir=str(Path.home()))
+        if p:
+            self._cookie_file_var.set(p)
 
     def _pick_dir(self):
         d = filedialog.askdirectory(initialdir=self._dir_var.get() or str(Path.home()))

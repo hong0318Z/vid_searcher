@@ -28,12 +28,9 @@ except ImportError:
 
 try:
     import curl_cffi as _curl_cffi_mod
-    _ver = tuple(int(x) for x in _curl_cffi_mod.__version__.split('.')[:3])
-    # yt-dlp 2026.x 기준: curl_cffi 0.5.10 ~ 0.8.x 만 지원.
-    # 0.9.0+ 은 내부 API 변경으로 yt-dlp가 unsupported 처리함.
-    HAS_CURL_CFFI = (0, 5, 10) <= _ver < (0, 9, 0)
+    HAS_CURL_CFFI = True
     CURL_CFFI_VERSION = _curl_cffi_mod.__version__
-    CURL_CFFI_UNSUPPORTED = not HAS_CURL_CFFI
+    CURL_CFFI_UNSUPPORTED = False
 except ImportError:
     HAS_CURL_CFFI = False
     CURL_CFFI_VERSION = None

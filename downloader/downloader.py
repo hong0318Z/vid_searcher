@@ -34,14 +34,28 @@ except ImportError:
 
 
 def _impersonate_opts() -> dict:
-    """curl_cffi 설치 시 Cloudflare 우회 impersonation 옵션 반환.
-    generic extractor 뿐 아니라 HTTP 요청 전체에도 적용."""
+    """curl_cffi 설치 시 generic 추출기에 Cloudflare 우회 impersonation 적용.
+    'impersonate' 최상위 옵션은 ImpersonateTarget 객체가 필요하므로 사용 안 함."""
     if not HAS_CURL_CFFI:
         return {}
-    return {
-        'extractor_args': {'generic': {'impersonate': ['chrome']}},
-        'impersonate':    'chrome110',
-    }
+    # 빈 문자열 = yt-dlp가 지원되는 타겟 자동 선택
+    return {'extractor_args': {'generic': {'impersonate': ['']}}}
+
+
+class _YtdlpLogger:
+    """yt-dlp 경고·오류를 GUI 로그 패널로 전달하는 어댑터."""
+    def __init__(self, on_warning, on_error):
+        self._warn = on_warning
+        self._err  = on_error
+
+    def debug(self, msg):
+        pass  # 디버그 메시지는 무시
+
+    def warning(self, msg):
+        self._warn(msg)
+
+    def error(self, msg):
+        self._err(msg)
 
 # ──────────────────────────────────────────────
 # 다크 테마 색상
@@ -101,13 +115,15 @@ class Downloader:
     """단일 다운로드 실행기. 별도 스레드에서 실행."""
 
     def __init__(self, item: DownloadItem,
-                 on_progress,   # (item) -> None
-                 on_done,       # (item) -> None
-                 on_error):     # (item) -> None
+                 on_progress,        # (item) -> None
+                 on_done,            # (item) -> None
+                 on_error,           # (item) -> None
+                 on_log=None):       # (msg, color) -> None
         self.item = item
         self.on_progress = on_progress
         self.on_done = on_done
         self.on_error = on_error
+        self.on_log   = on_log or (lambda msg, color=None: None)
         self._ydl: Optional[yt_dlp.YoutubeDL] = None
         self._cancelled = False
 
@@ -169,13 +185,18 @@ class Downloader:
         else:
             outtmpl = os.path.join(item.save_dir, '%(title)s.%(ext)s')
 
+        logger = _YtdlpLogger(
+            on_warning=lambda m: self.on_log(f'⚠ {m}', YELLOW),
+            on_error  =lambda m: self.on_log(f'✕ {m}', RED),
+        )
         ydl_opts = {
             'format':            fmt,
             'outtmpl':           outtmpl,
             'progress_hooks':    [self._hook],
             'postprocessor_hooks': [self._postproc_hook],
+            'logger':            logger,
             'quiet':             True,
-            'no_warnings':       True,
+            'no_warnings':       False,   # 경고는 logger 로 전달
             'noprogress':        True,
             'ignoreerrors':      False,
             'nocheckcertificate': True,
@@ -700,9 +721,22 @@ class DownloaderApp(tk.Tk):
         self._log_msg(f'분석: {url}')
 
         def _worker():
+            # thread-safe 로그 헬퍼 (after로 메인 스레드에 전달)
+            def _tlog(msg, color=FG2):
+                self.after(0, lambda m=msg, c=color: self._log_msg(m, c))
+
+            logger = _YtdlpLogger(
+                on_warning=lambda m: _tlog(f'⚠ {m}', YELLOW),
+                on_error  =lambda m: _tlog(f'✕ {m}', RED),
+            )
             try:
-                opts = {'quiet': True, 'no_warnings': True,
-                        'nocheckcertificate': True, **_impersonate_opts()}
+                opts = {
+                    'quiet': True,
+                    'no_warnings': False,   # 경고는 logger 로 전달
+                    'nocheckcertificate': True,
+                    'logger': logger,
+                    **_impersonate_opts(),
+                }
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 self.after(0, lambda: self._on_analyze_done(url, info, save_dir))
@@ -782,9 +816,10 @@ class DownloaderApp(tk.Tk):
 
         worker = Downloader(
             item,
-            on_progress=lambda i: self._ui_queue.put(('progress', i)),
-            on_done    =lambda i: self._ui_queue.put(('done',     i)),
-            on_error   =lambda i: self._ui_queue.put(('error',    i)),
+            on_progress=lambda i:          self._ui_queue.put(('progress', i)),
+            on_done    =lambda i:          self._ui_queue.put(('done',     i)),
+            on_error   =lambda i:          self._ui_queue.put(('error',    i)),
+            on_log     =lambda m, c=FG2:   self._ui_queue.put(('log', m, c)),
         )
         self._workers[item.uid] = worker
         t = threading.Thread(target=worker.run, daemon=True)
@@ -852,12 +887,19 @@ class DownloaderApp(tk.Tk):
     def _poll_ui(self):
         try:
             while True:
-                event, item = self._ui_queue.get_nowait()
-                self._update_row(item)
-                if event == 'done':
-                    self._log_msg(f'완료: {item.title or item.url}', GREEN)
-                elif event == 'error':
-                    self._log_msg(f'오류: {item.error}', RED)
+                ev = self._ui_queue.get_nowait()
+                event = ev[0]
+                if event == 'log':
+                    # ('log', msg, color)
+                    self._log_msg(ev[1], ev[2])
+                else:
+                    # ('progress'|'done'|'error', item)
+                    item = ev[1]
+                    self._update_row(item)
+                    if event == 'done':
+                        self._log_msg(f'완료: {item.title or item.url}', GREEN)
+                    elif event == 'error':
+                        self._log_msg(f'오류: {item.error}', RED)
         except queue.Empty:
             pass
         self.after(200, self._poll_ui)

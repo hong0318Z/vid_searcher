@@ -5,19 +5,22 @@ URL 다운로드 가능 여부 진단 스크립트
 사용법:
   python test_url.py <URL>
   python test_url.py <URL> <Referer>
-  python test_url.py <URL> "" --browser chrome
+  python test_url.py <URL> "" --browser firefox
+  python test_url.py <URL> "" --cookies cookies.txt
 
 예시:
   python test_url.py https://kr2.ddalsney.com/video/category/general/450733
-  python test_url.py https://kr2.ddalsney.com/video/... "" --browser chrome
+  python test_url.py https://kr2.ddalsney.com/video/... "" --browser firefox
+  python test_url.py https://kr2.ddalsney.com/video/... "" --cookies cookies.txt
   python test_url.py https://n129.b-cdn.net/.VIDEO/KR_OS152/playlist.m3u8 https://원본사이트.com/
 
-브라우저 쿠키 옵션 (--browser):
-  chrome, firefox, edge, brave
-  → Cloudflare 로그인 필요 사이트에서 세션 쿠키 사용
+Cloudflare 차단 사이트 우회 방법 (권장 순서):
+  1. --cookies cookies.txt   : 브라우저 확장(Get cookies.txt)으로 내보낸 파일 사용 — 가장 안정적
+  2. --browser firefox       : Firefox 쿠키 자동 추출 (Firefox에서 사이트 접속 후)
+  3. --browser edge          : Edge 쿠키 자동 추출
+  4. curl_cffi<0.9.0 설치   : pip install "curl_cffi>=0.5.10,<0.9.0"
 """
 import sys
-import json
 
 # ── 의존성 확인 ────────────────────────────────
 try:
@@ -29,16 +32,17 @@ except ImportError:
 
 try:
     import curl_cffi
-    _ver = tuple(int(x) for x in curl_cffi.__version__.split('.')[:2])
-    if _ver < (0, 10):
-        print(f"[OK] curl_cffi {curl_cffi.__version__}  (Cloudflare 우회 가능)")
+    _ver = tuple(int(x) for x in curl_cffi.__version__.split('.')[:3])
+    # yt-dlp 2026.x 기준: 0.5.10 <= ver < 0.9.0 만 지원 (0.9.x+ 는 API 변경으로 unsupported)
+    if (0, 5, 10) <= _ver < (0, 9, 0):
+        print(f"[OK] curl_cffi {curl_cffi.__version__}  (Cloudflare impersonation 가능)")
         HAS_CURL_CFFI = True
     else:
-        print(f"[WARN] curl_cffi {curl_cffi.__version__} 은 yt-dlp 미지원 버전 → Cloudflare 우회 불가")
-        print(f"       해결: pip install \"curl_cffi>=0.5.10,<0.10\"")
+        print(f"[WARN] curl_cffi {curl_cffi.__version__} 은 yt-dlp 미지원 버전 → impersonation 불가")
+        print(f"       해결: pip install \"curl_cffi>=0.5.10,<0.9.0\"")
         HAS_CURL_CFFI = False
 except ImportError:
-    print("[WARN] curl_cffi 미설치  →  pip install \"curl_cffi>=0.5.10,<0.10\"")
+    print("[WARN] curl_cffi 미설치  →  pip install \"curl_cffi>=0.5.10,<0.9.0\"")
     HAS_CURL_CFFI = False
 
 # ── 인자 파싱 ──────────────────────────────────
@@ -51,11 +55,15 @@ else:
 
 referer = ""
 browser = ""
+cookie_file = ""
 
 i = 1
 while i < len(args):
     if args[i] == '--browser' and i + 1 < len(args):
         browser = args[i + 1]
+        i += 2
+    elif args[i] == '--cookies' and i + 1 < len(args):
+        cookie_file = args[i + 1]
         i += 2
     elif not referer and not args[i].startswith('--'):
         referer = args[i]
@@ -67,15 +75,17 @@ print(f"\n{'='*60}")
 print(f"URL     : {url}")
 if referer:
     print(f"Referer : {referer}")
-if browser:
-    print(f"브라우저 쿠키: {browser}")
+if cookie_file:
+    print(f"쿠키파일: {cookie_file}")
+elif browser:
+    print(f"브라우저: {browser}")
 print(f"{'='*60}\n")
 
 # ── yt-dlp 옵션 ────────────────────────────────
 opts = {
-    'quiet':             False,
-    'verbose':           True,    # 전체 디버그 출력
-    'no_warnings':       False,
+    'quiet':              False,
+    'verbose':            True,
+    'no_warnings':        False,
     'nocheckcertificate': True,
 }
 
@@ -85,7 +95,10 @@ if HAS_CURL_CFFI:
 if referer:
     opts['http_headers'] = {'Referer': referer}
 
-if browser:
+if cookie_file:
+    opts['cookiefile'] = cookie_file
+    print(f"[INFO] 쿠키 파일 사용: {cookie_file}")
+elif browser:
     opts['cookiesfrombrowser'] = (browser, None, None, None)
     print(f"[INFO] 브라우저 쿠키 사용: {browser}")
 

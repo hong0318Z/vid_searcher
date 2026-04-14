@@ -26,6 +26,23 @@ try:
 except ImportError:
     HAS_YTDLP = False
 
+try:
+    import curl_cffi  # noqa — Cloudflare 우회용
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
+
+def _impersonate_opts() -> dict:
+    """curl_cffi 설치 시 Cloudflare 우회 impersonation 옵션 반환.
+    generic extractor 뿐 아니라 HTTP 요청 전체에도 적용."""
+    if not HAS_CURL_CFFI:
+        return {}
+    return {
+        'extractor_args': {'generic': {'impersonate': ['chrome']}},
+        'impersonate':    'chrome110',
+    }
+
 # ──────────────────────────────────────────────
 # 다크 테마 색상
 # ──────────────────────────────────────────────
@@ -166,8 +183,8 @@ class Downloader:
             'fragment_retries':  5,
             'concurrent_fragment_downloads': 4,
             'merge_output_format': 'mp4',
-            # m3u8 / HLS 전용
             'hls_use_mpegts':    False,
+            **_impersonate_opts(),
         }
 
         try:
@@ -559,10 +576,16 @@ class DownloaderApp(tk.Tk):
 
         # yt-dlp 미설치 경고
         if not HAS_YTDLP:
-            warn = tk.Label(top,
-                text='⚠  yt-dlp 가 설치되어 있지 않습니다. pip install yt-dlp',
-                bg=BG, fg=YELLOW, font=('Segoe UI', 9))
-            warn.pack(fill='x', pady=(4, 0))
+            tk.Label(top,
+                     text='⚠  yt-dlp 가 설치되어 있지 않습니다.  →  pip install yt-dlp',
+                     bg=BG, fg=YELLOW, font=('Segoe UI', 9)).pack(fill='x', pady=(4, 0))
+
+        # curl_cffi 미설치 안내 (Cloudflare 사이트 필요)
+        if not HAS_CURL_CFFI:
+            tk.Label(top,
+                     text='ℹ  Cloudflare 사이트(FC2 등) 다운로드 실패 시: '
+                          'pip install curl_cffi',
+                     bg=BG, fg=FG2, font=('Segoe UI', 8)).pack(fill='x', pady=(2, 0))
 
         ttk.Separator(self).pack(fill='x')
 
@@ -678,8 +701,9 @@ class DownloaderApp(tk.Tk):
 
         def _worker():
             try:
-                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True,
-                                        'nocheckcertificate': True}) as ydl:
+                opts = {'quiet': True, 'no_warnings': True,
+                        'nocheckcertificate': True, **_impersonate_opts()}
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 self.after(0, lambda: self._on_analyze_done(url, info, save_dir))
             except Exception as e:

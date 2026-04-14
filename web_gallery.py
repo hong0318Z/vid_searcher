@@ -885,6 +885,23 @@ def api_shorts():
     vids, total = _get_shorts(offset=offset, limit=limit, tag=tag)
     return jsonify({'videos': vids, 'total': total, 'offset': offset})
 
+@app.route('/api/shorts/debug')
+def api_shorts_debug():
+    c = _conn()
+    def q(sql): return c.execute(sql).fetchone()[0]
+    return jsonify({
+        'total_files':        q("SELECT COUNT(*) FROM files"),
+        'has_width':          q("SELECT COUNT(*) FROM files WHERE width > 0"),
+        'portrait':           q("SELECT COUNT(*) FROM files WHERE width > 0 AND height > width"),
+        'portrait_thumb_ok':  q("SELECT COUNT(*) FROM files WHERE width > 0 AND height > width AND thumb_ok=1"),
+        'sample_resolutions': [
+            {'w': r[0], 'h': r[1], 'name': r[2], 'thumb_ok': r[3]}
+            for r in c.execute(
+                "SELECT width, height, name, thumb_ok FROM files WHERE width > 0 LIMIT 20"
+            ).fetchall()
+        ],
+    })
+
 @app.route('/video/<vid_id>')
 def video_page(vid_id):
     v = _get_video(vid_id)

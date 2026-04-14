@@ -242,8 +242,15 @@ class Downloader:
             self.on_done(item)
             return
         except Exception as e:
+            msg = str(e)
+            if 'Could not copy' in msg and 'cookie database' in msg:
+                item.error = (f'{item.cookie_browser} 브라우저를 완전히 종료한 후 다시 시도하세요. '
+                              '(쿠키 DB 잠금 오류)')
+            elif 'Failed to decrypt with DPAPI' in msg:
+                item.error = ('Chrome 127+ 쿠키 암호화 미지원. Firefox 또는 Edge 쿠키로 변경하세요.')
+            else:
+                item.error = msg
             item.status = 'error'
-            item.error  = str(e)
             self.on_error(item)
             return
 
@@ -614,8 +621,8 @@ class DownloaderApp(tk.Tk):
                                   values=['없음', 'chrome', 'firefox', 'edge', 'brave'])
         browser_cb.pack(side='left', padx=(4, 4))
         ttk.Label(cookie_row,
-                  text='Cloudflare 차단 사이트 — 로그인된 브라우저 쿠키 사용 (없음 = 미사용)',
-                  foreground=FG2, font=('Segoe UI', 7)).pack(side='left')
+                  text='Cloudflare 차단 사이트용  ⚠ Chrome 127+은 DPAPI 미지원 → Firefox/Edge 권장',
+                  foreground=YELLOW, font=('Segoe UI', 7)).pack(side='left')
 
         # 저장 경로
         dir_row = ttk.Frame(top)
@@ -830,7 +837,20 @@ class DownloaderApp(tk.Tk):
         self._analyzing = False
         self._analyze_btn.configure(state='normal')
         self._analyze_lbl.configure(text='')
-        self._log_msg(f'분석 오류: {err}', RED)
+        if 'Could not copy' in err and 'cookie database' in err:
+            browser = self._browser_var.get()
+            self._log_msg(
+                f'쿠키 오류: {browser} 브라우저가 실행 중이면 완전히 종료 후 다시 시도하세요. '
+                '(작업 표시줄에서 브라우저 완전 종료, 백그라운드 프로세스 포함)',
+                YELLOW)
+        elif 'Failed to decrypt with DPAPI' in err or 'decrypt' in err.lower() and 'cookie' in err.lower():
+            browser = self._browser_var.get()
+            self._log_msg(
+                f'쿠키 복호화 실패: Chrome 127+ 의 App-Bound Encryption은 yt-dlp에서 지원 안 됨. '
+                f'→ Firefox 또는 Edge로 변경 후 해당 사이트 접속하여 Cloudflare 통과 후 재시도.',
+                YELLOW)
+        else:
+            self._log_msg(f'분석 오류: {err}', RED)
 
     def _enqueue(self, url: str, save_dir: str,
                  fmt_str: str, custom_title: str, quality_label: str,

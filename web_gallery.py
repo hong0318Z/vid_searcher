@@ -117,7 +117,7 @@ def _get_tag_groups(limit_tags=6, vids_per_tag=6):
 
 
 def _get_shorts(offset=0, limit=20, tag=None):
-    """세로 영상(height > width, thumb_ok=1) 목록. (id, title, dur_str) 반환."""
+    """세로 영상(height > width, thumb_ok=1) 목록을 무작위로 반환합니다."""
     c  = _conn()
     wh = ["f.width > 0", "f.height > f.width", "f.thumb_ok = 1"]
     pa = []
@@ -127,10 +127,13 @@ def _get_shorts(offset=0, limit=20, tag=None):
     where = "WHERE " + " AND ".join(wh)
     total = c.execute(
         f"SELECT COUNT(*) FROM files f {where}", pa).fetchone()[0]
+        
+    # ORDER BY f.added_at DESC 를 아래와 같이 RANDOM() 으로 수정합니다.
     rows  = c.execute(
         f"SELECT f.path, f.name, f.alias, f.duration "
-        f"FROM files f {where} ORDER BY f.added_at DESC LIMIT ? OFFSET ?",
+        f"FROM files f {where} ORDER BY RANDOM() LIMIT ? OFFSET ?",
         pa + [limit, offset]).fetchall()
+        
     out = []
     for path, name, alias, duration in rows:
         out.append({
@@ -669,14 +672,25 @@ body:has(#shorts-root){overflow:hidden}
     var img=document.createElement('img');
     img.className='si-thumb'; img.src='/thumb/'+vid.id; img.loading='lazy';
     var v=document.createElement('video');
-    v.loop=true; v.playsInline=true; v.preload='none';
+    
+    // 자동 재생을 위해 초기 상태는 음소거(muted)를 유지해야 합니다.
+    v.loop=true; v.playsInline=true; v.preload='none'; v.muted=false; 
+    
+    // 🔥 [추가] 영상 클릭 시 음소거를 해제/설정하는 로직
+    v.addEventListener('click', function() {
+      v.muted = !v.muted;
+      console.log(v.muted ? "음소거 됨" : "음소거 해제됨");
+    });
+    
     var ov=document.createElement('div'); ov.className='si-overlay';
     ov.innerHTML='<div class="si-title">'+esc(vid.title)+'</div>'
       +(vid.dur_str?'<div class="si-dur">'+esc(vid.dur_str)+'</div>':'');
+    
     var ac=document.createElement('div'); ac.className='si-actions';
     ac.innerHTML='<button class="si-btn" title="시스템 플레이어"'
-      +' onclick="event.stopPropagation();openNative(\''+vid.id+'\')">&#128194;</button>'
+      +' onclick="event.stopPropagation();openNative(`'+vid.id+'`)">&#128194;</button>'
       +'<a href="/video/'+vid.id+'" class="si-btn" title="상세 정보">&#8505;</a>';
+      
     d.append(img,v,ov,ac);
     return d;
   }
@@ -707,6 +721,17 @@ body:has(#shorts-root){overflow:hidden}
         vid.play().catch(function(){});
         el.classList.add('playing');
         refreshDOM(); maybeLoadMore();
+
+        // 🔥 추가된 부분: 다음 영상(아래쪽) 미리 버퍼링 시작 🔥
+        var nextEl = domMap.get(idx + 1);
+        if(nextEl) {
+          var nextVid = nextEl.querySelector('video');
+          if(!nextVid.src) {
+            nextVid.src = '/stream/' + nextEl.dataset.id;
+            nextVid.preload = 'auto'; // 화면에 보이기 전에 미리 다운로드
+          }
+        }
+        
       } else {
         vid.pause(); el.classList.remove('playing');
         if(Math.abs(idx-curIdx)>HALF){vid.removeAttribute('src');vid.load();}

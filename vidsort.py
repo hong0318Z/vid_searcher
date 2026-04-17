@@ -2437,6 +2437,8 @@ class VidSort(tk.Tk):
                            self._reload())).pack(side='left',padx=4)
         ttk.Button(nav,text='🔃 새로고침',
                    command=self._hard_refresh).pack(side='left',padx=8)
+        ttk.Button(nav,text='🧹 없는 파일 정리',
+                   command=self._purge_missing).pack(side='left',padx=2)
 
     def _rerender(self):
         step=int(self.thumb_step_var.get())
@@ -2820,6 +2822,7 @@ class VidSort(tk.Tk):
         m.add_command(label='🚫  웹 자동태그 제외',
                       command=lambda: self._jav_exclude(paths))
         m.add_command(label='🗑  DB에서 제거',      command=lambda:self._rm_db(paths))
+        m.add_command(label='❌  파일+DB 삭제',    command=lambda:self._delete_files(paths))
         m.tk_popup(e.x_root,e.y_root)
 
     # ── ALIAS ───────────────────────────────────
@@ -3576,6 +3579,37 @@ class VidSort(tk.Tk):
             f'{len(paths)}개를 DB에서 제거합니다.\n실제 파일은 유지됩니다.'): return
         for p in paths: self.db.remove(p)
         self._reload_sidebar(); self._reload()
+
+    def _delete_files(self, paths):
+        if not messagebox.askyesno('파일 삭제',
+            f'{len(paths)}개를 디스크에서 삭제하고 DB에서도 제거합니다.\n'
+            '이 작업은 되돌릴 수 없습니다.'): return
+        failed = []
+        for p in paths:
+            try:
+                os.remove(longpath(p))
+            except Exception as e:
+                failed.append(f'{Path(p).name}: {e}')
+            self.db.remove(p)
+        self._reload_sidebar(); self._reload()
+        if failed:
+            messagebox.showwarning('일부 실패', '\n'.join(failed))
+
+    def _purge_missing(self):
+        self._set_status('없는 파일 검사 중...')
+        self.update_idletasks()
+        def _worker():
+            all_paths = [r[0] for r in
+                         self.db.conn.execute('SELECT path FROM files').fetchall()]
+            missing = [p for p in all_paths if not os.path.exists(longpath(p))]
+            for p in missing:
+                self.db.remove(p)
+            self.after(0, lambda: (
+                self._set_status(f'정리 완료 — {len(missing)}개 제거'),
+                self._reload_sidebar(),
+                self._reload(),
+            ))
+        threading.Thread(target=_worker, daemon=True).start()
 
     # ── 폴더 현황 ───────────────────────────────
     def _show_folder_overview(self):

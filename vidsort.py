@@ -2382,6 +2382,16 @@ class VidSort(tk.Tk):
             sort, short, search or None,
             offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search,
             sort_asc=sort_asc)
+
+        # 현재 페이지에서 실제로 존재하지 않는 파일 제거
+        missing = [v['path'] for v in rows
+                   if not os.path.exists(longpath(v['path']))]
+        if missing:
+            for p in missing:
+                self.db.remove(p)
+            rows  = [v for v in rows if v['path'] not in missing]
+            total = max(0, total - len(missing))
+
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
         self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map))

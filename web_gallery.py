@@ -1010,10 +1010,22 @@ def serve_tag_thumb(tagname):
 
 @app.route('/thumb/<h>')
 def serve_thumb(h):
+    # ThumbDB 우선, 없으면 개별 파일 폴백
+    thumb_db_path = Path(_cfg['thumb_dir']).parent / 'thumbs.db'
+    if thumb_db_path.exists():
+        try:
+            import sqlite3 as _s3
+            conn = _s3.connect(str(thumb_db_path), check_same_thread=False)
+            row = conn.execute("SELECT data FROM thumbs WHERE hash=?", (h,)).fetchone()
+            conn.close()
+            if row:
+                return Response(bytes(row[0]), mimetype='image/jpeg',
+                                headers={'Cache-Control': 'max-age=86400'})
+        except Exception:
+            pass
     p = Path(_cfg['thumb_dir']) / (h + '.jpg')
     if p.exists():
-        return send_file(str(p), mimetype='image/jpeg',
-                         max_age=86400)
+        return send_file(str(p), mimetype='image/jpeg', max_age=86400)
     abort(404)
 
 @app.route('/stream/<vid_id>')

@@ -272,6 +272,52 @@ class LLMClient:
         except Exception as e:
             return f"(설명 생성 실패: {e})"
 
+    def analyze_actor_names(self, names: list) -> dict:
+        """배우 이름 목록 분석 → JAV/서양 분류 + 영문 슬러그 추출.
+        반환: {
+          "배우명": {
+            "type": "jav"|"western"|"unknown",
+            "javdb_slug": "rei-saegusa",     # javdatabase.com 용 (하이픈, 소문자)
+            "babepedia_slug": "Rei_Saegusa", # babepedia.com 용 (언더바, 대소문자)
+            "variants": ["slug1", "slug2"]   # 추가 시도 슬러그
+          }
+        }"""
+        if not names:
+            return {}
+        lines = '\n'.join(f'{i+1}. {n}' for i, n in enumerate(names))
+        prompt = (
+            '아래 AV 배우 이름 목록을 분석해주세요.\n'
+            '각 배우에 대해:\n'
+            '1. JAV(일본 성인영상) 배우인지, 서양(Western) 배우인지 판단\n'
+            '2. javdatabase.com URL 슬러그 추출 (소문자, 하이픈 구분, 예: rei-saegusa)\n'
+            '3. babepedia.com URL 슬러그 추출 (언더바 구분, 대소문자, 예: Rei_Saegusa)\n'
+            '4. 오타/별명이 있을 경우 추가 슬러그 variants에 포함\n\n'
+            '반드시 JSON만 출력:\n'
+            '{\n'
+            '  "배우명": {\n'
+            '    "type": "jav"|"western"|"unknown",\n'
+            '    "javdb_slug": "영문-하이픈",\n'
+            '    "babepedia_slug": "English_Underscore",\n'
+            '    "variants": ["alt-slug1", "Alt_Slug2"]\n'
+            '  }, ...\n'
+            '}\n\n'
+            f'배우 목록:\n{lines}'
+        )
+        try:
+            raw = self._chat(
+                [{'role': 'system',
+                  'content': '당신은 성인 영상 배우 데이터베이스 전문가입니다. JSON만 출력하세요.'},
+                 {'role': 'user', 'content': prompt}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+            )
+            if raw.startswith('```'):
+                raw = raw.split('```')[1].lstrip('json').strip()
+            brace = raw.find('{')
+            if brace > 0: raw = raw[brace:]
+            return json.loads(raw.strip())
+        except Exception:
+            return {}
+
     def classify_tags(self, tag_list: list) -> dict:
         """태그 목록 → {"태그명": "행위"|"인물"|"레이블"|"기타"} 분류.
         판단 불가한 경우 "기타"로 반환."""

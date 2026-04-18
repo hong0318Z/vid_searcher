@@ -75,7 +75,8 @@ except (ImportError, OSError, FileNotFoundError) as _vlc_load_err:
 #  CONSTANTS
 # ─────────────────────────────────────────────────────
 _BASE     = Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).parent
-THUMB_DIR = _BASE / ".thumbs"
+THUMB_DIR    = _BASE / ".thumbs"
+THUMB_DB_PATH = _BASE / "thumbs.db"
 DB_PATH   = _BASE / "vidsort.db"
 CFG_PATH  = _BASE / "vidsort_cfg.json"
 
@@ -778,20 +779,84 @@ class DB:
     def close(self): self.conn.close()
 
 # ─────────────────────────────────────────────────────
+#  THUMB DB — 썸네일 패키징 (SQLite blob 단일 파일)
+# ─────────────────────────────────────────────────────
+class ThumbDB:
+    """썸네일 이미지를 SQLite BLOB으로 저장하는 단일 파일 패키지."""
+    def __init__(self, db_path: Path):
+        self._path = db_path
+        self._conn = None
+        self._lock = threading.Lock()
+
+    def _c(self):
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS thumbs (hash TEXT PRIMARY KEY, data BLOB)")
+            self._conn.commit()
+        return self._conn
+
+    def has(self, h: str) -> bool:
+        return bool(self._c().execute(
+            "SELECT 1 FROM thumbs WHERE hash=?", (h,)).fetchone())
+
+    def get(self, h: str):
+        r = self._c().execute("SELECT data FROM thumbs WHERE hash=?", (h,)).fetchone()
+        return bytes(r[0]) if r else None
+
+    def put(self, h: str, data: bytes):
+        with self._lock:
+            self._c().execute(
+                "INSERT OR REPLACE INTO thumbs VALUES (?,?)", (h, sqlite3.Binary(data)))
+            self._c().commit()
+
+    def remove(self, h: str):
+        with self._lock:
+            self._c().execute("DELETE FROM thumbs WHERE hash=?", (h,))
+            self._c().commit()
+
+    def all_hashes(self) -> set:
+        return {r[0] for r in self._c().execute("SELECT hash FROM thumbs").fetchall()}
+
+    def count(self) -> int:
+        return self._c().execute("SELECT COUNT(*) FROM thumbs").fetchone()[0]
+
+_thumb_db = ThumbDB(THUMB_DB_PATH)
+
+# ─────────────────────────────────────────────────────
 #  HELPERS
 # ─────────────────────────────────────────────────────
 def thumb_file(path):
     THUMB_DIR.mkdir(exist_ok=True)
     return THUMB_DIR/(hashlib.md5(path.encode()).hexdigest()+'.jpg')
 
+def open_thumb(path: str):
+    """ThumbDB 또는 개별 파일에서 PIL Image 반환. 없으면 None."""
+    import io as _io
+    h = hashlib.md5(path.encode()).hexdigest()
+    data = _thumb_db.get(h)
+    if data:
+        try: return Image.open(_io.BytesIO(data))
+        except Exception: pass
+    tf = THUMB_DIR / (h + '.jpg')
+    if tf.exists():
+        try: return Image.open(tf)
+        except Exception: pass
+    return None
+
 # 썸네일 존재 세트 — 앱 시작 시 한 번만 스캔, 이후 세트 조회만
 _thumb_exists: set = set()
 
 def build_thumb_cache():
-    """THUMB_DIR 스캔해서 존재하는 해시 세트 구축"""
+    """THUMB_DIR + ThumbDB 스캔해서 존재하는 해시 세트 구축"""
     global _thumb_exists
+    s = set()
     if THUMB_DIR.exists():
-        _thumb_exists = {f.stem for f in THUMB_DIR.iterdir() if f.suffix=='.jpg'}
+        s.update(f.stem for f in THUMB_DIR.iterdir() if f.suffix == '.jpg')
+    s.update(_thumb_db.all_hashes())
+    _thumb_exists = s
 
 def thumb_cached(path: str) -> bool:
     return hashlib.md5(path.encode()).hexdigest() in _thumb_exists
@@ -923,12 +988,12 @@ class CanvasGrid(tk.Frame):
             self.cv.itemconfig('dbg_overlay', state='hidden')
 
     def refresh_thumb(self, path):
-        tf = thumb_file(path)
-        if not tf.exists(): return
+        if not thumb_cached(path): return
         tw, th = self._tw, self._th
         cache_key = f'{path}_{tw}_{th}'
         try:
-            img = Image.open(tf)
+            img = open_thumb(path)
+            if img is None: return
             iw,ih = img.size
             scale = min(tw/iw, th/ih) if iw and ih else 1
             nw,nh = max(1,int(iw*scale)), max(1,int(ih*scale))
@@ -1032,16 +1097,16 @@ class CanvasGrid(tk.Frame):
         th_tag    = f't{ph_key}'
         cache_key = f'{path}_{tw}_{th}'
         if cache_key not in self._img_cache and thumb_cached(path):
-            tf = thumb_file(path)
             try:
-                img = Image.open(tf)
-                iw,ih = img.size
-                scale = min(tw/iw,th/ih) if iw and ih else 1
-                nw,nh = max(1,int(iw*scale)),max(1,int(ih*scale))
-                img = img.resize((nw,nh),Image.LANCZOS)
-                ph  = ImageTk.PhotoImage(img)
-                self._img_cache[cache_key] = ph
-                self._phs[path] = ph
+                img = open_thumb(path)
+                if img:
+                    iw,ih = img.size
+                    scale = min(tw/iw,th/ih) if iw and ih else 1
+                    nw,nh = max(1,int(iw*scale)),max(1,int(ih*scale))
+                    img = img.resize((nw,nh),Image.LANCZOS)
+                    ph  = ImageTk.PhotoImage(img)
+                    self._img_cache[cache_key] = ph
+                    self._phs[path] = ph
             except: pass
 
         cx=x+cw//2; cy=y+th//2+4
@@ -1278,11 +1343,84 @@ class VidSort(tk.Tk):
         self._build_ui()
         self._check_ffmpeg()
 
-        # 썸네일 존재 세트 백그라운드 빌드 (존재 확인을 세트 조회로 대체)
-        threading.Thread(target=build_thumb_cache, daemon=True).start()
+        # 썸네일 존재 세트 빌드 + 마이그레이션 체크
+        threading.Thread(target=self._thumb_startup, daemon=True).start()
 
         self._reload_sidebar()
         self._reload()
+
+    # ── 썸네일 DB 시작 + 자동 마이그레이션 ────────
+    def _thumb_startup(self):
+        """백그라운드: 존재 세트 빌드 후 개별 파일이 있으면 자동 패키징."""
+        build_thumb_cache()
+        # thumbs.db가 비어있고 .thumbs/에 파일이 있으면 → 자동 마이그레이션
+        if THUMB_DIR.exists():
+            loose = [f for f in THUMB_DIR.iterdir() if f.suffix == '.jpg']
+            if loose and _thumb_db.count() == 0:
+                self.after(0, self._auto_migrate_thumbs)
+
+    def _auto_migrate_thumbs(self):
+        """처음 실행 시 .thumbs/*.jpg → thumbs.db 자동 패키징 다이얼로그."""
+        if not messagebox.askyesno(
+                '썸네일 패키징',
+                '.thumbs/ 폴더에 개별 썸네일 파일이 발견되었습니다.\n\n'
+                'thumbs.db 단일 파일로 패키징하면 파일 수가 크게 줄어듭니다.\n'
+                '(패키징 후 개별 파일은 자동 삭제됩니다)\n\n'
+                '지금 패키징하시겠습니까?'):
+            return
+        self._package_thumbs_dlg()
+
+    def _package_thumbs_dlg(self):
+        """썸네일 패키징 진행 다이얼로그."""
+        loose = [f for f in THUMB_DIR.iterdir() if f.suffix == '.jpg'] \
+                if THUMB_DIR.exists() else []
+        already = _thumb_db.count()
+        total = len(loose)
+        if total == 0:
+            messagebox.showinfo('패키징', f'패키징할 파일이 없습니다.\n(현재 thumbs.db: {already}개)')
+            return
+
+        dlg = tk.Toplevel(self); dlg.title('🗜 썸네일 패키징')
+        dlg.configure(bg='#0d0d14'); dlg.geometry('420x200')
+        dlg.resizable(False, False); dlg.grab_set()
+
+        tk.Label(dlg, text='썸네일 패키징 중...',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(18, 6))
+        lbl = tk.Label(dlg, text=f'0 / {total}',
+                       bg='#0d0d14', fg='#7c6ff7', font=('Consolas', 10))
+        lbl.pack()
+        pb = ttk.Progressbar(dlg, maximum=total)
+        pb.pack(fill='x', padx=24, pady=8)
+        name_lbl = tk.Label(dlg, text='', bg='#0d0d14', fg='#555',
+                            font=('Consolas', 8))
+        name_lbl.pack()
+
+        def worker():
+            done = 0
+            for f in loose:
+                try:
+                    data = f.read_bytes()
+                    _thumb_db.put(f.stem, data)
+                    f.unlink()
+                except Exception:
+                    pass
+                done += 1
+                def _upd(d=done, n=f.name):
+                    pb.config(value=d)
+                    lbl.config(text=f'{d} / {total}')
+                    name_lbl.config(text=n[:60])
+                dlg.after(0, _upd)
+
+            build_thumb_cache()
+            def finish():
+                dlg.destroy()
+                messagebox.showinfo('패키징 완료',
+                    f'{done}개 썸네일 → thumbs.db 패키징 완료\n'
+                    f'.thumbs/ 폴더의 개별 파일이 삭제되었습니다.')
+            dlg.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── STYLE ───────────────────────────────────
     def _style(self):
@@ -2479,39 +2617,43 @@ class VidSort(tk.Tk):
 
     # ── 인물 일괄 처리 ───────────────────────────
     def _person_tags_dlg(self, parent_win):
-        """인물(tag_type='인물') 태그 배우 정보 일괄 검색."""
+        """인물(tag_type='인물') 태그 배우 정보 1차 초벌/2차 후벌 2단계 처리."""
         dlg = tk.Toplevel(parent_win); dlg.title('👤 인물 일괄 처리')
-        dlg.configure(bg='#0d0d14'); dlg.geometry('680x520')
+        dlg.configure(bg='#0d0d14'); dlg.geometry('780x580')
         dlg.resizable(True, True); dlg.grab_set()
 
-        tk.Label(dlg, text='인물 태그 배우 정보 일괄 검색',
+        tk.Label(dlg, text='인물 태그 배우 정보 일괄 수집',
                  bg='#0d0d14', fg='#dcdcf0',
                  font=('Consolas', 11, 'bold')).pack(pady=(12, 4))
 
-        # 옵션
-        opt_f = tk.Frame(dlg, bg='#0d0d14')
-        opt_f.pack(fill='x', padx=16, pady=2)
-        tk.Label(opt_f, text='작업수:', bg='#0d0d14', fg='#aaa',
-                 font=('Consolas', 9)).pack(side='left')
-        count_var = tk.IntVar(value=10)
-        tk.Spinbox(opt_f, from_=1, to=100, textvariable=count_var,
-                   width=5, bg='#1a1a28', fg='#dcdcf0',
-                   font=('Consolas', 9)).pack(side='left', padx=4)
-        skip_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(opt_f, text='이미 정보 있는 태그 건너뜀',
-                       variable=skip_var, bg='#0d0d14', fg='#aaa',
-                       selectcolor='#7c6ff7', activebackground='#0d0d14',
-                       font=('Consolas', 9)).pack(side='left', padx=8)
+        # 임시 풀: {tag: raw_text}
+        draft_pool = {}
 
-        # 본문: 좌측 리스트 + 우측 미리보기
+        # 태그 로드 — [(tag, extra_info), ...]
+        rows = self.db.conn.execute(
+            "SELECT t.tag, COALESCE(m.extra_info,'') FROM "
+            "(SELECT DISTINCT tag FROM tags) t "
+            "LEFT JOIN tag_meta m ON t.tag=m.tag "
+            "WHERE COALESCE(m.tag_type,'')='인물' ORDER BY t.tag").fetchall()
+        person_tags = list(rows)
+
+        # 상태: 'none' / 'draft' / 'done'
+        tag_status = {tag: ('done' if extra.strip() else 'none')
+                      for tag, extra in person_tags}
+
+        def _marker(tag):
+            s = tag_status.get(tag, 'none')
+            return {'done': '✅', 'draft': '📋', 'none': '⬜'}[s]
+
+        # ── 본문 레이아웃 ──
         body_f = tk.Frame(dlg, bg='#0d0d14')
         body_f.pack(fill='both', expand=True, padx=12, pady=4)
 
-        left_f = tk.Frame(body_f, bg='#0d0d14', width=220)
+        left_f = tk.Frame(body_f, bg='#0d0d14', width=240)
         left_f.pack(side='left', fill='y', padx=(0, 6))
         left_f.pack_propagate(False)
-        tk.Label(left_f, text='인물 태그', bg='#0d0d14', fg='#888',
-                 font=('Consolas', 9)).pack(anchor='w')
+        tk.Label(left_f, text='인물 태그  (⬜미처리 / 📋초벌완료 / ✅저장완료)',
+                 bg='#0d0d14', fg='#888', font=('Consolas', 8)).pack(anchor='w')
         lb_sb = ttk.Scrollbar(left_f, orient='vertical')
         person_lb = tk.Listbox(left_f, bg='#1a1a28', fg='#ff9090',
                                selectbackground='#7c6ff7', selectforeground='#fff',
@@ -2521,91 +2663,274 @@ class VidSort(tk.Tk):
         lb_sb.pack(side='right', fill='y')
         person_lb.pack(fill='both', expand=True)
 
+        for tag, _ in person_tags:
+            person_lb.insert('end', f'{_marker(tag)} {tag}')
+
         right_f = tk.Frame(body_f, bg='#0d0d14')
         right_f.pack(side='left', fill='both', expand=True)
-        tk.Label(right_f, text='상세 정보', bg='#0d0d14', fg='#888',
-                 font=('Consolas', 9)).pack(anchor='w')
+
+        right_hdr_f = tk.Frame(right_f, bg='#0d0d14')
+        right_hdr_f.pack(fill='x')
+        preview_lbl = tk.Label(right_hdr_f, text='미리보기 (초벌/최종)',
+                               bg='#0d0d14', fg='#888', font=('Consolas', 9))
+        preview_lbl.pack(side='left', anchor='w')
+        save_one_btn = ttk.Button(right_hdr_f, text='💾 이 항목 저장',
+                                  style='Acc.TButton')
+        save_one_btn.pack(side='right', padx=4)
+        save_one_btn.config(state='disabled')
+
         preview_txt = tk.Text(right_f, bg='#0a0a12', fg='#dcdcf0',
                               font=('Consolas', 9), relief='flat', bd=0,
                               highlightthickness=1, highlightbackground='#2a2a3d',
-                              state='disabled', wrap='word')
+                              wrap='word')
         preview_txt.pack(fill='both', expand=True)
 
-        # 태그 로드
-        rows = self.db.conn.execute(
-            "SELECT t.tag, COALESCE(m.extra_info,'') FROM "
-            "(SELECT DISTINCT tag FROM tags) t "
-            "LEFT JOIN tag_meta m ON t.tag=m.tag "
-            "WHERE COALESCE(m.tag_type,'')='인물' ORDER BY t.tag").fetchall()
-        person_tags = list(rows)  # [(tag, extra_info), ...]
-
-        for tag, extra in person_tags:
-            marker = '✓' if extra.strip() else ' '
-            person_lb.insert('end', f'{marker} {tag}')
+        selected_tag = [None]
 
         def on_lb_select(e=None):
             sel = person_lb.curselection()
             if not sel: return
-            _, extra = person_tags[sel[0]]
+            tag = person_tags[sel[0]][0]
+            selected_tag[0] = tag
             preview_txt.config(state='normal')
             preview_txt.delete('1.0', 'end')
-            preview_txt.insert('1.0', extra or '(정보 없음)')
-            preview_txt.config(state='disabled')
+            s = tag_status.get(tag, 'none')
+            if s == 'done':
+                extra = next((ex for t, ex in person_tags if t == tag), '')
+                preview_txt.insert('1.0', extra or '(저장된 정보 없음)')
+                save_one_btn.config(state='disabled')
+            elif s == 'draft':
+                preview_txt.insert('1.0', draft_pool.get(tag, '(초벌 데이터 없음)'))
+                save_one_btn.config(state='normal')
+            else:
+                preview_txt.insert('1.0', '(아직 수집되지 않음)')
+                save_one_btn.config(state='disabled')
 
         person_lb.bind('<<ListboxSelect>>', on_lb_select)
 
-        # 진행 바 + 로그
+        def _refresh_lb_item(tag):
+            idx = next((i for i, (t, _) in enumerate(person_tags) if t == tag), None)
+            if idx is None: return
+            person_lb.delete(idx)
+            person_lb.insert(idx, f'{_marker(tag)} {tag}')
+            person_lb.selection_set(idx)
+
+        def save_single():
+            tag = selected_tag[0]
+            if not tag or tag_status.get(tag) != 'draft': return
+            raw = draft_pool.get(tag, '')
+            self.db.set_tag_extra_info(tag, raw)
+            idx = next((i for i, (t, _) in enumerate(person_tags) if t == tag), None)
+            if idx is not None:
+                person_tags[idx] = (tag, raw)
+            tag_status[tag] = 'done'
+            _refresh_lb_item(tag)
+            save_one_btn.config(state='disabled')
+
+        save_one_btn.config(command=save_single)
+
+        # ── 하단 컨트롤 ──
+        ctrl_f = tk.Frame(dlg, bg='#0d0d14')
+        ctrl_f.pack(fill='x', padx=12, pady=(2, 4))
+
+        # 진행 바 + 상태
         pb = ttk.Progressbar(dlg)
-        pb.pack(fill='x', padx=12, pady=(4, 2))
+        pb.pack(fill='x', padx=12, pady=(2, 0))
         status_lbl = tk.Label(dlg, text='', bg='#0d0d14', fg='#7c6ff7',
                               font=('Consolas', 8))
         status_lbl.pack()
 
         running = [False]
 
-        def start_batch():
+        # 2차 작업수
+        p2_f = tk.Frame(ctrl_f, bg='#0d0d14')
+        p2_f.pack(side='right', padx=4)
+        tk.Label(p2_f, text='2차 작업수:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        count2_var = tk.IntVar(value=10)
+        tk.Spinbox(p2_f, from_=1, to=200, textvariable=count2_var,
+                   width=5, bg='#1a1a28', fg='#dcdcf0',
+                   font=('Consolas', 9)).pack(side='left', padx=4)
+        skip2_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(p2_f, text='이미 저장된 태그 건너뜀',
+                       variable=skip2_var, bg='#0d0d14', fg='#aaa',
+                       selectcolor='#7c6ff7', activebackground='#0d0d14',
+                       font=('Consolas', 9)).pack(side='left')
+
+        btn_row = tk.Frame(ctrl_f, bg='#0d0d14')
+        btn_row.pack(side='left', fill='x', expand=True)
+
+        phase1_btn = ttk.Button(btn_row, text='▶ 1차 초벌  (스크래핑)',
+                                style='Acc.TButton')
+        phase1_btn.pack(side='left', padx=(0, 6))
+
+        phase2_btn = ttk.Button(btn_row, text='▶ 2차 후벌  (LLM 완성 + 저장)',
+                                style='Acc.TButton')
+        phase2_btn.pack(side='left', padx=(0, 6))
+
+        save_all_btn = ttk.Button(btn_row, text='💾 초벌 전체 저장',
+                                  style='Acc.TButton')
+        save_all_btn.pack(side='left')
+
+        # ── 1차 초벌: LLM 이름 분석 → 스크래핑 → draft_pool ──
+        def phase1():
             if running[0]: return
             running[0] = True
-            start_btn.config(state='disabled')
-            count = count_var.get()
-            skip = skip_var.get()
-            target = [(i, tag, extra) for i, (tag, extra) in enumerate(person_tags)
-                      if not skip or not extra.strip()][:count]
-            pb.config(maximum=max(len(target), 1), value=0)
-            status_lbl.config(text=f'총 {len(target)}개 처리 예정...')
+            phase1_btn.config(state='disabled')
+            phase2_btn.config(state='disabled')
+
+            targets = [tag for tag, _ in person_tags]
+            pb.config(maximum=max(len(targets), 1), value=0)
+            status_lbl.config(text=f'1차 초벌: {len(targets)}개 배우 이름 분석 중...')
 
             def worker():
-                from jav_scraper import fetch_actress_info
+                from jav_scraper import (fetch_actress_info,
+                                         fetch_javdatabase_info,
+                                         fetch_babepedia_info)
                 client = self._get_llm_client()
-                for done, (idx, tag, _) in enumerate(target, 1):
+                # LLM으로 전체 이름 한번에 분석
+                analysis = {}
+                if client:
+                    try:
+                        analysis = client.analyze_actor_names(targets)
+                    except Exception as ex:
+                        dlg.after(0, lambda e=ex: status_lbl.config(
+                            text=f'LLM 분석 오류: {e}'))
+
+                for done, tag in enumerate(targets, 1):
                     dlg.after(0, lambda t=tag, d=done:
-                              status_lbl.config(text=f'[{d}/{len(target)}] {t} 검색 중...'))
-                    raw, err = fetch_actress_info(tag)
-                    info = raw
-                    if client and (raw or not err):
-                        try:
-                            info = client.generate_actor_info(tag, raw)
-                        except Exception:
-                            info = raw
-                    self.db.set_tag_extra_info(tag, info)
-                    person_tags[idx] = (tag, info)
-                    def upd(i=idx, t=tag, inf=info, d=done):
-                        marker = '✓' if inf.strip() else ' '
-                        person_lb.delete(i); person_lb.insert(i, f'{marker} {t}')
+                              status_lbl.config(
+                                  text=f'[{d}/{len(targets)}] {t} 스크래핑 중...'))
+                    raw_parts = []
+                    info = analysis.get(tag, {})
+                    actor_type = info.get('type', 'unknown')
+                    javdb_slug = info.get('javdb_slug', '')
+                    babe_slug = info.get('babepedia_slug', '')
+                    variants = info.get('variants', [])
+
+                    # JAV 배우: javdatabase + javdb
+                    if actor_type in ('jav', 'unknown'):
+                        slugs_to_try = []
+                        if javdb_slug: slugs_to_try.append(javdb_slug)
+                        slugs_to_try += [v for v in variants
+                                         if v and '-' in v and v not in slugs_to_try]
+                        for slug in slugs_to_try[:3]:
+                            raw, err = fetch_javdatabase_info(slug)
+                            if raw:
+                                raw_parts.append(f'[javdatabase]\n{raw}')
+                                break
+                        jdb_raw, _ = fetch_actress_info(tag)
+                        if jdb_raw:
+                            raw_parts.append(f'[javdb]\n{jdb_raw}')
+
+                    # 서양 배우: babepedia
+                    if actor_type in ('western', 'unknown'):
+                        slugs_to_try = []
+                        if babe_slug: slugs_to_try.append(babe_slug)
+                        slugs_to_try += [v for v in variants
+                                         if v and '_' in v and v not in slugs_to_try]
+                        for slug in slugs_to_try[:3]:
+                            raw, err = fetch_babepedia_info(slug)
+                            if raw:
+                                raw_parts.append(f'[babepedia]\n{raw}')
+                                break
+
+                    combined = '\n\n'.join(raw_parts) if raw_parts else ''
+                    draft_pool[tag] = combined
+                    if combined:
+                        tag_status[tag] = 'draft'
+                    pb_val = done
+
+                    def upd(t=tag, d=pb_val):
+                        _refresh_lb_item(t)
                         pb.config(value=d)
                     dlg.after(0, upd)
 
                 def finish():
-                    status_lbl.config(text=f'완료! {len(target)}개 처리')
-                    start_btn.config(state='normal')
+                    drafted = sum(1 for v in draft_pool.values() if v)
+                    status_lbl.config(
+                        text=f'1차 초벌 완료: {drafted}/{len(targets)}개 데이터 수집')
+                    phase1_btn.config(state='normal')
+                    phase2_btn.config(state='normal')
                     running[0] = False
                 dlg.after(0, finish)
 
             threading.Thread(target=worker, daemon=True).start()
 
-        start_btn = ttk.Button(dlg, text='▶ 일괄 검색 시작',
-                               style='Acc.TButton', command=start_batch)
-        start_btn.pack(pady=(0, 8))
+        # ── 2차 후벌: draft_pool → LLM generate_actor_info → DB 저장 ──
+        def phase2():
+            if running[0]: return
+            client = self._get_llm_client()
+            if not client:
+                status_lbl.config(text='LLM 클라이언트 없음 — 설정을 확인하세요')
+                return
+            running[0] = True
+            phase1_btn.config(state='disabled')
+            phase2_btn.config(state='disabled')
+
+            skip = skip2_var.get()
+            count = count2_var.get()
+            targets = [(tag, draft_pool.get(tag, ''))
+                       for tag, _ in person_tags
+                       if draft_pool.get(tag, '')
+                       and (not skip or tag_status.get(tag) != 'done')]
+            targets = targets[:count]
+            pb.config(maximum=max(len(targets), 1), value=0)
+            status_lbl.config(text=f'2차 후벌: {len(targets)}개 LLM 처리 예정...')
+
+            def worker():
+                for done, (tag, raw) in enumerate(targets, 1):
+                    dlg.after(0, lambda t=tag, d=done:
+                              status_lbl.config(
+                                  text=f'[{d}/{len(targets)}] {t} LLM 처리 중...'))
+                    try:
+                        info = client.generate_actor_info(tag, raw)
+                    except Exception:
+                        info = raw
+                    self.db.set_tag_extra_info(tag, info)
+                    idx = next((i for i, (t, _) in enumerate(person_tags) if t == tag), None)
+                    if idx is not None:
+                        person_tags[idx] = (tag, info)
+                    tag_status[tag] = 'done'
+                    pb_val = done
+
+                    def upd(t=tag, inf=info, d=pb_val):
+                        _refresh_lb_item(t)
+                        pb.config(value=d)
+                        if selected_tag[0] == t:
+                            preview_txt.config(state='normal')
+                            preview_txt.delete('1.0', 'end')
+                            preview_txt.insert('1.0', inf)
+                            save_one_btn.config(state='disabled')
+                    dlg.after(0, upd)
+
+                def finish():
+                    status_lbl.config(text=f'2차 후벌 완료: {len(targets)}개 저장')
+                    phase1_btn.config(state='normal')
+                    phase2_btn.config(state='normal')
+                    running[0] = False
+                dlg.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        # ── 초벌 전체 저장 (LLM 없이 raw 그대로) ──
+        def save_all_drafts():
+            saved = 0
+            for tag, raw in draft_pool.items():
+                if not raw: continue
+                if tag_status.get(tag) == 'done': continue
+                self.db.set_tag_extra_info(tag, raw)
+                idx = next((i for i, (t, _) in enumerate(person_tags) if t == tag), None)
+                if idx is not None:
+                    person_tags[idx] = (tag, raw)
+                tag_status[tag] = 'done'
+                _refresh_lb_item(tag)
+                saved += 1
+            status_lbl.config(text=f'초벌 {saved}개 저장 완료')
+
+        phase1_btn.config(command=phase1)
+        phase2_btn.config(command=phase2)
+        save_all_btn.config(command=save_all_drafts)
 
     # ── 행위 일괄 처리 ───────────────────────────
     def _action_tags_dlg(self, parent_win):
@@ -3160,13 +3485,14 @@ class VidSort(tk.Tk):
             if cache_key in self._img_cache: continue
             if not thumb_cached(path): continue
             try:
-                img = Image.open(thumb_file(path))
-                iw,ih = img.size
-                scale = min(tw/iw, th/ih) if iw and ih else 1
-                nw,nh = max(1,int(iw*scale)), max(1,int(ih*scale))
-                img = img.resize((nw,nh), Image.LANCZOS)
-                ph  = ImageTk.PhotoImage(img)
-                self._img_cache[cache_key] = ph
+                img = open_thumb(path)
+                if img:
+                    iw,ih = img.size
+                    scale = min(tw/iw, th/ih) if iw and ih else 1
+                    nw,nh = max(1,int(iw*scale)), max(1,int(ih*scale))
+                    img = img.resize((nw,nh), Image.LANCZOS)
+                    ph  = ImageTk.PhotoImage(img)
+                    self._img_cache[cache_key] = ph
             except: pass
 
     # ── SCAN ────────────────────────────────────
@@ -3295,7 +3621,7 @@ class VidSort(tk.Tk):
         if not FFMPEG: return
         all_v = self.db.get_all_for_thumbs(folder=folder)
         todo  = [v for v in all_v
-                 if not v.get('thumb_ok') or not thumb_file(v['path']).exists()]
+                 if not v.get('thumb_ok') or not thumb_cached(v['path'])]
         if not todo: return
 
         # 이미 실행 중이면 큐에 추가
@@ -3409,6 +3735,13 @@ class VidSort(tk.Tk):
             self.db.update_thumb(v['path'],w,h,dur)
             v.update({'thumb_ok':1,'width':w,'height':h,'duration':dur})
             register_thumb(v['path'])   # 존재 세트에 추가
+            # ThumbDB에도 저장 후 파일 삭제
+            try:
+                _thumb_db.put(hashlib.md5(v['path'].encode()).hexdigest(),
+                              tf.read_bytes())
+                tf.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     # ── SELECTION ───────────────────────────────
     def _click(self,e,path):
@@ -3771,14 +4104,12 @@ class VidSort(tk.Tk):
                 w.destroy()
             thumb_lbl[0] = None
             try:
-                from PIL import Image as _I, ImageTk as _IT
-                tf = thumb_file(p)
-                if tf.exists():
-                    img = _I.open(tf)
+                img = open_thumb(p)
+                if img:
                     fw = max(player_frame.winfo_width(), 480)
                     fh = max(player_frame.winfo_height(), 300)
-                    img.thumbnail((fw, fh - 40), _I.LANCZOS)
-                    photo = _IT.PhotoImage(img)
+                    img.thumbnail((fw, fh - 40), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
                     lbl = tk.Label(player_frame, image=photo, bg='#000',
                                    cursor='hand2')
                     lbl.image = photo
@@ -4317,10 +4648,12 @@ class VidSort(tk.Tk):
             # 해당 폴더 파일들의 썸네일만 삭제
             rows = self.db.get_all_for_thumbs(folder=folder)
             for v in rows:
-                tf = thumb_file(v['path'])
+                h = hashlib.md5(v['path'].encode()).hexdigest()
+                tf = THUMB_DIR / (h + '.jpg')
                 if tf.exists():
                     tf.unlink()
                     deleted += 1
+                _thumb_db.remove(h)
         else:
             # 전체 .thumbs 폴더 삭제 후 재생성
             if THUMB_DIR.exists():
@@ -4328,6 +4661,10 @@ class VidSort(tk.Tk):
                     if f.suffix == '.jpg':
                         f.unlink()
                         deleted += 1
+            # ThumbDB도 초기화
+            if THUMB_DB_PATH.exists():
+                THUMB_DB_PATH.unlink()
+                _thumb_db._conn = None
 
         # 메모리 캐시도 초기화
         self._img_cache.clear()
@@ -4455,8 +4792,10 @@ class VidSort(tk.Tk):
                     if target.exists():
                         target.unlink()
                     self.db.remove(path)
-                    tf = thumb_file(path)
+                    h = hashlib.md5(path.encode()).hexdigest()
+                    tf = THUMB_DIR / (h + '.jpg')
                     if tf.exists(): tf.unlink()
+                    _thumb_db.remove(h)
                     deleted_count += 1
                 except Exception as e:
                     print(f"삭제 실패: {path} - {e}")

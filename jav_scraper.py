@@ -1004,12 +1004,18 @@ def fetch_javdatabase_info(slug: str) -> tuple:
     soup = _soup(r.text)
     info = {}
 
-    # 이름
+    # 이름 — 페이지 h1 우선
     h1 = soup.select_one('h1, .idol-name, .entry-title')
     info['이름'] = h1.get_text(strip=True) if h1 else slug
 
-    # 프로필 테이블/DL 파싱 — <table tr>, <dl dt/dd> 모두 시도
-    def _parse_kv_rows(rows):
+    # 프로필 컬럼 타겟: <div class="col-12 col-xxl-7 ...">
+    # javdatabase.com 레이아웃: 왼쪽 이미지(col-5), 오른쪽 프로필(col-7)
+    profile_root = (soup.select_one('div.col-xxl-7')
+                    or soup.select_one('div.col-xl-7')
+                    or soup.select_one('div.col-lg-7')
+                    or soup)
+
+    def _parse_kv(rows):
         for row in rows:
             if row.name == 'dt':
                 key = row.get_text(strip=True).rstrip(':：')
@@ -1021,7 +1027,7 @@ def fetch_javdatabase_info(slug: str) -> tuple:
                     continue
                 key = cells[0].get_text(strip=True).rstrip(':：')
                 val = cells[1].get_text(' ', strip=True)
-            if not val or val in ('-', 'N/A', 'Unknown', '?'):
+            if not val or val in ('-', 'N/A', 'Unknown', '?', ''):
                 continue
             kl = key.lower()
             if any(k in kl for k in ['birth', '생일', '誕生', 'birthday', 'born']):
@@ -1041,25 +1047,35 @@ def fetch_javdatabase_info(slug: str) -> tuple:
             elif any(k in kl for k in ['nationality', '국적', '国籍']):
                 info['국적'] = val
 
-    _parse_kv_rows(soup.select('table tr'))
-    _parse_kv_rows(soup.select('dl dt'))
+    # 프로필 컬럼 내 table/dl 파싱
+    _parse_kv(profile_root.select('table tr'))
+    _parse_kv(profile_root.select('dl dt'))
+    # 전체 페이지 fallback (프로필 컬럼이 맞지 않을 경우)
+    if len(info) <= 1:
+        _parse_kv(soup.select('table tr'))
+        _parse_kv(soup.select('dl dt'))
 
-    # 태그 / 주요 카테고리
-    tag_links = soup.select(
-        'a[href*="/tags/"], a[href*="/tag/"], a[href*="/categories/"], '
-        'a[href*="/genre/"], .idol-tags a, .tags a, .tag-list a'
-    )
-    tags = list(dict.fromkeys(  # 순서 유지 중복 제거
-        a.get_text(strip=True) for a in tag_links
-        if a.get_text(strip=True) and len(a.get_text(strip=True)) > 1
-    ))[:20]
+    # 태그 — 프로필 컬럼 내 링크 우선, 없으면 전체 페이지
+    def _collect_tags(root):
+        return list(dict.fromkeys(
+            a.get_text(strip=True) for a in root.select(
+                'a[href*="/tags/"], a[href*="/tag/"], a[href*="/categories/"], '
+                'a[href*="/genre/"], .idol-tags a, .tags a, .tag-list a'
+            )
+            if a.get_text(strip=True) and len(a.get_text(strip=True)) > 1
+        ))[:20]
+
+    tags = _collect_tags(profile_root) or _collect_tags(soup)
     if tags:
         info['태그'] = ', '.join(tags)
 
-    # 이미지
-    img = soup.select_one(
-        '.idol-image img, .idol-photo img, .profile-image img, '
-        '.entry-content img, article img, .wp-post-image'
+    # 이미지 — 프로필 컬럼 왼쪽 col (이미지 컬럼) 또는 전체에서 탐색
+    img_root = (soup.select_one('div.col-xxl-5')
+                or soup.select_one('div.col-xl-5')
+                or soup)
+    img = img_root.select_one(
+        'img[src*="idolimages"], img[src*="idol"], '
+        '.idol-image img, .idol-photo img, .profile-image img, article img'
     )
     if img and img.get('src'):
         info['image_url'] = img['src']

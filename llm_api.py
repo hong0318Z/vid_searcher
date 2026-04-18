@@ -284,8 +284,8 @@ class LLMClient:
         }"""
         if not names:
             return {}
-        lines = '\n'.join(f'{i+1}. {n}' for i, n in enumerate(names))
-        prompt = (
+
+        _PROMPT_HEADER = (
             '아래 AV 배우 이름 목록을 분석해주세요.\n'
             '각 배우에 대해:\n'
             '1. JAV(일본 성인영상) 배우인지, 서양(Western) 배우인지 판단\n'
@@ -301,8 +301,19 @@ class LLMClient:
             '    "variants": ["alt-slug1", "Alt_Slug2"]\n'
             '  }, ...\n'
             '}\n\n'
-            f'배우 목록:\n{lines}'
+            '배우 목록:\n'
         )
+        # 입력 토큰 추정 (4자 ≈ 1토큰), MAX_OUTPUT_TOKENS의 60% 초과 시 분할
+        _MAX_INPUT_CHARS = int(MAX_OUTPUT_TOKENS * 0.6 * 4)
+        lines = '\n'.join(f'{i+1}. {n}' for i, n in enumerate(names))
+        if len(_PROMPT_HEADER) + len(lines) > _MAX_INPUT_CHARS:
+            mid = len(names) // 2
+            result = {}
+            result.update(self.analyze_actor_names(names[:mid]))
+            result.update(self.analyze_actor_names(names[mid:]))
+            return result
+
+        prompt = _PROMPT_HEADER + lines
         try:
             raw = self._chat(
                 [{'role': 'system',

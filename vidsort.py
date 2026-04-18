@@ -2784,8 +2784,7 @@ class VidSort(tk.Tk):
             status_lbl.config(text=f'1차 초벌: {len(targets)}개 배우 이름 분석 중...')
 
             def worker():
-                from jav_scraper import (fetch_actress_info,
-                                         fetch_javdatabase_info,
+                from jav_scraper import (fetch_javdatabase_info,
                                          fetch_babepedia_info,
                                          fetch_namuwiki_info)
                 client = self._get_llm_client()
@@ -2820,10 +2819,6 @@ class VidSort(tk.Tk):
                             if raw:
                                 raw_parts.append(f'[javdatabase]\n{raw}')
                                 break
-                        jdb_raw, _ = fetch_actress_info(tag)
-                        if jdb_raw:
-                            raw_parts.append(f'[javdb]\n{jdb_raw}')
-
                     # 서양 배우: babepedia
                     if actor_type in ('western', 'unknown'):
                         slugs_to_try = []

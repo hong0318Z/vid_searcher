@@ -1003,33 +1003,71 @@ def fetch_javdatabase_info(slug: str) -> tuple:
         return '', f'HTTP {r.status}'
     soup = _soup(r.text)
     info = {}
+
     # 이름
     h1 = soup.select_one('h1, .idol-name, .entry-title')
     info['이름'] = h1.get_text(strip=True) if h1 else slug
-    # 프로필 테이블 파싱 — <table>, <dl>, <div class="idol-info"> 등
-    for row in soup.select('table tr, .idol-info tr, dl dt'):
-        if row.name == 'dt':
-            key = row.get_text(strip=True).rstrip(':：')
-            dd = row.find_next_sibling('dd')
-            val = dd.get_text(strip=True) if dd else ''
-        else:
-            cells = row.find_all(['td', 'th'])
-            if len(cells) < 2: continue
-            key = cells[0].get_text(strip=True).rstrip(':：')
-            val = cells[1].get_text(strip=True)
-        if not val or val == '-': continue
-        if any(k in key for k in ['Birth','생일','誕生','Birthday','Born']): info['생년월일'] = val
-        elif any(k in key for k in ['Height','신장','身長','身高']): info['신장'] = val
-        elif any(k in key for k in ['Cup','カップ','컵']): info['컵'] = val
-        elif any(k in key for k in ['Measure','スリー','치수','Bust','Hip','Waist']): info.setdefault('체형', val)
-        elif any(k in key for k in ['Debut','데뷔','デビュー']): info['데뷔'] = val
-        elif any(k in key for k in ['Nationality','국적','国籍']): info['국적'] = val
+
+    # 프로필 테이블/DL 파싱 — <table tr>, <dl dt/dd> 모두 시도
+    def _parse_kv_rows(rows):
+        for row in rows:
+            if row.name == 'dt':
+                key = row.get_text(strip=True).rstrip(':：')
+                dd = row.find_next_sibling('dd')
+                val = dd.get_text(' ', strip=True) if dd else ''
+            else:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) < 2:
+                    continue
+                key = cells[0].get_text(strip=True).rstrip(':：')
+                val = cells[1].get_text(' ', strip=True)
+            if not val or val in ('-', 'N/A', 'Unknown', '?'):
+                continue
+            kl = key.lower()
+            if any(k in kl for k in ['birth', '생일', '誕生', 'birthday', 'born']):
+                info['생년월일'] = val
+            elif any(k in kl for k in ['age', '나이', '年齢']):
+                info['나이'] = val
+            elif any(k in kl for k in ['height', '신장', '身長', '身高', 'tall']):
+                info['신장'] = val
+            elif any(k in kl for k in ['weight', '체중', '体重']):
+                info['체중'] = val
+            elif any(k in kl for k in ['cup', 'カップ', '컵']):
+                info['컵'] = val
+            elif any(k in kl for k in ['measure', 'スリー', '치수', 'bust', 'hip', 'waist']):
+                info.setdefault('체형', val)
+            elif any(k in kl for k in ['debut', '데뷔', 'デビュー']):
+                info['데뷔'] = val
+            elif any(k in kl for k in ['nationality', '국적', '国籍']):
+                info['국적'] = val
+
+    _parse_kv_rows(soup.select('table tr'))
+    _parse_kv_rows(soup.select('dl dt'))
+
+    # 태그 / 주요 카테고리
+    tag_links = soup.select(
+        'a[href*="/tags/"], a[href*="/tag/"], a[href*="/categories/"], '
+        'a[href*="/genre/"], .idol-tags a, .tags a, .tag-list a'
+    )
+    tags = list(dict.fromkeys(  # 순서 유지 중복 제거
+        a.get_text(strip=True) for a in tag_links
+        if a.get_text(strip=True) and len(a.get_text(strip=True)) > 1
+    ))[:20]
+    if tags:
+        info['태그'] = ', '.join(tags)
+
     # 이미지
-    img = soup.select_one('.idol-image img, .entry-content img, article img')
-    if img and img.get('src'): info['image_url'] = img['src']
+    img = soup.select_one(
+        '.idol-image img, .idol-photo img, .profile-image img, '
+        '.entry-content img, article img, .wp-post-image'
+    )
+    if img and img.get('src'):
+        info['image_url'] = img['src']
+
     lines = [f"이름: {info.get('이름', slug)}"]
     lines += [f'{k}: {v}' for k, v in info.items() if k not in ('이름', 'image_url')]
-    if 'image_url' in info: lines.append(f"image_url: {info['image_url']}")
+    if 'image_url' in info:
+        lines.append(f"image_url: {info['image_url']}")
     return '\n'.join(lines), ''
 
 
@@ -1046,29 +1084,71 @@ def fetch_babepedia_info(slug: str) -> tuple:
         return '', f'HTTP {r.status}'
     soup = _soup(r.text)
     info = {}
-    h1 = soup.select_one('h1, .babe-name')
+
+    h1 = soup.select_one('h1, .babe-name, .model-name')
     info['이름'] = h1.get_text(strip=True) if h1 else slug.replace('_', ' ')
-    # 프로필 ul/li 또는 table
-    for item in soup.select('.biodata li, .profile li, table.biodata tr'):
+
+    # 프로필 ul/li, table, 또는 div 구조
+    profile_items = soup.select(
+        '.biodata li, .profile li, .bio li, table.biodata tr, '
+        '.model-info li, .info-list li, .babe-details li'
+    )
+    for item in profile_items:
+        # "Label: Value" 형태로 분리
         txt = item.get_text(separator=':', strip=True)
-        if ':' not in txt: continue
+        if ':' not in txt:
+            continue
         key, _, val = txt.partition(':')
-        key = key.strip(); val = val.strip()
-        if not val or val in ('-', 'N/A', 'Unknown'): continue
+        key = key.strip()
+        val = val.strip()
+        if not val or val in ('-', 'N/A', 'Unknown', 'n/a', '?'):
+            continue
         kl = key.lower()
-        if any(k in kl for k in ['born','birthday','birth date']): info['생년월일'] = val
-        elif 'height' in kl: info['신장'] = val
-        elif 'weight' in kl: info['체중'] = val
-        elif any(k in kl for k in ['measure','bust','waist','hip']): info.setdefault('체형', val)
-        elif 'nation' in kl or 'ethnic' in kl: info['국적'] = val
-        elif 'career' in kl or 'active' in kl: info['활동기간'] = val
-        elif 'hair' in kl: info['헤어'] = val
-        elif 'eye' in kl: info['눈색'] = val
-    img = soup.select_one('.babe-image img, .profile-image img, article img')
-    if img and img.get('src'): info['image_url'] = img['src']
+        if any(k in kl for k in ['born', 'birthday', 'birth date', 'date of birth']):
+            info['생년월일'] = val
+        elif any(k in kl for k in ['age', '나이']):
+            info['나이'] = val
+        elif 'height' in kl:
+            info['신장'] = val
+        elif 'weight' in kl:
+            info['체중'] = val
+        elif any(k in kl for k in ['measure', 'bust', 'waist', 'hip', 'size']):
+            info.setdefault('체형', val)
+        elif 'nation' in kl or 'ethnic' in kl or 'country' in kl:
+            info['국적'] = val
+        elif any(k in kl for k in ['career', 'active', 'years active']):
+            info['활동기간'] = val
+        elif 'hair' in kl:
+            info['헤어'] = val
+        elif 'eye' in kl:
+            info['눈색'] = val
+        elif any(k in kl for k in ['alias', 'also known', 'aka']):
+            info['별명'] = val
+
+    # 태그 / 카테고리
+    tag_links = soup.select(
+        'a[href*="/tag/"], a[href*="/category/"], a[href*="/tags/"], '
+        '.tags a, .categories a, .model-tags a, .babe-tags a'
+    )
+    tags = list(dict.fromkeys(
+        a.get_text(strip=True) for a in tag_links
+        if a.get_text(strip=True) and len(a.get_text(strip=True)) > 1
+    ))[:20]
+    if tags:
+        info['태그'] = ', '.join(tags)
+
+    # 이미지
+    img = soup.select_one(
+        '.babe-image img, .profile-image img, .model-photo img, '
+        '.babe-photo img, article img, .main-image img'
+    )
+    if img and img.get('src'):
+        info['image_url'] = img['src']
+
     lines = [f"이름: {info.get('이름', slug)}"]
     lines += [f'{k}: {v}' for k, v in info.items() if k not in ('이름', 'image_url')]
-    if 'image_url' in info: lines.append(f"image_url: {info['image_url']}")
+    if 'image_url' in info:
+        lines.append(f"image_url: {info['image_url']}")
     return '\n'.join(lines), ''
 
 

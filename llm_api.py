@@ -272,6 +272,80 @@ class LLMClient:
         except Exception as e:
             return f"(설명 생성 실패: {e})"
 
+    def classify_tags(self, tag_list: list) -> dict:
+        """태그 목록 → {"태그명": "행위"|"인물"|"레이블"|"기타"} 분류.
+        판단 불가한 경우 "기타"로 반환."""
+        if not tag_list:
+            return {}
+        lines = '\n'.join(f'{i+1}. {t}' for i, t in enumerate(tag_list))
+        prompt = (
+            '아래 영상 태그 목록을 분류해주세요.\n'
+            '각 태그가 어떤 유형인지 판단하세요:\n'
+            '- "인물": 배우/출연자 이름 (예: 사쿠라 미코, 아오이 쇼코, 山田花子)\n'
+            '- "행위": 성행위/장르/플레이 종류 (예: 야외노출, 구강, 긴박)\n'
+            '- "레이블": 제작사/스튜디오/브랜드 이름 (예: SOD, エスワン, Faleno)\n'
+            '- "기타": 위 분류에 해당하지 않는 것 (설정, 분위기, 화질 등)\n\n'
+            '반드시 JSON만 출력하세요. 다른 설명 없이 JSON만:\n'
+            '{"태그명": "인물"|"행위"|"레이블"|"기타", ...}\n\n'
+            f'태그 목록:\n{lines}'
+        )
+        try:
+            raw = self._chat(
+                [{'role': 'system',
+                  'content': '당신은 성인 영상 태그 분류 전문가입니다. JSON만 출력하세요.'},
+                 {'role': 'user', 'content': prompt}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+            )
+            if raw.startswith('```'):
+                raw = raw.split('```')[1].lstrip('json').strip()
+            brace = raw.find('{')
+            if brace > 0:
+                raw = raw[brace:]
+            data = json.loads(raw.strip())
+            valid = {'인물', '행위', '레이블', '기타'}
+            return {k: v for k, v in data.items() if v in valid}
+        except Exception:
+            return {}
+
+    def generate_actor_info(self, actor_name: str,
+                            raw_scraped: str = '') -> str:
+        """배우 이름 + 스크래핑 원본 → 한국어 배우 프로필 텍스트."""
+        ctx = f'\n\n[스크래핑 데이터]\n{raw_scraped}' if raw_scraped else ''
+        prompt = (
+            f'배우 이름: {actor_name}{ctx}\n\n'
+            '위 배우에 대한 정보를 한국어로 간결하게 정리해주세요.\n'
+            '스크래핑 데이터가 있으면 우선 활용하고, 없거나 부족하면 알고 있는 정보를 사용하세요.\n'
+            '형식 (모르는 항목은 생략):\n'
+            '이름: ...\n생년월일: ...\n신장: ...\n데뷔: ...\n국적: ...\n활동: ...\n특이사항: ...\n\n'
+            '200자 이내로 작성하세요.'
+        )
+        try:
+            return self._chat(
+                [{'role': 'system',
+                  'content': '당신은 성인 영상 배우 정보 정리 전문가입니다.'},
+                 {'role': 'user', 'content': prompt}],
+                max_tokens=1024,
+            )
+        except Exception as e:
+            return f'(정보 생성 실패: {e})'
+
+    def generate_action_desc(self, action_name: str,
+                             context_tags: str = '') -> str:
+        """행위 태그 → 한국어 설명 텍스트."""
+        ctx = f'\n관련 태그 컨텍스트: {context_tags}' if context_tags else ''
+        prompt = (
+            f'성인 영상 장르/행위 태그: "{action_name}"{ctx}\n\n'
+            '이 태그가 어떤 행위/장르를 의미하는지 한국어로 간결하게 설명해주세요.\n'
+            '100자 이내, 설명체로 작성하세요.'
+        )
+        try:
+            return self._chat(
+                [{'role': 'user', 'content': prompt}],
+                max_tokens=512,
+            )
+        except Exception as e:
+            return f'(설명 생성 실패: {e})'
+
     def _tag_batch(self, filenames: list, tag_pool: list,
                    system_prompt: str) -> list:
         """배치 단위 분류 — 같은 순서의 태그 리스트 반환"""

@@ -990,6 +990,86 @@ def offline_db_stats() -> str:
         return f'오프라인 DB: {len(_OFFLINE_DB):,}개 코드'
     return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
 
+def fetch_actress_info(name: str) -> tuple:
+    """배우 이름으로 JavDB에서 프로필 정보 검색.
+    반환: (raw_text_kr: str, error_msg: str)
+    실패 시 ('', 에러내용) 반환."""
+    if not _HAS_BS4:
+        return '', 'beautifulsoup4 미설치'
+    try:
+        import urllib.parse as _up
+        url = f'{JAVDB_BASE}/actors?q={_up.quote(name)}&f=actor'
+        print(f'[배우검색] GET {url}', flush=True)
+        r = _get(url)
+        if r.status != 200:
+            return '', f'JavDB 배우 검색 HTTP {r.status}'
+        soup = _soup(r.text)
+
+        # 첫 번째 배우 카드 링크 추출
+        card = soup.select_one('.actor-box a, .box-actor a')
+        if not card:
+            return '', f'"{name}" 검색 결과 없음'
+
+        actor_href = card.get('href', '')
+        if not actor_href:
+            return '', '배우 링크 없음'
+
+        actor_url = f'{JAVDB_BASE}{actor_href}'
+        print(f'[배우검색] 프로필 GET {actor_url}', flush=True)
+        r2 = _get(actor_url)
+        if r2.status != 200:
+            return '', f'배우 프로필 HTTP {r2.status}'
+
+        soup2 = _soup(r2.text)
+        info = {}
+
+        # 이름 (검색한 이름 우선, 페이지에서 보완)
+        h_name = soup2.select_one('h2.title, .actor-name, h1')
+        info['이름'] = h_name.get_text(strip=True) if h_name else name
+
+        # 썸네일 이미지
+        img = soup2.select_one('.avatar-box img, .actor-image img, .video-img-box img')
+        info['image_url'] = img['src'] if img and img.get('src') else ''
+
+        # 프로필 패널 — JavDB는 <nav class="panel-block"> 또는 <div class="panel-block">
+        for block in soup2.select('.panel-block, .data-item'):
+            strong = block.select_one('strong')
+            if not strong:
+                continue
+            key = strong.get_text(strip=True).rstrip(':：')
+            val = block.get_text(strip=True)
+            # 키 텍스트 제거
+            for _k in [key, key + ':', key + '：']:
+                val = val.replace(_k, '', 1)
+            val = val.strip()
+            if not val:
+                continue
+            if any(k in key for k in ['生日', 'Born', 'Birthday', '誕生']):
+                info['생년월일'] = val
+            elif any(k in key for k in ['身高', 'Height', '身長']):
+                info['신장'] = val
+            elif 'Cup' in key or 'カップ' in key:
+                info['컵'] = val
+            elif any(k in key for k in ['國籍', 'Nationality', '国籍']):
+                info['국적'] = val
+            elif any(k in key for k in ['出道', 'Debut', 'デビュー']):
+                info['데뷔'] = val
+            elif any(k in key for k in ['作品', 'Videos', '작품수']):
+                info['작품수'] = val
+
+        # 텍스트 조합 (image_url은 별도 보관)
+        image_url = info.pop('image_url', '')
+        lines = [f'{k}: {v}' for k, v in info.items() if k != '이름']
+        result_text = f"이름: {info.get('이름', name)}\n" + '\n'.join(lines)
+        if image_url:
+            result_text += f'\nimage_url: {image_url}'
+        return result_text, ''
+
+    except Exception as e:
+        print(f'[배우검색] 오류: {e}', flush=True)
+        return '', str(e)
+
+
 def check_deps() -> list[str]:
     """누락 의존성 목록 반환 (필수만)"""
     missing = []

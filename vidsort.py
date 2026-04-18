@@ -233,6 +233,15 @@ class DB:
             self.conn.execute("ALTER TABLE files ADD COLUMN jav_raw TEXT DEFAULT ''")
             self.conn.commit()
 
+        # ── tag_meta 컬럼 마이그레이션 ────────────────
+        tm_cols = [r[1] for r in self.conn.execute(
+            "PRAGMA table_info(tag_meta)").fetchall()]
+        for _col, _def in [('tag_type', ''), ('thumb_path', ''), ('extra_info', '')]:
+            if _col not in tm_cols:
+                self.conn.execute(
+                    f"ALTER TABLE tag_meta ADD COLUMN {_col} TEXT DEFAULT ''")
+                self.conn.commit()
+
         # ext 인덱스 (컬럼 확보 후 생성)
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_ext ON files(ext)")
@@ -594,6 +603,49 @@ class DB:
                 "INSERT OR REPLACE INTO tag_meta(tag, description) VALUES(?,?)",
                 (tag, desc))
             self.conn.commit()
+
+    def get_tag_meta_full(self, tag) -> dict:
+        r = self.conn.execute(
+            "SELECT description, tag_type, thumb_path, extra_info "
+            "FROM tag_meta WHERE tag=?", (tag,)).fetchone()
+        if not r:
+            return {'description': '', 'tag_type': '', 'thumb_path': '', 'extra_info': ''}
+        return {'description': r[0] or '', 'tag_type': r[1] or '',
+                'thumb_path': r[2] or '', 'extra_info': r[3] or ''}
+
+    def set_tag_type(self, tag, tag_type):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO tag_meta(tag, tag_type) VALUES(?,?) "
+                "ON CONFLICT(tag) DO UPDATE SET tag_type=excluded.tag_type",
+                (tag, tag_type))
+            self.conn.commit()
+
+    def set_tag_thumb(self, tag, thumb_path):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO tag_meta(tag, thumb_path) VALUES(?,?) "
+                "ON CONFLICT(tag) DO UPDATE SET thumb_path=excluded.thumb_path",
+                (tag, thumb_path))
+            self.conn.commit()
+
+    def set_tag_extra_info(self, tag, extra_info):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO tag_meta(tag, extra_info) VALUES(?,?) "
+                "ON CONFLICT(tag) DO UPDATE SET extra_info=excluded.extra_info",
+                (tag, extra_info))
+            self.conn.commit()
+
+    def all_tags_with_meta(self):
+        """전체 태그 목록 + 메타 (tag, description, tag_type, thumb_path, extra_info)"""
+        rows = self.conn.execute(
+            "SELECT t.tag, COALESCE(m.description,''), COALESCE(m.tag_type,''), "
+            "       COALESCE(m.thumb_path,''), COALESCE(m.extra_info,'') "
+            "FROM (SELECT DISTINCT tag FROM tags) t "
+            "LEFT JOIN tag_meta m ON t.tag=m.tag "
+            "ORDER BY t.tag").fetchall()
+        return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
     def rename_tag(self, old_tag: str, new_tag: str):
         """태그명 일괄 변경 (모든 파일의 태그 + tag_meta).
@@ -1687,34 +1739,81 @@ class VidSort(tk.Tk):
     # ── 태그 관리 (설명 편집) ────────────────────
     def _tag_manage_dlg(self):
         win = tk.Toplevel(self); win.title('🏷 태그 관리')
-        win.configure(bg='#0d0d14'); win.geometry('540x480')
-        win.resizable(True, True); win.minsize(420, 360); win.grab_set()
+        win.configure(bg='#0d0d14'); win.geometry('720x640')
+        win.resizable(True, True); win.minsize(580, 500); win.grab_set()
 
         tk.Label(win, text='태그 관리',
                  bg='#0d0d14', fg='#dcdcf0',
-                 font=('Consolas', 12, 'bold')).pack(pady=(14, 6))
+                 font=('Consolas', 12, 'bold')).pack(pady=(10, 4))
 
         main_f = tk.Frame(win, bg='#0d0d14')
         main_f.pack(fill='both', expand=True, padx=12, pady=4)
 
-        # ── 왼쪽: 태그 목록 ──
-        left_f = tk.Frame(main_f, bg='#0d0d14', width=180)
+        # ── 왼쪽: 태그 목록 + 검색 + 탭 ──
+        left_f = tk.Frame(main_f, bg='#0d0d14', width=220)
         left_f.pack(side='left', fill='y', padx=(0, 8))
         left_f.pack_propagate(False)
-        tk.Label(left_f, text='태그 목록', bg='#0d0d14', fg='#888',
-                 font=('Consolas', 9)).pack(anchor='w')
+
+        # 검색창
+        search_var = tk.StringVar()
+        search_ent = ttk.Entry(left_f, textvariable=search_var,
+                               font=('Consolas', 9), width=22)
+        search_ent.pack(fill='x', pady=(0, 3))
+        search_ent.insert(0, '🔍 검색...')
+        search_ent.config(foreground='#555')
+        def _on_search_focus_in(e):
+            if search_ent.get() == '🔍 검색...':
+                search_ent.delete(0, 'end')
+                search_ent.config(foreground='#dcdcf0')
+        def _on_search_focus_out(e):
+            if not search_ent.get():
+                search_ent.insert(0, '🔍 검색...')
+                search_ent.config(foreground='#555')
+        search_ent.bind('<FocusIn>', _on_search_focus_in)
+        search_ent.bind('<FocusOut>', _on_search_focus_out)
+
+        # 타입 탭 필터
+        tab_f = tk.Frame(left_f, bg='#0d0d14')
+        tab_f.pack(fill='x', pady=(0, 3))
+        current_tab = [None]  # None=전체
+        tab_btns = {}
+        TYPE_COLORS = {'인물': '#ff9090', '행위': '#90ff90', '레이블': '#90c8ff', '기타': '#dddd90'}
+        for _tab in ['전체', '인물', '행위', '레이블', '기타']:
+            _fg = TYPE_COLORS.get(_tab, '#aaa')
+            _btn = tk.Button(tab_f, text=_tab, bg='#1a1a28', fg=_fg,
+                             bd=0, padx=4, pady=2, cursor='hand2',
+                             font=('Consolas', 8), relief='flat')
+            _btn.pack(side='left', padx=1)
+            tab_btns[_tab] = _btn
+
         lb_sb = ttk.Scrollbar(left_f, orient='vertical')
         lb = tk.Listbox(left_f, bg='#1a1a28', fg='#dcdcf0',
                         selectbackground='#7c6ff7', selectforeground='#fff',
-                        font=('Consolas', 10), bd=0, highlightthickness=0,
+                        font=('Consolas', 9), bd=0, highlightthickness=0,
                         activestyle='none', yscrollcommand=lb_sb.set)
         lb_sb.configure(command=lb.yview)
         lb_sb.pack(side='right', fill='y')
         lb.pack(fill='both', expand=True)
 
-        # ── 오른쪽: 편집 패널 ──
-        right_f = tk.Frame(main_f, bg='#0d0d14')
-        right_f.pack(side='left', fill='both', expand=True)
+        # ── 오른쪽: 편집 패널 (스크롤 가능) ──
+        right_outer = tk.Frame(main_f, bg='#0d0d14')
+        right_outer.pack(side='left', fill='both', expand=True)
+
+        # 스크롤 가능한 오른쪽
+        r_canvas = tk.Canvas(right_outer, bg='#0d0d14', highlightthickness=0)
+        r_vsb = ttk.Scrollbar(right_outer, orient='vertical', command=r_canvas.yview)
+        r_canvas.configure(yscrollcommand=r_vsb.set)
+        r_vsb.pack(side='right', fill='y')
+        r_canvas.pack(side='left', fill='both', expand=True)
+        right_f = tk.Frame(r_canvas, bg='#0d0d14')
+        r_cw = r_canvas.create_window(0, 0, anchor='nw', window=right_f)
+        def _r_cfg(e): r_canvas.configure(scrollregion=r_canvas.bbox('all'))
+        def _rc_cfg(e): r_canvas.itemconfigure(r_cw, width=e.width)
+        right_f.bind('<Configure>', _r_cfg)
+        r_canvas.bind('<Configure>', _rc_cfg)
+        r_canvas.bind('<MouseWheel>',
+                      lambda e: r_canvas.yview_scroll(int(-1*(e.delta/120)), 'units'))
+
         tk.Label(right_f, text='태그 이름', bg='#0d0d14', fg='#888',
                  font=('Consolas', 9)).pack(anchor='w')
 
@@ -1729,43 +1828,186 @@ class VidSort(tk.Tk):
                                 style='Acc.TButton', state='disabled')
         rename_btn.pack(side='left')
 
+        # 태그 유형 Combobox
+        tk.Label(right_f, text='태그 유형', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        type_var = tk.StringVar()
+        type_cb = ttk.Combobox(right_f, textvariable=type_var,
+                               values=['', '인물', '행위', '레이블', '기타'],
+                               state='readonly', font=('Consolas', 10), width=12)
+        type_cb.pack(anchor='w', pady=(2, 6))
+
+        # 커버 이미지
+        tk.Label(right_f, text='커버 이미지', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        img_f = tk.Frame(right_f, bg='#0d0d14')
+        img_f.pack(fill='x', pady=(2, 6))
+        thumb_lbl = tk.Label(img_f, bg='#111', width=18, height=5,
+                             text='(없음)', fg='#444', font=('Consolas', 8))
+        thumb_lbl.pack(side='left', padx=(0, 6))
+        thumb_path_var = tk.StringVar()
+
+        def _update_thumb_preview(path):
+            if path and Path(path).exists():
+                try:
+                    from PIL import Image as _Img, ImageTk as _ITk
+                    img = _Img.open(path).resize((128, 72), _Img.LANCZOS)
+                    photo = _ITk.PhotoImage(img)
+                    thumb_lbl.config(image=photo, text='', bg='#000')
+                    thumb_lbl._img = photo
+                    return
+                except Exception:
+                    pass
+            thumb_lbl.config(image='', text='(없음)', bg='#111')
+
+        img_btn_f = tk.Frame(img_f, bg='#0d0d14')
+        img_btn_f.pack(side='left', fill='y')
+
+        def _pick_thumb():
+            if cur[0] is None: return
+            from tkinter import filedialog as _fd
+            path = _fd.askopenfilename(
+                title='커버 이미지 선택',
+                filetypes=[('이미지', '*.jpg *.jpeg *.png *.webp *.bmp')],
+                parent=win)
+            if not path: return
+            tag = tags_data[cur[0]][0]
+            self.db.set_tag_thumb(tag, path)
+            thumb_path_var.set(path)
+            tags_data[cur[0]] = (*tags_data[cur[0]][:3], path, tags_data[cur[0]][4])
+            _update_thumb_preview(path)
+
+        def _clear_thumb():
+            if cur[0] is None: return
+            tag = tags_data[cur[0]][0]
+            self.db.set_tag_thumb(tag, '')
+            thumb_path_var.set('')
+            tags_data[cur[0]] = (*tags_data[cur[0]][:3], '', tags_data[cur[0]][4])
+            _update_thumb_preview('')
+
+        ttk.Button(img_btn_f, text='📁 선택', command=_pick_thumb,
+                   style='Acc.TButton').pack(fill='x', pady=1)
+        ttk.Button(img_btn_f, text='✕ 삭제', command=_clear_thumb).pack(fill='x', pady=1)
+
         tk.Label(right_f, text='설명', bg='#0d0d14', fg='#888',
                  font=('Consolas', 9)).pack(anchor='w')
         desc_txt = tk.Text(right_f, bg='#1a1a28', fg='#dcdcf0',
-                           font=('Consolas', 10), height=7, relief='flat',
+                           font=('Consolas', 10), height=4, relief='flat',
                            bd=0, highlightthickness=1,
                            highlightbackground='#2a2a3d',
                            insertbackground='#7c6ff7', wrap='word')
-        desc_txt.pack(fill='both', expand=True, pady=(2, 6))
-        save_btn = ttk.Button(right_f, text='💾 설명 저장',
+        desc_txt.pack(fill='x', pady=(2, 4))
+
+        # 배우/행위 정보 (extra_info)
+        tk.Label(right_f, text='상세 정보 (배우 프로필 등)', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        extra_txt = tk.Text(right_f, bg='#1a1a28', fg='#dcdcf0',
+                            font=('Consolas', 9), height=5, relief='flat',
+                            bd=0, highlightthickness=1,
+                            highlightbackground='#2a2a3d',
+                            insertbackground='#7c6ff7', wrap='word')
+        extra_txt.pack(fill='x', pady=(2, 4))
+
+        save_btn = ttk.Button(right_f, text='💾 저장',
                               style='Acc.TButton', state='disabled')
-        save_btn.pack(anchor='e')
+        save_btn.pack(anchor='e', pady=(0, 4))
 
-        tags_data = list(self.db.all_tags_with_desc())
+        # 배우 정보 자동 검색 버튼
+        actor_f = tk.Frame(right_f, bg='#0d0d14')
+        actor_f.pack(fill='x', pady=(0, 4))
+        actor_btn = ttk.Button(actor_f, text='🔍 배우 정보 검색',
+                               style='Acc.TButton', state='disabled')
+        actor_btn.pack(side='left')
+        actor_status = tk.Label(actor_f, text='', bg='#0d0d14', fg='#7c6ff7',
+                                font=('Consolas', 8))
+        actor_status.pack(side='left', padx=6)
+
+        # ── 데이터 로드 ──
+        tags_data = list(self.db.all_tags_with_meta())
         cur = [None]
+        filtered_indices = list(range(len(tags_data)))  # 현재 필터된 tags_data 인덱스
+        cnt_lbl_ref = [None]  # 하단 레이블 참조 (초기화 후 할당)
 
-        for tag, _ in tags_data:
+        def _rebuild_lb():
+            """검색어 + 탭 필터로 리스트박스 재구성"""
+            q = search_var.get().strip().lower()
+            if q == '🔍 검색...': q = ''
+            tab = current_tab[0]
+            filtered_indices.clear()
+            for i, (tag, desc, ttype, tthumb, textra) in enumerate(tags_data):
+                if q and q not in tag.lower(): continue
+                if tab and ttype != tab: continue
+                filtered_indices.append(i)
+            lb.delete(0, 'end')
+            for i in filtered_indices:
+                tag, _, ttype, _, _ = tags_data[i]
+                color_map = {'인물': '● ', '행위': '▶ ', '레이블': '◆ ', '기타': '○ '}
+                prefix = color_map.get(ttype, '  ')
+                lb.insert('end', prefix + tag)
+            if cnt_lbl_ref[0]:
+                cnt_lbl_ref[0].config(text=f'{len(filtered_indices)}개')
+
+        for tag, *_ in tags_data:
             lb.insert('end', '  ' + tag)
+        filtered_indices.clear()
+        filtered_indices.extend(range(len(tags_data)))
+
+        def _set_tab(tab_name):
+            current_tab[0] = None if tab_name == '전체' else tab_name
+            for tn, btn in tab_btns.items():
+                btn.config(bg='#7c6ff7' if tn == tab_name else '#1a1a28',
+                           fg='#fff' if tn == tab_name else TYPE_COLORS.get(tn, '#aaa'))
+            _rebuild_lb()
+
+        for tn, btn in tab_btns.items():
+            btn.config(command=lambda t=tn: _set_tab(t))
+        _set_tab('전체')
+
+        def _on_search_change(*_):
+            _rebuild_lb()
+        search_var.trace_add('write', _on_search_change)
 
         def on_select(e=None):
             sel = lb.curselection()
             if not sel: return
-            idx = sel[0]; tag, desc = tags_data[idx]
-            cur[0] = idx
+            lb_pos = sel[0]
+            if lb_pos >= len(filtered_indices): return
+            real_idx = filtered_indices[lb_pos]
+            cur[0] = real_idx
+            tag, desc, ttype, tthumb, textra = tags_data[real_idx]
             rename_var.set(tag)
             rename_btn.config(state='normal')
+            type_var.set(ttype)
+            _update_thumb_preview(tthumb)
+            thumb_path_var.set(tthumb)
             desc_txt.delete('1.0', 'end')
             desc_txt.insert('1.0', desc)
+            extra_txt.delete('1.0', 'end')
+            extra_txt.insert('1.0', textra)
             save_btn.config(state='normal')
+            actor_btn.config(state='normal' if ttype == '인물' else 'disabled')
+            actor_status.config(text='')
+
+        def _on_type_change(e=None):
+            if cur[0] is None: return
+            tag = tags_data[cur[0]][0]
+            new_type = type_var.get()
+            self.db.set_tag_type(tag, new_type)
+            old = tags_data[cur[0]]
+            tags_data[cur[0]] = (old[0], old[1], new_type, old[3], old[4])
+            actor_btn.config(state='normal' if new_type == '인물' else 'disabled')
+            _rebuild_lb()
+
+        type_cb.bind('<<ComboboxSelected>>', _on_type_change)
 
         def do_rename():
             if cur[0] is None: return
-            old_tag, old_desc = tags_data[cur[0]]
+            row = tags_data[cur[0]]
+            old_tag = row[0]
             new_tag = rename_var.get().strip()
             if not new_tag or new_tag == old_tag:
                 return
-            # 이미 존재하는 태그로 변경 → 병합 확인
-            existing_names = [t for t, _ in tags_data]
+            existing_names = [t for t, *_ in tags_data]
             if new_tag in existing_names:
                 cnt_old = self.db.conn.execute(
                     "SELECT COUNT(*) FROM tags WHERE tag=?", (old_tag,)).fetchone()[0]
@@ -1779,24 +2021,15 @@ class VidSort(tk.Tk):
                         parent=win):
                     return
                 self.db.rename_tag(old_tag, new_tag)
-                # tags_data에서 old 항목 제거, new 항목 유지
-                new_idx = existing_names.index(new_tag)
+                new_real_idx = existing_names.index(new_tag)
                 tags_data.pop(cur[0])
-                lb.delete(cur[0])
-                # 병합 후 new 항목 선택
-                if new_idx > cur[0]:
-                    new_idx -= 1
-                cur[0] = new_idx
-                lb.selection_clear(0, 'end')
-                lb.selection_set(new_idx)
-                lb.see(new_idx)
+                cur[0] = new_real_idx if new_real_idx < cur[0] else new_real_idx - 1
+                _rebuild_lb()
                 rename_var.set(new_tag)
             else:
                 self.db.rename_tag(old_tag, new_tag)
-                tags_data[cur[0]] = (new_tag, old_desc)
-                lb.delete(cur[0])
-                lb.insert(cur[0], '  ' + new_tag)
-                lb.selection_set(cur[0])
+                tags_data[cur[0]] = (new_tag, *row[1:])
+                _rebuild_lb()
             self._reload_sidebar()
             self._reload()
 
@@ -1805,17 +2038,46 @@ class VidSort(tk.Tk):
 
         def save_desc():
             if cur[0] is None: return
-            tag, _ = tags_data[cur[0]]
+            old = tags_data[cur[0]]
+            tag = old[0]
             desc = desc_txt.get('1.0', 'end').strip()
+            extra = extra_txt.get('1.0', 'end').strip()
             self.db.set_tag_desc(tag, desc)
-            tags_data[cur[0]] = (tag, desc)
+            self.db.set_tag_extra_info(tag, extra)
+            tags_data[cur[0]] = (tag, desc, old[2], old[3], extra)
+
+        def _do_actor_search():
+            if cur[0] is None: return
+            tag = tags_data[cur[0]][0]
+            actor_btn.config(state='disabled')
+            actor_status.config(text='검색 중...')
+            def worker():
+                from jav_scraper import fetch_actress_info
+                raw, err = fetch_actress_info(tag)
+                client = self._get_llm_client() if not err or raw else None
+                info = raw
+                if client:
+                    info = client.generate_actor_info(tag, raw)
+                def done():
+                    extra_txt.delete('1.0', 'end')
+                    extra_txt.insert('1.0', info)
+                    if cur[0] is not None:
+                        old = tags_data[cur[0]]
+                        self.db.set_tag_extra_info(old[0], info)
+                        tags_data[cur[0]] = (*old[:4], info)
+                    actor_btn.config(state='normal')
+                    actor_status.config(text='완료' if not err else f'오류: {err[:30]}')
+                win.after(0, done)
+            threading.Thread(target=worker, daemon=True).start()
+
+        actor_btn.config(command=_do_actor_search)
 
         lb.bind('<<ListboxSelect>>', on_select)
         save_btn.config(command=save_desc)
 
         def delete_tag():
             if cur[0] is None: return
-            tag, _ = tags_data[cur[0]]
+            tag = tags_data[cur[0]][0]
             cnt = len(self.db.conn.execute(
                 "SELECT path FROM tags WHERE tag=?", (tag,)).fetchall())
             if not messagebox.askyesno('태그 삭제',
@@ -1823,30 +2085,26 @@ class VidSort(tk.Tk):
                     f'({cnt}개 파일에서 제거됩니다)'):
                 return
             self.db.delete_tag(tag)
-            idx = cur[0]
-            tags_data.pop(idx)
-            lb.delete(idx)
+            tags_data.pop(cur[0])
             cur[0] = None
             rename_var.set('')
             rename_btn.config(state='disabled')
             desc_txt.delete('1.0', 'end')
+            extra_txt.delete('1.0', 'end')
             save_btn.config(state='disabled')
-
-        del_btn = ttk.Button(right_f, text='🗑 태그 삭제', command=delete_tag,
-                             style='TButton')
-        del_btn.pack(anchor='e', pady=(0, 4))
+            actor_btn.config(state='disabled')
+            _rebuild_lb()
 
         # ── LLM 태그 번역 ──
         def _llm_translate_tags():
             client = self._get_llm_client()
             if not client: return
 
-            # 일본어가 포함된 태그만 대상 (또는 전체 선택)
             import re as _re
             def has_jp(t):
                 return bool(_re.search(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]', t))
 
-            to_translate = [(i, tag) for i, (tag, _) in enumerate(tags_data) if has_jp(tag)]
+            to_translate = [(i, tag) for i, (tag, *_) in enumerate(tags_data) if has_jp(tag)]
             if not to_translate:
                 messagebox.showinfo('태그 번역', '번역할 일본어 태그가 없습니다.')
                 return
@@ -1892,10 +2150,9 @@ class VidSort(tk.Tk):
                         new_tag = result.get(str(j + 1), '').strip()
                         if new_tag and new_tag != old_tag:
                             self.db.rename_tag(old_tag, new_tag)
-                            tags_data[lb_idx] = (new_tag, tags_data[lb_idx][1])
-                            def _upd(i=lb_idx, nt=new_tag):
-                                lb.delete(i); lb.insert(i, '  ' + nt)
-                            prog_win.after(0, _upd)
+                            old_row = tags_data[lb_idx]
+                            tags_data[lb_idx] = (new_tag, *old_row[1:])
+                            prog_win.after(0, lambda: _rebuild_lb())
                         done += 1
                         prog_win.after(0, lambda d=done, t=old_tag, n=new_tag:
                                        lbl_pr.config(text=f'{t} → {n}'))
@@ -1910,7 +2167,7 @@ class VidSort(tk.Tk):
         def _llm_merge_tags():
             client = self._get_llm_client()
             if not client: return
-            all_t = [tag for tag, _ in tags_data]
+            all_t = [tag for tag, *_ in tags_data]
             if len(all_t) < 2:
                 messagebox.showinfo('태그 통합', '태그가 2개 이상 필요합니다.')
                 return
@@ -2083,11 +2340,9 @@ class VidSort(tk.Tk):
                         self.db.rename_tag(old, new_rep)
                         cnt += 1
                 mw.destroy()
-                new_data = list(self.db.all_tags_with_desc())
+                new_data = list(self.db.all_tags_with_meta())
                 tags_data.clear(); tags_data.extend(new_data)
-                lb.delete(0, 'end')
-                for t, _ in tags_data:
-                    lb.insert('end', '  ' + t)
+                _rebuild_lb()
                 self._reload_sidebar()
                 messagebox.showinfo('태그 통합 완료',
                                     f'{len(to_do)}개 그룹, {cnt}개 태그 통합 완료')
@@ -2098,14 +2353,383 @@ class VidSort(tk.Tk):
                        command=apply_merge).pack(side='left', padx=6)
             ttk.Button(bf, text='취소', command=mw.destroy).pack(side='left', padx=6)
 
-        btn_f = tk.Frame(win, bg='#0d0d14'); btn_f.pack(pady=4)
-        ttk.Button(btn_f, text='🔗 AI 태그 통합 (한국어 정리)',
-                   command=_llm_merge_tags).pack(side='left', padx=6)
-        ttk.Button(btn_f, text='닫기', command=win.destroy).pack(side='left', padx=6)
+        # 하단 버튼 + 카운트
+        bottom_f = tk.Frame(win, bg='#0d0d14')
+        bottom_f.pack(fill='x', padx=12, pady=(2, 6))
 
-        tk.Label(win, text=f'총 {len(tags_data)}개 태그',
-                 bg='#0d0d14', fg='#444', font=('Consolas', 8)
-                 ).pack(anchor='e', padx=14)
+        _cnt_lbl = tk.Label(bottom_f, text=f'{len(filtered_indices)}개',
+                            bg='#0d0d14', fg='#555', font=('Consolas', 8))
+        _cnt_lbl.pack(side='right', padx=4)
+        cnt_lbl_ref[0] = _cnt_lbl
+
+        ttk.Button(bottom_f, text='닫기',
+                   command=win.destroy).pack(side='right', padx=4)
+        ttk.Button(bottom_f, text='🔗 AI 태그 통합',
+                   command=_llm_merge_tags).pack(side='right', padx=4)
+        ttk.Button(bottom_f, text='🗑 삭제', style='TButton',
+                   command=delete_tag).pack(side='right', padx=4)
+        ttk.Button(bottom_f, text='⚡ 행위 일괄',
+                   command=lambda: self._action_tags_dlg(win)).pack(side='left', padx=4)
+        ttk.Button(bottom_f, text='👤 인물 일괄',
+                   command=lambda: self._person_tags_dlg(win)).pack(side='left', padx=4)
+        ttk.Button(bottom_f, text='🤖 LLM 태그 분류',
+                   style='Acc.TButton',
+                   command=lambda: self._llm_classify_tags_dlg(win, tags_data, _rebuild_lb)
+                   ).pack(side='left', padx=4)
+
+        _rebuild_lb()
+
+    # ── LLM 태그 자동 분류 ───────────────────────
+    def _llm_classify_tags_dlg(self, parent_win, tags_data, rebuild_cb):
+        """LLM이 태그를 인물/행위/레이블/기타로 자동 분류."""
+        client = self._get_llm_client()
+        if not client: return
+
+        dlg = tk.Toplevel(parent_win); dlg.title('🤖 LLM 태그 자동 분류')
+        dlg.configure(bg='#0d0d14'); dlg.geometry('480x420')
+        dlg.resizable(True, True); dlg.grab_set()
+
+        tk.Label(dlg, text='LLM 태그 자동 분류',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(12, 4))
+
+        opt_f = tk.Frame(dlg, bg='#0d0d14')
+        opt_f.pack(fill='x', padx=16, pady=4)
+
+        tk.Label(opt_f, text='배치 크기 (한 번에 처리할 태그 수):',
+                 bg='#0d0d14', fg='#aaa', font=('Consolas', 9)).pack(side='left')
+        batch_var = tk.IntVar(value=50)
+        tk.Spinbox(opt_f, from_=5, to=200, textvariable=batch_var,
+                   width=6, bg='#1a1a28', fg='#dcdcf0',
+                   font=('Consolas', 9)).pack(side='left', padx=6)
+
+        unclassified_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(dlg, text='미분류 태그만 처리 (이미 유형 있는 태그 건너뜀)',
+                       variable=unclassified_var,
+                       bg='#0d0d14', fg='#aaa', selectcolor='#7c6ff7',
+                       activebackground='#0d0d14', font=('Consolas', 9)
+                       ).pack(anchor='w', padx=16)
+
+        log_txt = tk.Text(dlg, bg='#0a0a12', fg='#aaa',
+                          font=('Consolas', 8), height=12, relief='flat',
+                          bd=0, highlightthickness=1, highlightbackground='#2a2a3d',
+                          state='disabled', wrap='word')
+        log_txt.pack(fill='both', expand=True, padx=16, pady=8)
+
+        pb = ttk.Progressbar(dlg)
+        pb.pack(fill='x', padx=16, pady=(0, 6))
+
+        running = [False]
+
+        def _log(msg):
+            log_txt.config(state='normal')
+            log_txt.insert('end', msg + '\n')
+            log_txt.see('end')
+            log_txt.config(state='disabled')
+
+        def start_classify():
+            if running[0]: return
+            running[0] = True
+            start_btn.config(state='disabled')
+
+            unclassified_only = unclassified_var.get()
+            bsize = max(5, min(200, batch_var.get()))
+            target = [(i, tag) for i, (tag, _, ttype, *_r) in enumerate(tags_data)
+                      if not unclassified_only or not ttype]
+
+            pb.config(maximum=max(len(target), 1), value=0)
+            _log(f'대상 태그: {len(target)}개 (배치: {bsize})')
+
+            def worker():
+                done = 0
+                for bi in range(0, len(target), bsize):
+                    batch = target[bi:bi+bsize]
+                    tag_list = [tag for _, tag in batch]
+                    try:
+                        result = client.classify_tags(tag_list)
+                    except Exception as ex:
+                        dlg.after(0, lambda m=str(ex): _log(f'  오류: {m}'))
+                        done += len(batch)
+                        dlg.after(0, lambda d=done: pb.config(value=d))
+                        continue
+
+                    for j, (real_idx, tag) in enumerate(batch):
+                        cat = result.get(tag, '')
+                        if cat:
+                            self.db.set_tag_type(tag, cat)
+                            old = tags_data[real_idx]
+                            tags_data[real_idx] = (old[0], old[1], cat, old[3], old[4])
+                        done += 1
+                        dlg.after(0, lambda t=tag, c=cat, d=done:
+                                  (_log(f'  {t} → {c}' if c else f'  {t} (미분류)'),
+                                   pb.config(value=d)))
+
+                def finish():
+                    _log(f'\n완료! {done}개 처리')
+                    start_btn.config(state='normal')
+                    running[0] = False
+                    rebuild_cb()
+                dlg.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        start_btn = ttk.Button(dlg, text='▶ 분류 시작', style='Acc.TButton',
+                               command=start_classify)
+        start_btn.pack(pady=(0, 8))
+
+    # ── 인물 일괄 처리 ───────────────────────────
+    def _person_tags_dlg(self, parent_win):
+        """인물(tag_type='인물') 태그 배우 정보 일괄 검색."""
+        dlg = tk.Toplevel(parent_win); dlg.title('👤 인물 일괄 처리')
+        dlg.configure(bg='#0d0d14'); dlg.geometry('680x520')
+        dlg.resizable(True, True); dlg.grab_set()
+
+        tk.Label(dlg, text='인물 태그 배우 정보 일괄 검색',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(12, 4))
+
+        # 옵션
+        opt_f = tk.Frame(dlg, bg='#0d0d14')
+        opt_f.pack(fill='x', padx=16, pady=2)
+        tk.Label(opt_f, text='작업수:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        count_var = tk.IntVar(value=10)
+        tk.Spinbox(opt_f, from_=1, to=100, textvariable=count_var,
+                   width=5, bg='#1a1a28', fg='#dcdcf0',
+                   font=('Consolas', 9)).pack(side='left', padx=4)
+        skip_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(opt_f, text='이미 정보 있는 태그 건너뜀',
+                       variable=skip_var, bg='#0d0d14', fg='#aaa',
+                       selectcolor='#7c6ff7', activebackground='#0d0d14',
+                       font=('Consolas', 9)).pack(side='left', padx=8)
+
+        # 본문: 좌측 리스트 + 우측 미리보기
+        body_f = tk.Frame(dlg, bg='#0d0d14')
+        body_f.pack(fill='both', expand=True, padx=12, pady=4)
+
+        left_f = tk.Frame(body_f, bg='#0d0d14', width=220)
+        left_f.pack(side='left', fill='y', padx=(0, 6))
+        left_f.pack_propagate(False)
+        tk.Label(left_f, text='인물 태그', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        lb_sb = ttk.Scrollbar(left_f, orient='vertical')
+        person_lb = tk.Listbox(left_f, bg='#1a1a28', fg='#ff9090',
+                               selectbackground='#7c6ff7', selectforeground='#fff',
+                               font=('Consolas', 9), bd=0, highlightthickness=0,
+                               activestyle='none', yscrollcommand=lb_sb.set)
+        lb_sb.config(command=person_lb.yview)
+        lb_sb.pack(side='right', fill='y')
+        person_lb.pack(fill='both', expand=True)
+
+        right_f = tk.Frame(body_f, bg='#0d0d14')
+        right_f.pack(side='left', fill='both', expand=True)
+        tk.Label(right_f, text='상세 정보', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        preview_txt = tk.Text(right_f, bg='#0a0a12', fg='#dcdcf0',
+                              font=('Consolas', 9), relief='flat', bd=0,
+                              highlightthickness=1, highlightbackground='#2a2a3d',
+                              state='disabled', wrap='word')
+        preview_txt.pack(fill='both', expand=True)
+
+        # 태그 로드
+        rows = self.db.conn.execute(
+            "SELECT t.tag, COALESCE(m.extra_info,'') FROM "
+            "(SELECT DISTINCT tag FROM tags) t "
+            "LEFT JOIN tag_meta m ON t.tag=m.tag "
+            "WHERE COALESCE(m.tag_type,'')='인물' ORDER BY t.tag").fetchall()
+        person_tags = list(rows)  # [(tag, extra_info), ...]
+
+        for tag, extra in person_tags:
+            marker = '✓' if extra.strip() else ' '
+            person_lb.insert('end', f'{marker} {tag}')
+
+        def on_lb_select(e=None):
+            sel = person_lb.curselection()
+            if not sel: return
+            _, extra = person_tags[sel[0]]
+            preview_txt.config(state='normal')
+            preview_txt.delete('1.0', 'end')
+            preview_txt.insert('1.0', extra or '(정보 없음)')
+            preview_txt.config(state='disabled')
+
+        person_lb.bind('<<ListboxSelect>>', on_lb_select)
+
+        # 진행 바 + 로그
+        pb = ttk.Progressbar(dlg)
+        pb.pack(fill='x', padx=12, pady=(4, 2))
+        status_lbl = tk.Label(dlg, text='', bg='#0d0d14', fg='#7c6ff7',
+                              font=('Consolas', 8))
+        status_lbl.pack()
+
+        running = [False]
+
+        def start_batch():
+            if running[0]: return
+            running[0] = True
+            start_btn.config(state='disabled')
+            count = count_var.get()
+            skip = skip_var.get()
+            target = [(i, tag, extra) for i, (tag, extra) in enumerate(person_tags)
+                      if not skip or not extra.strip()][:count]
+            pb.config(maximum=max(len(target), 1), value=0)
+            status_lbl.config(text=f'총 {len(target)}개 처리 예정...')
+
+            def worker():
+                from jav_scraper import fetch_actress_info
+                client = self._get_llm_client()
+                for done, (idx, tag, _) in enumerate(target, 1):
+                    dlg.after(0, lambda t=tag, d=done:
+                              status_lbl.config(text=f'[{d}/{len(target)}] {t} 검색 중...'))
+                    raw, err = fetch_actress_info(tag)
+                    info = raw
+                    if client and (raw or not err):
+                        try:
+                            info = client.generate_actor_info(tag, raw)
+                        except Exception:
+                            info = raw
+                    self.db.set_tag_extra_info(tag, info)
+                    person_tags[idx] = (tag, info)
+                    def upd(i=idx, t=tag, inf=info, d=done):
+                        marker = '✓' if inf.strip() else ' '
+                        person_lb.delete(i); person_lb.insert(i, f'{marker} {t}')
+                        pb.config(value=d)
+                    dlg.after(0, upd)
+
+                def finish():
+                    status_lbl.config(text=f'완료! {len(target)}개 처리')
+                    start_btn.config(state='normal')
+                    running[0] = False
+                dlg.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        start_btn = ttk.Button(dlg, text='▶ 일괄 검색 시작',
+                               style='Acc.TButton', command=start_batch)
+        start_btn.pack(pady=(0, 8))
+
+    # ── 행위 일괄 처리 ───────────────────────────
+    def _action_tags_dlg(self, parent_win):
+        """행위(tag_type='행위') 태그 설명 LLM 자동 생성."""
+        client = self._get_llm_client()
+        if not client: return
+
+        dlg = tk.Toplevel(parent_win); dlg.title('⚡ 행위 일괄 처리')
+        dlg.configure(bg='#0d0d14'); dlg.geometry('680x500')
+        dlg.resizable(True, True); dlg.grab_set()
+
+        tk.Label(dlg, text='행위 태그 설명 자동 생성',
+                 bg='#0d0d14', fg='#dcdcf0',
+                 font=('Consolas', 11, 'bold')).pack(pady=(12, 4))
+
+        opt_f = tk.Frame(dlg, bg='#0d0d14')
+        opt_f.pack(fill='x', padx=16, pady=2)
+        tk.Label(opt_f, text='작업수:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        count_var = tk.IntVar(value=20)
+        tk.Spinbox(opt_f, from_=1, to=200, textvariable=count_var,
+                   width=5, bg='#1a1a28', fg='#dcdcf0',
+                   font=('Consolas', 9)).pack(side='left', padx=4)
+        skip_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(opt_f, text='이미 설명 있는 태그 건너뜀',
+                       variable=skip_var, bg='#0d0d14', fg='#aaa',
+                       selectcolor='#7c6ff7', activebackground='#0d0d14',
+                       font=('Consolas', 9)).pack(side='left', padx=8)
+
+        body_f = tk.Frame(dlg, bg='#0d0d14')
+        body_f.pack(fill='both', expand=True, padx=12, pady=4)
+
+        left_f = tk.Frame(body_f, bg='#0d0d14', width=220)
+        left_f.pack(side='left', fill='y', padx=(0, 6))
+        left_f.pack_propagate(False)
+        tk.Label(left_f, text='행위 태그', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        lb_sb = ttk.Scrollbar(left_f, orient='vertical')
+        action_lb = tk.Listbox(left_f, bg='#1a1a28', fg='#90ff90',
+                               selectbackground='#7c6ff7', selectforeground='#fff',
+                               font=('Consolas', 9), bd=0, highlightthickness=0,
+                               activestyle='none', yscrollcommand=lb_sb.set)
+        lb_sb.config(command=action_lb.yview)
+        lb_sb.pack(side='right', fill='y')
+        action_lb.pack(fill='both', expand=True)
+
+        right_f = tk.Frame(body_f, bg='#0d0d14')
+        right_f.pack(side='left', fill='both', expand=True)
+        tk.Label(right_f, text='생성된 설명', bg='#0d0d14', fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        preview_txt = tk.Text(right_f, bg='#0a0a12', fg='#dcdcf0',
+                              font=('Consolas', 9), relief='flat', bd=0,
+                              highlightthickness=1, highlightbackground='#2a2a3d',
+                              state='disabled', wrap='word')
+        preview_txt.pack(fill='both', expand=True)
+
+        rows = self.db.conn.execute(
+            "SELECT t.tag, COALESCE(m.description,'') FROM "
+            "(SELECT DISTINCT tag FROM tags) t "
+            "LEFT JOIN tag_meta m ON t.tag=m.tag "
+            "WHERE COALESCE(m.tag_type,'')='행위' ORDER BY t.tag").fetchall()
+        action_tags = list(rows)
+
+        for tag, desc in action_tags:
+            marker = '✓' if desc.strip() else ' '
+            action_lb.insert('end', f'{marker} {tag}')
+
+        def on_lb_select(e=None):
+            sel = action_lb.curselection()
+            if not sel: return
+            _, desc = action_tags[sel[0]]
+            preview_txt.config(state='normal')
+            preview_txt.delete('1.0', 'end')
+            preview_txt.insert('1.0', desc or '(설명 없음)')
+            preview_txt.config(state='disabled')
+
+        action_lb.bind('<<ListboxSelect>>', on_lb_select)
+
+        pb = ttk.Progressbar(dlg)
+        pb.pack(fill='x', padx=12, pady=(4, 2))
+        status_lbl = tk.Label(dlg, text='', bg='#0d0d14', fg='#7c6ff7',
+                              font=('Consolas', 8))
+        status_lbl.pack()
+
+        running = [False]
+
+        def start_batch():
+            if running[0]: return
+            running[0] = True
+            start_btn.config(state='disabled')
+            count = count_var.get()
+            skip = skip_var.get()
+            target = [(i, tag, desc) for i, (tag, desc) in enumerate(action_tags)
+                      if not skip or not desc.strip()][:count]
+            pb.config(maximum=max(len(target), 1), value=0)
+            status_lbl.config(text=f'총 {len(target)}개 처리 예정...')
+
+            def worker():
+                for done, (idx, tag, _) in enumerate(target, 1):
+                    dlg.after(0, lambda t=tag, d=done:
+                              status_lbl.config(text=f'[{d}/{len(target)}] {t} 생성 중...'))
+                    try:
+                        desc = client.generate_action_desc(tag)
+                    except Exception as ex:
+                        desc = f'(오류: {ex})'
+                    self.db.set_tag_desc(tag, desc)
+                    action_tags[idx] = (tag, desc)
+                    def upd(i=idx, t=tag, d_=desc, d=done):
+                        marker = '✓' if d_.strip() else ' '
+                        action_lb.delete(i); action_lb.insert(i, f'{marker} {t}')
+                        pb.config(value=d)
+                    dlg.after(0, upd)
+
+                def finish():
+                    status_lbl.config(text=f'완료! {len(target)}개 처리')
+                    start_btn.config(state='normal')
+                    running[0] = False
+                dlg.after(0, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        start_btn = ttk.Button(dlg, text='▶ 일괄 생성 시작',
+                               style='Acc.TButton', command=start_batch)
+        start_btn.pack(pady=(0, 8))
 
     # ── 갤러리 뷰 (웹 브라우저) ──────────────────
     def _gallery_view(self):

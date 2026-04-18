@@ -990,6 +990,88 @@ def offline_db_stats() -> str:
         return f'오프라인 DB: {len(_OFFLINE_DB):,}개 코드'
     return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
 
+def fetch_javdatabase_info(slug: str) -> tuple:
+    """javdatabase.com/idols/{slug}/ 에서 JAV 배우 프로필 스크래핑.
+    slug: 'rei-saegusa' 형식 (소문자, 하이픈 구분)
+    반환: (raw_text: str, error_msg: str)"""
+    if not _HAS_BS4:
+        return '', 'beautifulsoup4 미설치'
+    url = f'https://www.javdatabase.com/idols/{slug.lower().replace(" ", "-")}/'
+    print(f'[javdatabase] GET {url}', flush=True)
+    r = _get(url)
+    if r.status != 200:
+        return '', f'HTTP {r.status}'
+    soup = _soup(r.text)
+    info = {}
+    # 이름
+    h1 = soup.select_one('h1, .idol-name, .entry-title')
+    info['이름'] = h1.get_text(strip=True) if h1 else slug
+    # 프로필 테이블 파싱 — <table>, <dl>, <div class="idol-info"> 등
+    for row in soup.select('table tr, .idol-info tr, dl dt'):
+        if row.name == 'dt':
+            key = row.get_text(strip=True).rstrip(':：')
+            dd = row.find_next_sibling('dd')
+            val = dd.get_text(strip=True) if dd else ''
+        else:
+            cells = row.find_all(['td', 'th'])
+            if len(cells) < 2: continue
+            key = cells[0].get_text(strip=True).rstrip(':：')
+            val = cells[1].get_text(strip=True)
+        if not val or val == '-': continue
+        if any(k in key for k in ['Birth','생일','誕生','Birthday','Born']): info['생년월일'] = val
+        elif any(k in key for k in ['Height','신장','身長','身高']): info['신장'] = val
+        elif any(k in key for k in ['Cup','カップ','컵']): info['컵'] = val
+        elif any(k in key for k in ['Measure','スリー','치수','Bust','Hip','Waist']): info.setdefault('체형', val)
+        elif any(k in key for k in ['Debut','데뷔','デビュー']): info['데뷔'] = val
+        elif any(k in key for k in ['Nationality','국적','国籍']): info['국적'] = val
+    # 이미지
+    img = soup.select_one('.idol-image img, .entry-content img, article img')
+    if img and img.get('src'): info['image_url'] = img['src']
+    lines = [f"이름: {info.get('이름', slug)}"]
+    lines += [f'{k}: {v}' for k, v in info.items() if k not in ('이름', 'image_url')]
+    if 'image_url' in info: lines.append(f"image_url: {info['image_url']}")
+    return '\n'.join(lines), ''
+
+
+def fetch_babepedia_info(slug: str) -> tuple:
+    """babepedia.com/babe/{slug} 에서 서양 배우 프로필 스크래핑.
+    slug: 'Danni_Ashe' 형식 (언더바 구분, 대소문자 유지)
+    반환: (raw_text: str, error_msg: str)"""
+    if not _HAS_BS4:
+        return '', 'beautifulsoup4 미설치'
+    url = f'https://www.babepedia.com/babe/{slug}'
+    print(f'[babepedia] GET {url}', flush=True)
+    r = _get(url)
+    if r.status != 200:
+        return '', f'HTTP {r.status}'
+    soup = _soup(r.text)
+    info = {}
+    h1 = soup.select_one('h1, .babe-name')
+    info['이름'] = h1.get_text(strip=True) if h1 else slug.replace('_', ' ')
+    # 프로필 ul/li 또는 table
+    for item in soup.select('.biodata li, .profile li, table.biodata tr'):
+        txt = item.get_text(separator=':', strip=True)
+        if ':' not in txt: continue
+        key, _, val = txt.partition(':')
+        key = key.strip(); val = val.strip()
+        if not val or val in ('-', 'N/A', 'Unknown'): continue
+        kl = key.lower()
+        if any(k in kl for k in ['born','birthday','birth date']): info['생년월일'] = val
+        elif 'height' in kl: info['신장'] = val
+        elif 'weight' in kl: info['체중'] = val
+        elif any(k in kl for k in ['measure','bust','waist','hip']): info.setdefault('체형', val)
+        elif 'nation' in kl or 'ethnic' in kl: info['국적'] = val
+        elif 'career' in kl or 'active' in kl: info['활동기간'] = val
+        elif 'hair' in kl: info['헤어'] = val
+        elif 'eye' in kl: info['눈색'] = val
+    img = soup.select_one('.babe-image img, .profile-image img, article img')
+    if img and img.get('src'): info['image_url'] = img['src']
+    lines = [f"이름: {info.get('이름', slug)}"]
+    lines += [f'{k}: {v}' for k, v in info.items() if k not in ('이름', 'image_url')]
+    if 'image_url' in info: lines.append(f"image_url: {info['image_url']}")
+    return '\n'.join(lines), ''
+
+
 def fetch_actress_info(name: str) -> tuple:
     """배우 이름으로 JavDB에서 프로필 정보 검색.
     반환: (raw_text_kr: str, error_msg: str)

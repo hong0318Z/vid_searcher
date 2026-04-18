@@ -379,7 +379,7 @@ class LLMClient:
                 [{'role': 'system',
                   'content': '당신은 성인 영상 배우 정보 정리 전문가입니다.'},
                  {'role': 'user', 'content': prompt}],
-                max_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=2048,
             )
         except Exception as e:
             return f'(정보 생성 실패: {e})'

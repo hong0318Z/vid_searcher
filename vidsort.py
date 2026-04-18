@@ -2729,9 +2729,24 @@ class VidSort(tk.Tk):
 
         save_one_btn.config(command=save_single)
 
+        # ── 작업 로그 ──
+        log_frame = tk.Frame(dlg, bg='#0d0d14')
+        log_frame.pack(fill='x', padx=12, pady=(4, 0))
+        tk.Label(log_frame, text='작업 로그', bg='#0d0d14', fg='#555',
+                 font=('Consolas', 8)).pack(anchor='w')
+        log_sb = ttk.Scrollbar(log_frame, orient='vertical')
+        log_txt = tk.Text(log_frame, bg='#0a0a12', fg='#88cc88',
+                          font=('Consolas', 8), relief='flat', bd=0,
+                          highlightthickness=1, highlightbackground='#1e1e2d',
+                          height=7, state='disabled', wrap='word',
+                          yscrollcommand=log_sb.set)
+        log_sb.config(command=log_txt.yview)
+        log_sb.pack(side='right', fill='y')
+        log_txt.pack(fill='x')
+
         # ── 하단 컨트롤 ──
         ctrl_f = tk.Frame(dlg, bg='#0d0d14')
-        ctrl_f.pack(fill='x', padx=12, pady=(2, 4))
+        ctrl_f.pack(fill='x', padx=12, pady=(4, 4))
 
         # 진행 바 + 상태
         pb = ttk.Progressbar(dlg)
@@ -2783,42 +2798,56 @@ class VidSort(tk.Tk):
             pb.config(maximum=max(len(targets), 1), value=0)
             status_lbl.config(text=f'1차 초벌: {len(targets)}개 배우 이름 분석 중...')
 
+            def log(msg):
+                def _do(m=msg):
+                    log_txt.config(state='normal')
+                    log_txt.insert('end', m + '\n')
+                    log_txt.see('end')
+                    log_txt.config(state='disabled')
+                dlg.after(0, _do)
+
             def worker():
                 from jav_scraper import (fetch_javdatabase_info,
                                          fetch_babepedia_info,
                                          fetch_namuwiki_info)
                 client = self._get_llm_client()
-                # LLM으로 전체 이름 한번에 분석
+
+                log(f'▶ LLM 이름 분석 시작 ({len(targets)}명)...')
                 analysis = {}
                 if client:
                     try:
                         analysis = client.analyze_actor_names(targets)
+                        log(f'  → 분석 완료: {len(analysis)}개 결과')
                     except Exception as ex:
-                        dlg.after(0, lambda e=ex: status_lbl.config(
-                            text=f'LLM 분석 오류: {e}'))
+                        log(f'  → LLM 오류: {ex}')
 
                 for done, tag in enumerate(targets, 1):
-                    dlg.after(0, lambda t=tag, d=done:
-                              status_lbl.config(
-                                  text=f'[{d}/{len(targets)}] {t} 스크래핑 중...'))
+                    log(f'\n[{done}/{len(targets)}] {tag}')
+                    dlg.after(0, lambda d=done: pb.config(value=d))
                     raw_parts = []
                     info = analysis.get(tag, {})
                     actor_type = info.get('type', 'unknown')
                     javdb_slug = info.get('javdb_slug', '')
                     babe_slug = info.get('babepedia_slug', '')
                     variants = info.get('variants', [])
+                    log(f'  type={actor_type}  slug={javdb_slug or babe_slug or "-"}')
 
-                    # JAV 배우: javdatabase + javdb
+                    # JAV 배우: javdatabase
                     if actor_type in ('jav', 'unknown'):
                         slugs_to_try = []
                         if javdb_slug: slugs_to_try.append(javdb_slug)
                         slugs_to_try += [v for v in variants
                                          if v and '-' in v and v not in slugs_to_try]
                         for slug in slugs_to_try[:3]:
+                            log(f'  javdatabase → {slug}')
                             raw, err = fetch_javdatabase_info(slug)
                             if raw:
+                                log(f'    ✓ {len(raw)}자 수집')
                                 raw_parts.append(f'[javdatabase]\n{raw}')
                                 break
+                            else:
+                                log(f'    ✗ {err}')
+
                     # 서양 배우: babepedia
                     if actor_type in ('western', 'unknown'):
                         slugs_to_try = []
@@ -2826,23 +2855,33 @@ class VidSort(tk.Tk):
                         slugs_to_try += [v for v in variants
                                          if v and '_' in v and v not in slugs_to_try]
                         for slug in slugs_to_try[:3]:
+                            log(f'  babepedia → {slug}')
                             raw, err = fetch_babepedia_info(slug)
                             if raw:
+                                log(f'    ✓ {len(raw)}자 수집')
                                 raw_parts.append(f'[babepedia]\n{raw}')
                                 break
+                            else:
+                                log(f'    ✗ {err}')
 
-                    # 나무위키 (언어 무관, 항상 시도)
-                    namu_raw, _ = fetch_namuwiki_info(tag)
+                    # 나무위키
+                    log(f'  나무위키 → {tag}')
+                    namu_raw, namu_err = fetch_namuwiki_info(tag)
                     if namu_raw:
+                        log(f'    ✓ {len(namu_raw)}자 수집')
                         raw_parts.append(f'[나무위키]\n{namu_raw}')
+                    else:
+                        log(f'    ✗ {namu_err}')
 
                     combined = '\n\n'.join(raw_parts) if raw_parts else ''
                     draft_pool[tag] = combined
                     if combined:
                         tag_status[tag] = 'draft'
-                    pb_val = done
+                        log(f'  → 📋 초벌 완료 ({len(combined)}자)')
+                    else:
+                        log(f'  → ⬜ 수집 실패')
 
-                    def upd(t=tag, d=pb_val):
+                    def upd(t=tag, d=done):
                         _refresh_lb_item(t)
                         pb.config(value=d)
                     dlg.after(0, upd)

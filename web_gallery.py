@@ -169,18 +169,24 @@ def _get_tags_with_stats():
     c    = _conn()
     tags = c.execute(
         "SELECT t.tag, COUNT(t.path) as cnt, "
-        "       m.description "
+        "       COALESCE(m.description,''), COALESCE(m.tag_type,''), "
+        "       COALESCE(m.thumb_path,'') "
         "FROM tags t LEFT JOIN tag_meta m ON t.tag=m.tag "
         "GROUP BY t.tag ORDER BY cnt DESC").fetchall()
     out = []
-    for tag, cnt, desc in tags:
-        # 썸네일 있는 랜덤 영상
-        r = c.execute(
-            "SELECT f.path FROM files f JOIN tags t ON f.path=t.path "
-            "WHERE t.tag=? AND f.thumb_ok=1 ORDER BY RANDOM() LIMIT 1",
-            (tag,)).fetchone()
-        thumb = _vid_id(r[0]) if r else None
-        out.append({'tag':tag, 'cnt':cnt, 'desc':desc or '', 'thumb':thumb})
+    for tag, cnt, desc, tag_type, thumb_path in tags:
+        custom_thumb = bool(thumb_path and Path(thumb_path).exists())
+        if custom_thumb:
+            thumb = None  # 커스텀 이미지는 /tag_thumb/<tag> 라우트 사용
+        else:
+            r = c.execute(
+                "SELECT f.path FROM files f JOIN tags t ON f.path=t.path "
+                "WHERE t.tag=? AND f.thumb_ok=1 ORDER BY RANDOM() LIMIT 1",
+                (tag,)).fetchone()
+            thumb = _vid_id(r[0]) if r else None
+        out.append({'tag': tag, 'cnt': cnt, 'desc': desc,
+                    'tag_type': tag_type, 'thumb': thumb,
+                    'custom_thumb': custom_thumb})
     return out
 
 # ─────────────────────────────────────────────────
@@ -245,6 +251,12 @@ a{color:inherit;text-decoration:none}
 .tag-card .tc-cnt{font-size:11px;color:var(--acc)}
 .tag-card .tc-desc{font-size:10px;color:#ccc;margin-top:2px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tc-type{display:inline-block;font-size:9px;font-weight:700;
+  padding:1px 5px;border-radius:8px;margin-left:4px;vertical-align:middle}
+.tc-type-인물{background:#7c3f7c;color:#ffb3ff}
+.tc-type-행위{background:#2a6040;color:#90ffb0}
+.tc-type-레이블{background:#3a4a7c;color:#a0c0ff}
+.tc-type-기타{background:#444;color:#ccc}
 /* VIDEO GRID */
 .vid-grid{display:grid;
   grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
@@ -396,13 +408,15 @@ _HOME = _BASE.replace('__BODY__', """
   <div class="tag-grid">
   {% for t in tags[:12] %}
     <a href="/tag/{{ t.tag|urlencode }}" class="tag-card">
-      {% if t.thumb %}
+      {% if t.custom_thumb %}
+      <img src="/tag_thumb/{{ t.tag|urlencode }}" loading="lazy" alt="{{ t.tag }}">
+      {% elif t.thumb %}
       <img src="/thumb/{{ t.thumb }}" loading="lazy" alt="{{ t.tag }}">
       {% else %}
       <div class="no-thumb" style="height:100%">🎬</div>
       {% endif %}
       <div class="tc-info">
-        <div class="tc-name">{{ t.tag }}</div>
+        <div class="tc-name">{{ t.tag }}{% if t.tag_type %}<span class="tc-type tc-type-{{t.tag_type}}">{{t.tag_type}}</span>{% endif %}</div>
         <div class="tc-cnt">{{ t.cnt }}개 영상</div>
         {% if t.desc %}<div class="tc-desc">{{ t.desc }}</div>{% endif %}
       </div>
@@ -450,14 +464,16 @@ _TAGS = _BASE.replace('__BODY__', """
   </div>
   <div class="tag-grid" id="tag-grid">
   {% for t in tags %}
-    <a href="/tag/{{ t.tag|urlencode }}" class="tag-card" data-name="{{ t.tag|lower }}">
-      {% if t.thumb %}
+    <a href="/tag/{{ t.tag|urlencode }}" class="tag-card" data-name="{{ t.tag|lower }}" data-type="{{ t.tag_type|lower }}">
+      {% if t.custom_thumb %}
+      <img src="/tag_thumb/{{ t.tag|urlencode }}" loading="lazy" alt="{{ t.tag }}">
+      {% elif t.thumb %}
       <img src="/thumb/{{ t.thumb }}" loading="lazy" alt="{{ t.tag }}">
       {% else %}
       <div class="no-thumb" style="height:100%">🎬</div>
       {% endif %}
       <div class="tc-info">
-        <div class="tc-name">{{ t.tag }}</div>
+        <div class="tc-name">{{ t.tag }}{% if t.tag_type %}<span class="tc-type tc-type-{{t.tag_type}}">{{t.tag_type}}</span>{% endif %}</div>
         <div class="tc-cnt">{{ t.cnt }}개 영상</div>
         {% if t.desc %}<div class="tc-desc">{{ t.desc }}</div>{% endif %}
       </div>
@@ -491,11 +507,39 @@ _TAG_PAGE = _BASE.replace('__BODY__', """
   <div class="breadcrumb">
     <a href="/">홈</a> › <a href="/tags">카테고리</a> › {{ tag }}
   </div>
-  <div class="section-hdr">
-    <h2>{{ tag }}</h2>
-    <span class="cnt">{{ total }}개 영상</span>
+
+  <!-- 태그 프로필 헤더 -->
+  <div style="display:flex;gap:20px;align-items:flex-start;margin-bottom:24px;
+              background:#1a1a1a;border-radius:10px;padding:20px;border:1px solid #2a2a3a">
+    <div style="flex-shrink:0">
+      {% if has_custom_thumb %}
+      <img src="/tag_thumb/{{ tag|urlencode }}"
+           style="width:160px;height:100px;object-fit:cover;border-radius:8px;
+                  border:2px solid #333" alt="{{ tag }}">
+      {% else %}
+      <div style="width:160px;height:100px;background:#111;border-radius:8px;
+                  display:flex;align-items:center;justify-content:center;font-size:40px">🎬</div>
+      {% endif %}
+    </div>
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+        <h2 style="font-size:22px;font-weight:900;margin:0">{{ tag }}</h2>
+        {% if tag_type %}
+        <span class="tc-type tc-type-{{tag_type}}" style="font-size:12px;padding:3px 10px">{{ tag_type }}</span>
+        {% endif %}
+        <span style="color:var(--sub);font-size:13px">{{ total }}개 영상</span>
+      </div>
+      {% if desc %}
+      <p style="color:var(--sub);font-size:14px;margin:0 0 8px">{{ desc }}</p>
+      {% endif %}
+      {% if extra_info %}
+      <div style="color:#ccc;font-size:13px;white-space:pre-line;background:#0d0d14;
+                  border-radius:6px;padding:10px 14px;border:1px solid #2a2a3a;
+                  max-height:150px;overflow-y:auto">{{ extra_info }}</div>
+      {% endif %}
+    </div>
   </div>
-  {% if desc %}<p style="color:var(--sub);margin-bottom:16px;font-size:14px">{{ desc }}</p>{% endif %}
+
   <div class="vid-grid">
   {% for v in videos %}{{ _vid_card(v) }}{% endfor %}
   </div>
@@ -864,15 +908,21 @@ def tag_page(tagname):
     PER  = 40
     vids, total = _query_videos(tag=tagname, offset=(pg-1)*PER, limit=PER)
     c    = _conn()
-    desc = (c.execute("SELECT description FROM tag_meta WHERE tag=?",
-                      (tagname,)).fetchone() or ('',))[0]
+    row = c.execute(
+        "SELECT COALESCE(description,''), COALESCE(tag_type,''), "
+        "       COALESCE(thumb_path,''), COALESCE(extra_info,'') "
+        "FROM tag_meta WHERE tag=?", (tagname,)).fetchone()
+    desc, tag_type, thumb_path, extra_info = row if row else ('', '', '', '')
+    has_custom_thumb = bool(thumb_path and Path(thumb_path).exists())
     for v in vids:
         v['id']      = _vid_id(v['path'])
         v['dur_str'] = _fmt_dur(v['duration'])
         v['tags']    = [x[0] for x in c.execute(
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
-    return _render(_TAG_PAGE, nav='tags', tag=tagname, desc=desc,
+    return _render(_TAG_PAGE, nav='tags', tag=tagname,
+                   desc=desc, tag_type=tag_type,
+                   extra_info=extra_info, has_custom_thumb=has_custom_thumb,
                    videos=vids, total=total,
                    page=pg, pages=(total+PER-1)//PER)
 
@@ -944,6 +994,19 @@ def open_native(vid_id):
             else:                          import subprocess; subprocess.Popen(['xdg-open', path])
         except: pass
     return jsonify({'ok': True})
+
+@app.route('/tag_thumb/<tagname>')
+def serve_tag_thumb(tagname):
+    c = _conn()
+    row = c.execute("SELECT thumb_path FROM tag_meta WHERE tag=?",
+                    (tagname,)).fetchone()
+    if not row or not row[0]:
+        abort(404)
+    p = Path(row[0])
+    if not p.exists():
+        abort(404)
+    mime = mimetypes.guess_type(str(p))[0] or 'image/jpeg'
+    return send_file(str(p), mimetype=mime, max_age=3600)
 
 @app.route('/thumb/<h>')
 def serve_thumb(h):

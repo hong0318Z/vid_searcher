@@ -1104,9 +1104,19 @@ def fetch_babepedia_info(slug: str) -> tuple:
     h1 = soup.select_one('h1, .babe-name, .model-name')
     info['이름'] = h1.get_text(strip=True) if h1 else slug.replace('_', ' ')
 
+    # 소개 텍스트 (biotext)
+    biotext = soup.select_one('#biotext, p#biotext')
+    if biotext:
+        bt = biotext.get_text(' ', strip=True)
+        if bt:
+            info['소개'] = bt[:500]
+
+    # 프로필 블록: #personal-info-block 우선, 없으면 전체
+    info_root = soup.select_one('#personal-info-block') or soup
+
     # 프로필 ul/li, table, 또는 div 구조
-    profile_items = soup.select(
-        '.biodata li, .profile li, .bio li, table.biodata tr, '
+    profile_items = info_root.select(
+        'li, table tr, .biodata li, .profile li, .bio li, '
         '.model-info li, .info-list li, .babe-details li'
     )
     for item in profile_items:

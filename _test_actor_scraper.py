@@ -57,7 +57,6 @@ if not SKIP_LLM:
 # 스크래퍼 임포트
 try:
     from jav_scraper import (
-        fetch_actress_info,
         fetch_javdatabase_info,
         fetch_babepedia_info,
         fetch_namuwiki_info,
@@ -139,23 +138,14 @@ for name in TEST_NAMES:
     else:
         print('  type=jav → 건너뜀')
 
-    # ── STEP 2-C: JavDB fetch_actress_info ──
-    section('STEP 2-C — JavDB fetch_actress_info()')
-    raw, err = fetch_actress_info(name)
-    if raw:
-        print(raw)
-        all_raw_parts.append(f'[javdb]\n{raw}')
+    # ── STEP 2-C: 나무위키 ──
+    section('STEP 2-C — 나무위키 fetch_namuwiki_info()')
+    namu_raw, namu_err = fetch_namuwiki_info(name)
+    if namu_raw:
+        print(namu_raw)
+        all_raw_parts.append(f'[나무위키]\n{namu_raw}')
     else:
-        print(f'결과 없음: {err}')
-
-    # ── STEP 2-D: 나무위키 ──
-    section('STEP 2-D — 나무위키 fetch_namuwiki_info()')
-    raw, err = fetch_namuwiki_info(name)
-    if raw:
-        print(raw)
-        all_raw_parts.append(f'[나무위키]\n{raw}')
-    else:
-        print(f'결과 없음: {err}')
+        print(f'결과 없음: {namu_err}')
 
     # ── 전체 raw 합산 출력 ──
     combined_raw = '\n\n'.join(all_raw_parts)

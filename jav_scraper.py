@@ -1109,7 +1109,7 @@ def fetch_babepedia_info(slug: str) -> tuple:
     if biotext:
         bt = biotext.get_text(' ', strip=True)
         if bt:
-            info['소개'] = bt[:500]
+            info['소개'] = bt
 
     # 프로필 블록: #personal-info-block 우선, 없으면 전체
     info_root = soup.select_one('#personal-info-block') or soup

@@ -2904,9 +2904,6 @@ class VidSort(tk.Tk):
             if not client:
                 status_lbl.config(text='LLM 클라이언트 없음 — 설정을 확인하세요')
                 return
-            running[0] = True
-            phase1_btn.config(state='disabled')
-            phase2_btn.config(state='disabled')
 
             skip = skip2_var.get()
             count = count2_var.get()
@@ -2915,6 +2912,31 @@ class VidSort(tk.Tk):
                        if draft_pool.get(tag, '')
                        and (not skip or tag_status.get(tag) != 'done')]
             targets = targets[:count]
+
+            if not targets:
+                status_lbl.config(text='처리할 초벌 데이터가 없습니다')
+                return
+
+            # 입력 토큰 경고 체크 (입력이 출력 최대의 70% 이상인 항목)
+            from llm_api import MAX_OUTPUT_TOKENS
+            WARN_CHARS = int(MAX_OUTPUT_TOKENS * 0.7 * 4)  # ≈ 179,200자
+            heavy = [(tag, raw) for tag, raw in targets if len(raw) > WARN_CHARS]
+            msg_parts = [f'총 {len(targets)}개 항목을 LLM 처리합니다.']
+            if heavy:
+                msg_parts.append(
+                    f'\n⚠ {len(heavy)}개 항목의 입력 텍스트가\n'
+                    f'출력 토큰 최대치의 70%를 초과합니다\n'
+                    f'({WARN_CHARS:,}자 이상).\n처리 시간이 길어질 수 있습니다.'
+                )
+            msg_parts.append('\n\n진행하시겠습니까?')
+            if not tk.messagebox.askyesno('2차 후벌 확인', ''.join(msg_parts),
+                                          parent=dlg):
+                return
+
+            running[0] = True
+            phase1_btn.config(state='disabled')
+            phase2_btn.config(state='disabled')
+
             pb.config(maximum=max(len(targets), 1), value=0)
             status_lbl.config(text=f'2차 후벌: {len(targets)}개 LLM 처리 예정...')
 

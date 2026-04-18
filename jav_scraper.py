@@ -1152,6 +1152,70 @@ def fetch_actress_info(name: str) -> tuple:
         return '', str(e)
 
 
+def fetch_namuwiki_info(name: str) -> tuple:
+    """나무위키에서 배우/인물 정보 수집.
+    name: 배우명 (한국어/일본어/영어 모두 가능)
+    반환: (raw_text: str, error_msg: str)"""
+    if not _HAS_BS4:
+        return '', 'beautifulsoup4 미설치'
+    import urllib.parse as _up
+    url = 'https://namu.wiki/w/' + _up.quote(name, safe='')
+    print(f'[나무위키] GET {url}', flush=True)
+    r = _get(url, timeout=15)
+    if r.status != 200:
+        return '', f'HTTP {r.status}'
+    if len(r.text) < 1000:
+        return '', '페이지 없음 또는 차단됨'
+
+    soup = _soup(r.text)
+
+    # 페이지 제목
+    title_el = soup.select_one('h1, .title, [class*="documentTitle"]')
+    title = title_el.get_text(strip=True) if title_el else name
+
+    # "상세" 섹션만 추출
+    # 나무위키 구조: <div class="wiki-heading"> 또는 <h2/h3/h4>로 섹션 구분
+    target_keywords = ('상세', '프로필', '인물 정보', '기본 정보', 'profile')
+    content_parts = []
+    found_section = False
+
+    # 모든 직계 자식 순회 (섹션 경계 감지)
+    content_root = soup.select_one('[class*="wiki-content"], #article-content, article, main')
+    if not content_root:
+        content_root = soup.body
+
+    if content_root:
+        for el in content_root.descendants:
+            if el.name in ('h2', 'h3', 'h4') or (
+                    hasattr(el, 'get') and 'heading' in ' '.join(el.get('class') or [])):
+                txt = el.get_text(strip=True)
+                if any(kw in txt for kw in target_keywords):
+                    found_section = True
+                    continue
+                elif found_section:
+                    break
+            if found_section and el.name in ('p', 'li', 'td', 'dd', 'span', 'div'):
+                t = el.get_text(' ', strip=True)
+                if t and len(t) > 5:
+                    content_parts.append(t)
+
+    # fallback: 섹션 못 찾으면 페이지 앞부분 텍스트
+    if not content_parts:
+        if content_root:
+            raw_text = content_root.get_text(' ', strip=True)
+            content_parts = [raw_text[:800]]
+
+    text = f'이름: {title}\n' + '\n'.join(content_parts)
+    # 중복 줄 제거 후 2000자 제한
+    seen, deduped = set(), []
+    for line in text.splitlines():
+        ls = line.strip()
+        if ls and ls not in seen:
+            seen.add(ls)
+            deduped.append(ls)
+    return '\n'.join(deduped)[:2000], ''
+
+
 def check_deps() -> list[str]:
     """누락 의존성 목록 반환 (필수만)"""
     missing = []

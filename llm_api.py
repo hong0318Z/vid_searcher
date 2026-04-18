@@ -356,21 +356,19 @@ class LLMClient:
     def generate_actor_info(self, actor_name: str,
                             raw_scraped: str = '') -> str:
         """배우 이름 + 스크래핑 원본 → 한국어 배우 프로필 텍스트."""
-        ctx = f'\n\n[스크래핑 데이터]\n{raw_scraped}' if raw_scraped else ''
         prompt = (
-            f'배우 이름: {actor_name}{ctx}\n\n'
-            '위 배우에 대한 정보를 한국어로 간결하게 정리해주세요.\n'
-            '스크래핑 데이터가 있으면 우선 활용하고, 없거나 부족하면 알고 있는 정보를 사용하세요.\n'
-            '형식 (모르는 항목은 생략):\n'
-            '이름: ...\n생년월일: ...\n신장: ...\n데뷔: ...\n국적: ...\n활동: ...\n특이사항: ...\n\n'
-            '200자 이내로 작성하세요.'
+            f'다음은 {actor_name}에 대해 여러 소스에서 수집한 정보입니다.\n'
+            '이 정보들을 적절히 섞어서 자연스러운 한국어 배우 소개글을 작성하세요.\n'
+            '형식 (모르는 항목은 생략): 이름 / 생년월일 / 신장 / 데뷔 / 국적 / 활동 / 특이사항 순으로.\n'
+            '없는 정보는 생략. 최대 2000자.\n\n'
+            f'수집된 원본 정보:\n{raw_scraped or "(없음)"}'
         )
         try:
             return self._chat(
                 [{'role': 'system',
                   'content': '당신은 성인 영상 배우 정보 정리 전문가입니다.'},
                  {'role': 'user', 'content': prompt}],
-                max_tokens=1024,
+                max_tokens=MAX_OUTPUT_TOKENS,
             )
         except Exception as e:
             return f'(정보 생성 실패: {e})'

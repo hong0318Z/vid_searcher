@@ -2786,7 +2786,8 @@ class VidSort(tk.Tk):
             def worker():
                 from jav_scraper import (fetch_actress_info,
                                          fetch_javdatabase_info,
-                                         fetch_babepedia_info)
+                                         fetch_babepedia_info,
+                                         fetch_namuwiki_info)
                 client = self._get_llm_client()
                 # LLM으로 전체 이름 한번에 분석
                 analysis = {}
@@ -2834,6 +2835,11 @@ class VidSort(tk.Tk):
                             if raw:
                                 raw_parts.append(f'[babepedia]\n{raw}')
                                 break
+
+                    # 나무위키 (언어 무관, 항상 시도)
+                    namu_raw, _ = fetch_namuwiki_info(tag)
+                    if namu_raw:
+                        raw_parts.append(f'[나무위키]\n{namu_raw}')
 
                     combined = '\n\n'.join(raw_parts) if raw_parts else ''
                     draft_pool[tag] = combined

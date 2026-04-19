@@ -364,25 +364,77 @@ class LLMClient:
         except Exception:
             return {}
 
-    def generate_actor_info(self, actor_name: str,
-                            raw_scraped: str = '') -> str:
-        """배우 이름 + 스크래핑 원본 → 한국어 배우 프로필 텍스트."""
-        prompt = (
-            f'다음은 {actor_name}에 대해 여러 소스에서 수집한 정보입니다.\n'
-            '이 정보들을 적절히 섞어서 자연스러운 한국어 배우 소개글을 작성하세요.\n'
-            '형식 (모르는 항목은 생략): 이름 / 생년월일 / 신장 / 데뷔 / 국적 / 활동 / 특이사항 순으로.\n'
-            '없는 정보는 생략. 최대 2000자.\n\n'
-            f'수집된 원본 정보:\n{raw_scraped or "(없음)"}'
+    def generate_actor_info_batch(self, actor_data: dict) -> dict:
+        """배우 여러 명의 스크래핑 정보를 한 번에 받아 한국어 프로필 딕셔너리로 반환합니다.
+        
+        Args:
+            actor_data: {"배우이름1": "스크래핑 원문1", "배우이름2": "스크래핑 원문2"}
+        
+        Returns:
+            {"배우이름1": "정리된 프로필 텍스트", "배우이름2": "정리된 프로필 텍스트"}
+        """
+        if not actor_data:
+            return {}
+
+        # 1. 프롬프트 헤더 (마크다운 엄격 금지 및 JSON 형식 지정)
+        _PROMPT_HEADER = (
+            '아래 제공된 여러 배우들의 수집된 원본 정보를 바탕으로, 각 배우별로 자연스러운 한국어 소개글을 작성해주세요.\n'
+            '형식 (모르는 항목은 생략): 이름 / 생년월일 / 신장 / 데뷔 / 국적 / 활동 / 특이사항 순으로 줄글 형태로 작성.\n'
+            '없는 정보는 억지로 지어내지 말고 생략하며, 각 프로필은 최대 1000자 이내로 정리하세요.\n\n'
+            '🚨[중요 제약사항]🚨\n'
+            '- 텍스트 내부에 `**` (볼드체), `#` (제목), `-` (리스트) 같은 마크다운 서식을 절대 사용하지 마세요. 순수한 평문(Plain text)만 쓰세요.\n'
+            '- 코드 블록(```json 등)으로 감싸지 마세요.\n'
+            '- 오직 아래 제시된 JSON 형식만 출력하세요. 다른 말은 덧붙이지 마세요.\n\n'
+            '응답 형식:\n'
+            '{\n'
+            '  "배우이름1": "이름: OOO\\n생년월일: OOO...",\n'
+            '  "배우이름2": "이름: OOO\\n신장: OOO..."\n'
+            '}\n\n'
+            '=== 수집된 원본 정보 ===\n'
         )
+
+        # 2. 입력 데이터 조립
+        lines = []
+        for name, raw in actor_data.items():
+            lines.append(f'[{name}]\n{raw or "(없음)"}\n' + '-' * 20)
+        
+        body_text = '\n'.join(lines)
+
+        # 3. 토큰 초과 방지 (스크래핑 원문이 길 수 있으므로 넉넉하게 절반으로 쪼개기)
+        _MAX_INPUT_CHARS = int(MAX_OUTPUT_TOKENS * 0.5 * 4) 
+        if len(_PROMPT_HEADER) + len(body_text) > _MAX_INPUT_CHARS:
+            items = list(actor_data.items())
+            mid = len(items) // 2
+            
+            result = {}
+            result.update(self.generate_actor_info_batch(dict(items[:mid])))
+            result.update(self.generate_actor_info_batch(dict(items[mid:])))
+            return result
+
+        prompt = _PROMPT_HEADER + body_text
+
+        # 4. LLM 호출 및 방어적 파싱
         try:
-            return self._chat(
-                [{'role': 'system',
-                  'content': '당신은 성인 영상 배우 정보 정리 전문가입니다.'},
+            raw_response = self._chat(
+                [{'role': 'system', 'content': '당신은 성인 영상 배우 정보 정리 전문가입니다. 오직 순수 JSON 문자열만 반환합니다.'},
                  {'role': 'user', 'content': prompt}],
                 max_tokens=MAX_OUTPUT_TOKENS,
             )
+            
+            # LLM이 말을 안 듣고 ```json 블록을 썼을 경우를 대비한 물리적 제거
+            if raw_response.startswith('```'):
+                raw_response = raw_response.split('```')[1].lstrip('json').strip()
+            
+            # JSON 시작 괄호 찾기 (앞에 쓸데없는 인사말이 붙었을 경우 대비)
+            brace = raw_response.find('{')
+            if brace > 0: 
+                raw_response = raw_response[brace:]
+                
+            return json.loads(raw_response.strip())
+            
         except Exception as e:
-            return f'(정보 생성 실패: {e})'
+            print(f"[generate_actor_info_batch] JSON 파싱 실패: {e}")
+            return {}
 
     def generate_action_desc(self, action_name: str,
                              context_tags: str = '') -> str:

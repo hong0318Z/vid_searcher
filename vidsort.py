@@ -2757,23 +2757,30 @@ class VidSort(tk.Tk):
 
         running = [False]
 
-        # 2차 작업수
-        p2_f = tk.Frame(ctrl_f, bg='#0d0d14')
-        p2_f.pack(side='right', padx=4)
-        tk.Label(p2_f, text='2차 작업수:', bg='#0d0d14', fg='#aaa',
-                 font=('Consolas', 9)).pack(side='left')
-        count2_var = tk.IntVar(value=10)
-        tk.Spinbox(p2_f, from_=1, to=200, textvariable=count2_var,
-                   width=5, bg='#1a1a28', fg='#dcdcf0',
-                   font=('Consolas', 9)).pack(side='left', padx=4)
+        # 옵션 행
+        opt_row = tk.Frame(ctrl_f, bg='#0d0d14')
+        opt_row.pack(fill='x', pady=(0, 4))
+        skip1_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(opt_row, text='1차: 이미 초벌/저장된 태그 건너뜀',
+                       variable=skip1_var, bg='#0d0d14', fg='#aaa',
+                       selectcolor='#7c6ff7', activebackground='#0d0d14',
+                       font=('Consolas', 9)).pack(side='left', padx=(0, 12))
         skip2_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(p2_f, text='이미 저장된 태그 건너뜀',
+        tk.Checkbutton(opt_row, text='2차: DB 저장된 태그 건너뜀',
                        variable=skip2_var, bg='#0d0d14', fg='#aaa',
                        selectcolor='#7c6ff7', activebackground='#0d0d14',
-                       font=('Consolas', 9)).pack(side='left')
+                       font=('Consolas', 9)).pack(side='left', padx=(0, 12))
+        tk.Label(opt_row, text='2차 한번에:', bg='#0d0d14', fg='#aaa',
+                 font=('Consolas', 9)).pack(side='left')
+        count2_var = tk.IntVar(value=5)
+        tk.Spinbox(opt_row, from_=1, to=50, textvariable=count2_var,
+                   width=4, bg='#1a1a28', fg='#dcdcf0',
+                   font=('Consolas', 9)).pack(side='left', padx=4)
+        tk.Label(opt_row, text='명/호출', bg='#0d0d14', fg='#555',
+                 font=('Consolas', 9)).pack(side='left')
 
         btn_row = tk.Frame(ctrl_f, bg='#0d0d14')
-        btn_row.pack(side='left', fill='x', expand=True)
+        btn_row.pack(fill='x')
 
         phase1_btn = ttk.Button(btn_row, text='▶ 1차 초벌  (스크래핑)',
                                 style='Acc.TButton')
@@ -2785,7 +2792,10 @@ class VidSort(tk.Tk):
 
         save_all_btn = ttk.Button(btn_row, text='💾 초벌 전체 저장',
                                   style='Acc.TButton')
-        save_all_btn.pack(side='left')
+        save_all_btn.pack(side='left', padx=(0, 6))
+
+        reset_all_btn = ttk.Button(btn_row, text='🗑 전체 초기화')
+        reset_all_btn.pack(side='left')
 
         # ── 1차 초벌: LLM 이름 분석 → 스크래핑 → draft_pool ──
         def phase1():
@@ -2794,7 +2804,15 @@ class VidSort(tk.Tk):
             phase1_btn.config(state='disabled')
             phase2_btn.config(state='disabled')
 
-            targets = [tag for tag, _ in person_tags]
+            skip1 = skip1_var.get()
+            targets = [tag for tag, _ in person_tags
+                       if not skip1 or tag_status.get(tag) not in ('draft', 'done')]
+            if not targets:
+                status_lbl.config(text='모든 태그가 이미 초벌/저장 완료됨')
+                phase1_btn.config(state='normal')
+                phase2_btn.config(state='normal')
+                running[0] = False
+                return
             pb.config(maximum=max(len(targets), 1), value=0)
             status_lbl.config(text=f'1차 초벌: {len(targets)}개 배우 이름 분석 중...')
 
@@ -2897,7 +2915,7 @@ class VidSort(tk.Tk):
 
             threading.Thread(target=worker, daemon=True).start()
 
-        # ── 2차 후벌: draft_pool → LLM generate_actor_info → DB 저장 ──
+        # ── 2차 후벌: draft_pool → LLM 배치 호출 → DB 저장 ──
         def phase2():
             if running[0]: return
             client = self._get_llm_client()
@@ -2905,69 +2923,71 @@ class VidSort(tk.Tk):
                 status_lbl.config(text='LLM 클라이언트 없음 — 설정을 확인하세요')
                 return
 
-            skip = skip2_var.get()
-            count = count2_var.get()
-            targets = [(tag, draft_pool.get(tag, ''))
-                       for tag, _ in person_tags
-                       if draft_pool.get(tag, '')
-                       and (not skip or tag_status.get(tag) != 'done')]
-            targets = targets[:count]
+            skip2 = skip2_var.get()
+            batch_size = count2_var.get()
+            all_targets = [(tag, draft_pool.get(tag, ''))
+                           for tag, _ in person_tags
+                           if draft_pool.get(tag, '')
+                           and (not skip2 or tag_status.get(tag) != 'done')]
 
-            if not targets:
+            if not all_targets:
                 status_lbl.config(text='처리할 초벌 데이터가 없습니다')
                 return
 
-            # 입력 토큰 경고 체크 (입력이 출력 최대의 70% 이상인 항목)
+            # 입력 토큰 경고 (배치 전체 raw 합산이 출력 최대의 70% 초과 시)
             from llm_api import MAX_OUTPUT_TOKENS
-            WARN_CHARS = int(MAX_OUTPUT_TOKENS * 0.7 * 4)  # ≈ 179,200자
-            heavy = [(tag, raw) for tag, raw in targets if len(raw) > WARN_CHARS]
-            msg_parts = [f'총 {len(targets)}개 항목을 LLM 처리합니다.']
-            if heavy:
-                msg_parts.append(
-                    f'\n⚠ {len(heavy)}개 항목의 입력 텍스트가\n'
-                    f'출력 토큰 최대치의 70%를 초과합니다\n'
-                    f'({WARN_CHARS:,}자 이상).\n처리 시간이 길어질 수 있습니다.'
-                )
-            msg_parts.append('\n\n진행하시겠습니까?')
-            if not tk.messagebox.askyesno('2차 후벌 확인', ''.join(msg_parts),
+            WARN_CHARS = int(MAX_OUTPUT_TOKENS * 0.7 * 4)
+            total_raw = sum(len(r) for _, r in all_targets)
+            n_calls = (len(all_targets) + batch_size - 1) // batch_size
+            msg = (f'총 {len(all_targets)}명을 {batch_size}명씩 묶어 '
+                   f'{n_calls}번 LLM 호출합니다.')
+            if total_raw > WARN_CHARS:
+                msg += (f'\n⚠ 입력 텍스트 합산 {total_raw:,}자 — '
+                        f'출력 최대의 70% 초과\n처리 시간이 길어질 수 있습니다.')
+            if not tk.messagebox.askyesno('2차 후벌 확인', msg + '\n\n진행하시겠습니까?',
                                           parent=dlg):
                 return
 
             running[0] = True
             phase1_btn.config(state='disabled')
             phase2_btn.config(state='disabled')
-
-            pb.config(maximum=max(len(targets), 1), value=0)
-            status_lbl.config(text=f'2차 후벌: {len(targets)}개 LLM 처리 예정...')
+            pb.config(maximum=len(all_targets), value=0)
 
             def worker():
-                for done, (tag, raw) in enumerate(targets, 1):
-                    dlg.after(0, lambda t=tag, d=done:
-                              status_lbl.config(
-                                  text=f'[{d}/{len(targets)}] {t} LLM 처리 중...'))
+                done_total = [0]
+                for i in range(0, len(all_targets), batch_size):
+                    batch = all_targets[i:i + batch_size]
+                    call_n = i // batch_size + 1
+                    dlg.after(0, lambda c=call_n, n=n_calls:
+                              status_lbl.config(text=f'LLM 호출 [{c}/{n}] 처리 중...'))
+                    batch_dict = {tag: raw for tag, raw in batch}
                     try:
-                        info = client.generate_actor_info(tag, raw)
+                        results = client.generate_actor_info_batch(batch_dict)
                     except Exception:
-                        info = raw
-                    self.db.set_tag_extra_info(tag, info)
-                    idx = next((i for i, (t, _) in enumerate(person_tags) if t == tag), None)
-                    if idx is not None:
-                        person_tags[idx] = (tag, info)
-                    tag_status[tag] = 'done'
-                    pb_val = done
+                        results = {}
+                    for tag, raw in batch:
+                        info = results.get(tag) or raw
+                        self.db.set_tag_extra_info(tag, info)
+                        idx = next((j for j, (t, _) in enumerate(person_tags) if t == tag), None)
+                        if idx is not None:
+                            person_tags[idx] = (tag, info)
+                        tag_status[tag] = 'done'
+                        done_total[0] += 1
+                        dv = done_total[0]
 
-                    def upd(t=tag, inf=info, d=pb_val):
-                        _refresh_lb_item(t)
-                        pb.config(value=d)
-                        if selected_tag[0] == t:
-                            preview_txt.config(state='normal')
-                            preview_txt.delete('1.0', 'end')
-                            preview_txt.insert('1.0', inf)
-                            save_one_btn.config(state='disabled')
-                    dlg.after(0, upd)
+                        def upd(t=tag, inf=info, d=dv):
+                            _refresh_lb_item(t)
+                            pb.config(value=d)
+                            if selected_tag[0] == t:
+                                preview_txt.config(state='normal')
+                                preview_txt.delete('1.0', 'end')
+                                preview_txt.insert('1.0', inf)
+                                save_one_btn.config(state='disabled')
+                        dlg.after(0, upd)
 
                 def finish():
-                    status_lbl.config(text=f'2차 후벌 완료: {len(targets)}개 저장')
+                    status_lbl.config(
+                        text=f'2차 후벌 완료: {done_total[0]}명 저장 ({n_calls}회 호출)')
                     phase1_btn.config(state='normal')
                     phase2_btn.config(state='normal')
                     running[0] = False
@@ -2990,9 +3010,57 @@ class VidSort(tk.Tk):
                 saved += 1
             status_lbl.config(text=f'초벌 {saved}개 저장 완료')
 
+        # ── 개별 초기화 ──
+        def reset_one(tag):
+            draft_pool.pop(tag, None)
+            self.db.set_tag_extra_info(tag, '')
+            idx = next((i for i, (t, _) in enumerate(person_tags) if t == tag), None)
+            if idx is not None:
+                person_tags[idx] = (tag, '')
+            tag_status[tag] = 'none'
+            _refresh_lb_item(tag)
+            if selected_tag[0] == tag:
+                preview_txt.config(state='normal')
+                preview_txt.delete('1.0', 'end')
+                preview_txt.insert('1.0', '(초기화됨)')
+                save_one_btn.config(state='disabled')
+            status_lbl.config(text=f'{tag} 초기화 완료')
+
+        def on_lb_rclick(e=None):
+            sel = person_lb.curselection()
+            if not sel: return
+            tag = person_tags[sel[0]][0]
+            menu = tk.Menu(dlg, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                           activebackground='#7c6ff7', activeforeground='#fff')
+            menu.add_command(label=f'🔄 {tag}  초기화 (초벌+DB 삭제)',
+                             command=lambda t=tag: reset_one(t))
+            menu.tk_popup(e.x_root, e.y_root)
+
+        person_lb.bind('<Button-3>', on_lb_rclick)
+
+        # ── 전체 초기화 ──
+        def reset_all():
+            if not tk.messagebox.askyesno(
+                    '전체 초기화',
+                    '모든 배우의 초벌 데이터와 DB 저장 정보를 삭제합니다.\n계속하시겠습니까?',
+                    parent=dlg):
+                return
+            draft_pool.clear()
+            for i, (tag, _) in enumerate(person_tags):
+                person_tags[i] = (tag, '')
+                tag_status[tag] = 'none'
+                self.db.set_tag_extra_info(tag, '')
+                _refresh_lb_item(tag)
+            preview_txt.config(state='normal')
+            preview_txt.delete('1.0', 'end')
+            preview_txt.config(state='disabled')
+            save_one_btn.config(state='disabled')
+            status_lbl.config(text='전체 초기화 완료')
+
         phase1_btn.config(command=phase1)
         phase2_btn.config(command=phase2)
         save_all_btn.config(command=save_all_drafts)
+        reset_all_btn.config(command=reset_all)
 
     # ── 행위 일괄 처리 ───────────────────────────
     def _action_tags_dlg(self, parent_win):

@@ -364,6 +364,37 @@ class LLMClient:
         except Exception:
             return {}
 
+    def generate_actor_info_batch(self, actors: dict) -> dict:
+        """여러 배우를 1번 LLM 호출로 처리.
+        actors: {actor_name: raw_scraped_text, ...}
+        반환: {actor_name: profile_text, ...}"""
+        if not actors:
+            return {}
+        sections = []
+        for name, raw in actors.items():
+            sections.append(f'=== {name} ===\n{raw or "(수집된 정보 없음)"}')
+        prompt = (
+            '아래 각 배우의 수집 정보를 바탕으로 한국어 배우 소개글을 작성하세요.\n'
+            '형식 (모르는 항목 생략): 이름 / 생년월일 / 신장 / 데뷔 / 국적 / 활동 / 특이사항\n'
+            '배우당 최대 2000자. 반드시 JSON만 출력:\n'
+            '{"배우명": "소개글", ...}\n\n'
+            + '\n\n'.join(sections)
+        )
+        try:
+            raw_resp = self._chat(
+                [{'role': 'system',
+                  'content': '당신은 성인 영상 배우 정보 정리 전문가입니다. JSON만 출력하세요.'},
+                 {'role': 'user', 'content': prompt}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+            )
+            if raw_resp.startswith('```'):
+                raw_resp = raw_resp.split('```')[1].lstrip('json').strip()
+            brace = raw_resp.find('{')
+            if brace > 0: raw_resp = raw_resp[brace:]
+            return json.loads(raw_resp.strip())
+        except Exception:
+            return {}
+
     def generate_actor_info(self, actor_name: str,
                             raw_scraped: str = '') -> str:
         """배우 이름 + 스크래핑 원본 → 한국어 배우 프로필 텍스트."""
@@ -379,7 +410,7 @@ class LLMClient:
                 [{'role': 'system',
                   'content': '당신은 성인 영상 배우 정보 정리 전문가입니다.'},
                  {'role': 'user', 'content': prompt}],
-                max_tokens=2048,
+                max_tokens=MAX_OUTPUT_TOKENS,
             )
         except Exception as e:
             return f'(정보 생성 실패: {e})'

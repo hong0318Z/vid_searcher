@@ -1015,59 +1015,59 @@ def fetch_javdatabase_info(slug: str) -> tuple:
                     or soup.select_one('div.col-lg-7')
                     or soup)
 
-    def _parse_kv(rows):
-        for row in rows:
-            if row.name == 'dt':
-                key = row.get_text(strip=True).rstrip(':：')
-                dd = row.find_next_sibling('dd')
-                val = dd.get_text(' ', strip=True) if dd else ''
-            else:
-                cells = row.find_all(['td', 'th'])
-                if len(cells) < 2:
-                    continue
-                key = cells[0].get_text(strip=True).rstrip(':：')
-                val = cells[1].get_text(' ', strip=True)
-            if not val or val in ('-', 'N/A', 'Unknown', '?', ''):
-                continue
-            kl = key.lower()
-            if any(k in kl for k in ['birth', '생일', '誕生', 'birthday', 'born']):
-                info['생년월일'] = val
-            elif any(k in kl for k in ['age', '나이', '年齢']):
-                info['나이'] = val
-            elif any(k in kl for k in ['height', '신장', '身長', '身高', 'tall']):
-                info['신장'] = val
-            elif any(k in kl for k in ['weight', '체중', '体重']):
-                info['체중'] = val
-            elif any(k in kl for k in ['cup', 'カップ', '컵']):
-                info['컵'] = val
-            elif any(k in kl for k in ['measure', 'スリー', '치수', 'bust', 'hip', 'waist']):
-                info.setdefault('체형', val)
-            elif any(k in kl for k in ['debut', '데뷔', 'デビュー']):
-                info['데뷔'] = val
-            elif any(k in kl for k in ['nationality', '국적', '国籍']):
-                info['국적'] = val
+    # 1. 이름 추출 (뒤에 붙는 ' - JAV Profile' 제거)
+    h1 = profile_root.select_one('h1.idol-name')
+    if h1:
+        name_text = h1.get_text(strip=True)
+        info['이름'] = name_text.replace('- JAV Profile', '').strip()
 
-    # 프로필 컬럼 내 table/dl 파싱
-    _parse_kv(profile_root.select('table tr'))
-    _parse_kv(profile_root.select('dl dt'))
-    # 전체 페이지 fallback (프로필 컬럼이 맞지 않을 경우)
-    if len(info) <= 1:
-        _parse_kv(soup.select('table tr'))
-        _parse_kv(soup.select('dl dt'))
+    # 2. <b> 태그를 라벨로 삼아 데이터 추출
+    for b_tag in profile_root.find_all('b'):
+        key = b_tag.get_text(strip=True).replace(':', '').strip()
+        
+        # 다음 <b>나 <br>이 나오기 전까지의 형제 노드(텍스트, a 태그)를 모두 합침
+        val = ''
+        node = b_tag.next_sibling
+        while node and node.name not in ('b', 'br'):
+            if isinstance(node, str):
+                val += node
+            elif node.name == 'a':
+                val += node.get_text(strip=True)
+            node = node.next_sibling
+        
+        # 앞뒤 불필요한 하이픈이나 공백 제거
+        val = val.strip(' -')
+        
+        if not val or val == '?':
+            continue
+            
+        kl = key.lower()
+        if 'dob' in kl or 'birth' in kl:
+            info['생년월일'] = val
+        elif 'age' == kl:
+            info['나이'] = val
+        elif 'height' in kl:
+            info['신장'] = val
+        elif 'measurements' in kl:
+            info['체형'] = val
+        elif 'cup' in kl:
+            info['컵'] = val
+        elif 'debut' == kl:
+            info['데뷔'] = val
+        elif 'jp' in kl:
+            info['일본어이름'] = val
 
-    # 태그 — 프로필 컬럼 내 링크 우선, 없으면 전체 페이지
-    def _collect_tags(root):
-        return list(dict.fromkeys(
-            a.get_text(strip=True) for a in root.select(
-                'a[href*="/tags/"], a[href*="/tag/"], a[href*="/categories/"], '
-                'a[href*="/genre/"], .idol-tags a, .tags a, .tag-list a'
-            )
-            if a.get_text(strip=True) and len(a.get_text(strip=True)) > 1
-        ))[:20]
-
-    tags = _collect_tags(profile_root) or _collect_tags(soup)
-    if tags:
-        info['태그'] = ', '.join(tags)
+    # 3. 태그 파싱 (Tags: 바로 뒤의 a 태그들 수집)
+    tags_b = profile_root.find('b', string=lambda text: text and 'Tags:' in text)
+    if tags_b:
+        tags = []
+        node = tags_b.next_sibling
+        while node and node.name != 'br':
+            if node.name == 'a' and 'Suggest' not in node.get_text():
+                tags.append(node.get_text(strip=True))
+            node = node.next_sibling
+        if tags:
+            info['태그'] = ', '.join(tags)
 
     # 이미지 — 프로필 컬럼 왼쪽 col (이미지 컬럼) 또는 전체에서 탐색
     img_root = (soup.select_one('div.col-xxl-5')

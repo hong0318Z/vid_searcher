@@ -2447,8 +2447,8 @@ class VidSort(tk.Tk):
                            self._reload())).pack(side='left',padx=4)
         ttk.Button(nav,text='🔃 새로고침',
                    command=self._hard_refresh).pack(side='left',padx=8)
-        ttk.Button(nav,text='🧹 없는 파일 정리',
-                   command=self._purge_missing).pack(side='left',padx=2)
+        ttk.Button(nav,text='🔍 무결성 점검',
+                   command=self._integrity_check_dlg).pack(side='left',padx=2)
 
     def _rerender(self):
         step=int(self.thumb_step_var.get())
@@ -3605,20 +3605,113 @@ class VidSort(tk.Tk):
         if failed:
             messagebox.showwarning('일부 실패', '\n'.join(failed))
 
-    def _purge_missing(self):
-        self._set_status('없는 파일 검사 중...')
-        self.update_idletasks()
+    def _integrity_check_dlg(self):
+        BG = '#0d0d14'; FG = '#dcdcf0'; ACC = '#7c6ff7'; RED = '#e05555'
+
+        win = tk.Toplevel(self)
+        win.title('🔍 무결성 점검')
+        win.configure(bg=BG)
+        win.geometry('680x520')
+        win.resizable(True, True)
+        win.grab_set()
+
+        # ── 헤더
+        tk.Label(win, text='🔍 무결성 점검', bg=BG, fg=FG,
+                 font=('Consolas', 13, 'bold')).pack(pady=(16, 4))
+        tk.Label(win, text='DB에 등록된 모든 파일의 실제 존재 여부를 확인합니다.',
+                 bg=BG, fg='#888', font=('Consolas', 9)).pack()
+
+        # ── 진행 바 + 상태 레이블
+        pb_frame = tk.Frame(win, bg=BG); pb_frame.pack(fill='x', padx=24, pady=(14, 4))
+        pb = ttk.Progressbar(pb_frame, mode='determinate', length=620)
+        pb.pack(fill='x')
+        lbl_stat = tk.Label(win, text='', bg=BG, fg='#888',
+                            font=('Consolas', 9)); lbl_stat.pack()
+
+        # ── 결과 리스트박스
+        lf = tk.Frame(win, bg=BG); lf.pack(fill='both', expand=True, padx=24, pady=(8, 4))
+        lbl_result = tk.Label(lf, text='검사 결과', bg=BG, fg='#555',
+                              font=('Consolas', 9), anchor='w')
+        lbl_result.pack(fill='x')
+
+        list_frame = tk.Frame(lf, bg=BG)
+        list_frame.pack(fill='both', expand=True)
+        sb = ttk.Scrollbar(list_frame)
+        sb.pack(side='right', fill='y')
+        lb = tk.Listbox(list_frame, bg='#111', fg=RED, selectbackground=ACC,
+                        font=('Consolas', 9), yscrollcommand=sb.set,
+                        activestyle='none', relief='flat', bd=0)
+        lb.pack(fill='both', expand=True)
+        sb.config(command=lb.yview)
+
+        # ── 하단 버튼
+        bf = tk.Frame(win, bg=BG); bf.pack(fill='x', padx=24, pady=(4, 16))
+        lbl_count = tk.Label(bf, text='', bg=BG, fg=FG,
+                             font=('Consolas', 10, 'bold'))
+        lbl_count.pack(side='left')
+
+        btn_del = ttk.Button(bf, text='🗑 없는 파일 전체 삭제',
+                             style='Acc.TButton', state='disabled')
+        btn_del.pack(side='right', padx=(8, 0))
+        ttk.Button(bf, text='닫기', command=win.destroy).pack(side='right')
+
+        missing_paths = []   # 워커가 채움
+        stop_flag = threading.Event()
+
+        win.protocol('WM_DELETE_WINDOW', lambda: (stop_flag.set(), win.destroy()))
+
         def _worker():
             all_paths = [r[0] for r in
                          self.db.conn.execute('SELECT path FROM files').fetchall()]
-            missing = [p for p in all_paths if not os.path.exists(longpath(p))]
-            for p in missing:
+            total = len(all_paths)
+            win.after(0, lambda: pb.configure(maximum=max(total, 1)))
+
+            for i, p in enumerate(all_paths):
+                if stop_flag.is_set():
+                    return
+                if not os.path.exists(longpath(p)):
+                    missing_paths.append(p)
+                    name = Path(p).name
+                    win.after(0, lambda n=name, fp=p:
+                              lb.insert('end', f'  ✗  {n}'))
+
+                if (i + 1) % 100 == 0 or i + 1 == total:
+                    pct = (i + 1) / total * 100
+                    win.after(0, lambda v=i+1, t=total, pc=pct, m=len(missing_paths):
+                              (pb.configure(value=v),
+                               lbl_stat.config(
+                                   text=f'{v:,} / {t:,} 검사 중... ({pc:.1f}%)  '
+                                        f'없음: {m}개')))
+
+            # 완료
+            def _done():
+                n = len(missing_paths)
+                if n == 0:
+                    lbl_count.config(text='✅ 모든 파일이 정상입니다.', fg='#5cd05c')
+                    lbl_stat.config(text=f'{total:,}개 파일 검사 완료')
+                else:
+                    lbl_count.config(
+                        text=f'⚠ {n:,}개 파일이 존재하지 않습니다.', fg=RED)
+                    lbl_stat.config(text=f'{total:,}개 검사 — {n}개 없음')
+                    btn_del.config(state='normal')
+                pb.configure(value=total)
+            win.after(0, _done)
+
+        def _do_delete():
+            if not messagebox.askyesno(
+                '삭제 확인',
+                f'{len(missing_paths):,}개 파일을 DB에서 제거합니다.\n'
+                '실제 파일은 이미 없으므로 디스크 변경은 없습니다.\n\n계속하시겠습니까?',
+                parent=win):
+                return
+            for p in missing_paths:
                 self.db.remove(p)
-            self.after(0, lambda: (
-                self._set_status(f'정리 완료 — {len(missing)}개 제거'),
-                self._reload_sidebar(),
-                self._reload(),
-            ))
+            self._reload_sidebar()
+            self._reload()
+            win.destroy()
+            self._set_status(f'무결성 점검 완료 — {len(missing_paths):,}개 제거')
+
+        btn_del.config(command=_do_delete)
         threading.Thread(target=_worker, daemon=True).start()
 
     # ── 폴더 현황 ───────────────────────────────

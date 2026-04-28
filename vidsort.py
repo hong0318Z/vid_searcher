@@ -3491,8 +3491,21 @@ class VidSort(tk.Tk):
             sort_asc=sort_asc)
 
         # 현재 페이지에서 실제로 존재하지 않는 파일 제거
-        missing = [v['path'] for v in rows
-                   if not os.path.exists(longpath(v['path']))]
+        def _exists(p):
+            try:
+                if os.path.isfile(p): return True
+            except (OSError, ValueError): pass
+            try:
+                lp = longpath(p)
+                if lp != p and os.path.isfile(lp): return True
+            except (OSError, ValueError): pass
+            try:
+                np = str(Path(p))
+                if np != p and os.path.isfile(np): return True
+            except (OSError, ValueError): pass
+            return False
+
+        missing = [v['path'] for v in rows if not _exists(v['path'])]
         if missing:
             for p in missing:
                 self.db.remove(p)
@@ -4773,20 +4786,44 @@ class VidSort(tk.Tk):
 
         win.protocol('WM_DELETE_WINDOW', lambda: (stop_flag.set(), win.destroy()))
 
+        def _file_exists(p):
+            """경로를 여러 방법으로 검증 — 파일(isfile)이어야 True."""
+            # 1) 원본 경로 그대로
+            try:
+                if os.path.isfile(p):
+                    return True
+            except (OSError, ValueError):
+                pass
+            # 2) longpath 접두어 (Windows 260자 초과 대응)
+            try:
+                lp = longpath(p)
+                if lp != p and os.path.isfile(lp):
+                    return True
+            except (OSError, ValueError):
+                pass
+            # 3) 슬래시 정규화 후 재시도 (DB에 / 로 저장된 경우)
+            try:
+                np = str(Path(p))
+                if np != p and os.path.isfile(np):
+                    return True
+            except (OSError, ValueError):
+                pass
+            return False
+
         def _worker():
-            all_paths = [r[0] for r in
-                         self.db.conn.execute('SELECT path FROM files').fetchall()]
+            with self.db.lock:
+                all_paths = [r[0] for r in
+                             self.db.conn.execute('SELECT path FROM files').fetchall()]
             total = len(all_paths)
             win.after(0, lambda: pb.configure(maximum=max(total, 1)))
 
             for i, p in enumerate(all_paths):
                 if stop_flag.is_set():
                     return
-                if not os.path.exists(longpath(p)):
+                if not _file_exists(p):
                     missing_paths.append(p)
-                    name = Path(p).name
-                    win.after(0, lambda n=name, fp=p:
-                              lb.insert('end', f'  ✗  {n}'))
+                    win.after(0, lambda fp=p:
+                              lb.insert('end', f'  ✗  {fp}'))
 
                 if (i + 1) % 100 == 0 or i + 1 == total:
                     pct = (i + 1) / total * 100

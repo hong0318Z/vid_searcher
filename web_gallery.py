@@ -19,7 +19,7 @@ _srv    = None
 #  DB / 경로 헬퍼
 # ─────────────────────────────────────────────────
 def _conn():
-    return sqlite3.connect(str(_cfg['db_path']), check_same_thread=False)
+    return sqlite3.connect(str(_cfg['db_path']), check_same_thread=False, timeout=10)
 
 def _build_cache():
     _pcache.clear()
@@ -52,15 +52,28 @@ def _fmt_size(b):
 # ─────────────────────────────────────────────────
 #  DB 쿼리
 # ─────────────────────────────────────────────────
-def _query_videos(tag=None, search=None, offset=0, limit=40):
+def _query_videos(tag=None, search=None, offset=0, limit=40,
+                  in_title=True, in_tags=False, in_folder=False):
     c  = _conn()
     wh = []; pa = []
     if tag:
         wh.append("f.path IN (SELECT path FROM tags WHERE tag=?)")
         pa.append(tag)
     if search:
-        wh.append("(f.name LIKE ? OR f.alias LIKE ?)")
-        pa += [f'%{search}%', f'%{search}%']
+        conds = []
+        if in_title:
+            conds.append("(f.name LIKE ? OR f.alias LIKE ?)")
+            pa += [f'%{search}%', f'%{search}%']
+        if in_tags:
+            conds.append("f.path IN (SELECT path FROM tags WHERE tag LIKE ?)")
+            pa.append(f'%{search}%')
+        if in_folder:
+            conds.append("f.folder LIKE ?")
+            pa.append(f'%{search}%')
+        if not conds:
+            conds.append("(f.name LIKE ? OR f.alias LIKE ?)")
+            pa += [f'%{search}%', f'%{search}%']
+        wh.append('(' + ' OR '.join(conds) + ')')
     where = ('WHERE ' + ' AND '.join(wh)) if wh else ''
     total = c.execute(
         f"SELECT COUNT(*) FROM files f {where}", pa).fetchone()[0]
@@ -367,13 +380,80 @@ a{color:inherit;text-decoration:none}
   .vid-grid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
   .tag-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 }
+/* SEARCH OPTIONS DROPDOWN */
+#search-opts-wrap{position:relative;display:flex}
+#search-opts-btn{background:#2a2a2a;border:1px solid #444;border-left:none;
+  color:#aaa;padding:0 11px;cursor:pointer;font-size:14px;
+  transition:.15s;white-space:nowrap;border-radius:0}
+#search-opts-btn:hover{background:#333;color:#fff}
+#search-opts-drop{position:absolute;top:calc(100% + 6px);right:0;
+  background:#1a1a1a;border:1px solid #333;border-radius:8px;
+  padding:10px 14px;z-index:300;min-width:170px;display:none;
+  box-shadow:0 6px 24px rgba(0,0,0,.7)}
+#search-opts-drop.open{display:block}
+.search-opt{display:flex;align-items:center;gap:9px;padding:6px 0;
+  font-size:13px;color:#ccc;cursor:pointer;user-select:none}
+.search-opt input[type=checkbox]{accent-color:var(--acc);width:15px;height:15px;cursor:pointer}
+.search-opt:hover{color:#fff}
+.search-opt-divider{font-size:10px;color:#555;text-transform:uppercase;
+  letter-spacing:.5px;padding:8px 0 2px;border-top:1px solid #2a2a2a;margin-top:4px}
+/* EDIT PANEL */
+.edit-panel{background:#161620;border:1px solid #2a2a3a;border-radius:8px;
+  margin-top:12px;overflow:hidden}
+.edit-toggle{display:flex;align-items:center;gap:8px;padding:10px 16px;
+  cursor:pointer;font-size:13px;color:#aaa;background:none;border:none;
+  width:100%;text-align:left;transition:.15s;font-family:inherit}
+.edit-toggle:hover{background:#1e1e2e;color:var(--acc)}
+.edit-body{padding:16px;border-top:1px solid #2a2a3a;display:none}
+.edit-body.open{display:block}
+.edit-row{margin-bottom:16px}
+.edit-row:last-child{margin-bottom:0}
+.edit-row label{display:block;font-size:11px;color:var(--sub);
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px}
+.edit-input{width:100%;background:#0d0d14;border:1px solid #2a2a3a;color:#e8e8ff;
+  padding:8px 12px;border-radius:5px;font-size:13px;outline:none;
+  font-family:inherit;resize:vertical;line-height:1.5}
+.edit-input:focus{border-color:var(--acc);box-shadow:0 0 0 2px rgba(255,144,0,.15)}
+.edit-save{background:var(--acc);color:#000;border:none;padding:7px 16px;
+  border-radius:4px;font-size:12px;font-weight:700;cursor:pointer;
+  margin-top:7px;transition:.15s}
+.edit-save:hover{background:var(--acc2)}
+.edit-tag-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px;min-height:26px}
+.edit-tag-chip{background:#222238;color:#c8c8f0;font-size:12px;
+  padding:4px 8px 4px 11px;border-radius:5px;
+  display:inline-flex;align-items:center;gap:5px}
+.edit-tag-chip .rm-tag{background:none;border:none;color:#666;cursor:pointer;
+  font-size:15px;line-height:1;padding:0;transition:.15s;flex-shrink:0}
+.edit-tag-chip .rm-tag:hover{color:#f55}
+.edit-tag-add{display:flex;gap:7px}
+.edit-tag-add input{flex:1;background:#0d0d14;border:1px solid #2a2a3a;color:#e8e8ff;
+  padding:7px 11px;border-radius:5px;font-size:12px;outline:none;font-family:inherit}
+.edit-tag-add input:focus{border-color:var(--acc)}
+.edit-tag-add button{background:#2a2a3a;color:#ccc;border:1px solid #3a3a4a;
+  padding:7px 14px;border-radius:5px;font-size:12px;cursor:pointer;transition:.15s;white-space:nowrap}
+.edit-tag-add button:hover{background:var(--acc);color:#000;border-color:var(--acc)}
+/* SAVE TOAST */
+#save-toast{position:fixed;bottom:24px;right:24px;
+  background:#1a5a1a;color:#fff;padding:10px 20px;border-radius:7px;
+  font-size:13px;z-index:2000;opacity:0;transition:opacity .28s;
+  pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.5)}
+#save-toast.show{opacity:1}
 </style>
 </head>
 <body>
 <header id="hdr">
   <a href="/" id="logo">▶<span>VidSort</span></a>
   <form id="search-form" action="/search" method="get">
-    <input name="q" placeholder="제목, 파일명 검색..." value="{{ q|default('') }}">
+    <input name="q" placeholder="제목, 파일명, 태그 검색..." value="{{ q|default('') }}">
+    <div id="search-opts-wrap">
+      <button type="button" id="search-opts-btn" title="검색 범위 설정">⚙</button>
+      <div id="search-opts-drop">
+        <div class="search-opt-divider">검색 범위</div>
+        <label class="search-opt"><input type="checkbox" id="opt-title"> 제목 / 파일명</label>
+        <label class="search-opt"><input type="checkbox" id="opt-tags"> 태그</label>
+        <label class="search-opt"><input type="checkbox" id="opt-folder"> 폴더</label>
+      </div>
+    </div>
     <button type="submit">검색</button>
   </form>
   <nav id="hdr-nav">
@@ -388,6 +468,54 @@ __BODY__
 function openNative(vid_id){
   fetch('/open/'+vid_id).then(()=>console.log('opened'));
 }
+(function(){
+  var btn  = document.getElementById('search-opts-btn');
+  var drop = document.getElementById('search-opts-drop');
+  var oT   = document.getElementById('opt-title');
+  var oTg  = document.getElementById('opt-tags');
+  var oF   = document.getElementById('opt-folder');
+  if(!btn) return;
+
+  // localStorage에서 저장된 옵션 복원, 기본값: 제목만 체크
+  var saved = JSON.parse(localStorage.getItem('vsearch-opts') || '{"t":true,"g":false,"f":false}');
+  oT.checked = saved.t !== false;
+  oTg.checked = !!saved.g;
+  oF.checked  = !!saved.f;
+
+  // URL 파라미터가 있으면 URL 기준으로 덮어쓰기 (검색 결과 페이지에서 유지)
+  var p = new URLSearchParams(window.location.search);
+  if(p.has('in_title')||p.has('in_tags')||p.has('in_folder')){
+    oT.checked  = p.has('in_title');
+    oTg.checked = p.has('in_tags');
+    oF.checked  = p.has('in_folder');
+  }
+
+  function save(){
+    localStorage.setItem('vsearch-opts',
+      JSON.stringify({t:oT.checked, g:oTg.checked, f:oF.checked}));
+  }
+  [oT,oTg,oF].forEach(function(el){ el.addEventListener('change', save); });
+
+  // 드롭다운 토글
+  btn.addEventListener('click', function(e){
+    e.stopPropagation();
+    drop.classList.toggle('open');
+  });
+  document.addEventListener('click', function(){ drop.classList.remove('open'); });
+  drop.addEventListener('click', function(e){ e.stopPropagation(); });
+
+  // 폼 제출 시 hidden input으로 선택된 옵션 추가
+  var form = document.getElementById('search-form');
+  form.addEventListener('submit', function(){
+    function addHidden(name){ var i=document.createElement('input');
+      i.type='hidden'; i.name=name; i.value='1'; form.appendChild(i); }
+    if(oT.checked)  addHidden('in_title');
+    if(oTg.checked) addHidden('in_tags');
+    if(oF.checked)  addHidden('in_folder');
+    // 아무것도 안 체크되면 title 기본 적용
+    if(!oT.checked && !oTg.checked && !oF.checked) addHidden('in_title');
+  });
+})();
 </script>
 __SCRIPTS__
 
@@ -560,7 +688,7 @@ _SEARCH = _BASE.replace('__BODY__', """
   <div class="vid-grid">
   {% for v in videos %}{{ _vid_card(v) }}{% endfor %}
   </div>
-  {{ _pager(page, pages, '/search', q=q) }}
+  {{ _pager(page, pages, '/search', q=q, in_title=in_title_s, in_tags=in_tags_s, in_folder=in_folder_s) }}
 </div>
 """).replace('__SCRIPTS__', '')
 
@@ -576,26 +704,63 @@ _VIDEO = _BASE.replace('__BODY__', """
         </video>
       </div>
       <div class="player-meta">
-        <h1>{{ v.alias or v.name }}</h1>
+        <h1 id="player-title" data-filename="{{ v.name|e }}">{{ v.alias or v.name }}</h1>
         <div class="meta-row">
           {% if v.dur_str %}<span><b>{{ v.dur_str }}</b> 재생시간</span>{% endif %}
           {% if v.width %}<span><b>{{ v.width }}×{{ v.height }}</b></span>{% endif %}
           {% if v.size_str %}<span><b>{{ v.size_str }}</b></span>{% endif %}
         </div>
-        <div class="tag-bar">
+        <div class="tag-bar" id="player-tag-bar">
         {% for tg in v.tags %}
           <a href="/tag/{{ tg|urlencode }}" class="tag-pill">{{ tg }}</a>
         {% endfor %}
         </div>
         {% if v.description %}
-        <div class="player-desc">{{ v.description }}</div>
+        <div class="player-desc" id="player-desc">{{ v.description }}</div>
+        {% else %}
+        <div class="player-desc" id="player-desc" style="display:none"></div>
         {% endif %}
         <button class="btn-open" onclick="openNative('{{ v.id }}')">
           📂 시스템 플레이어로 열기
         </button>
       </div>
+      <!-- 편집 패널 -->
+      <div class="edit-panel">
+        <button class="edit-toggle" id="edit-toggle-btn" onclick="toggleEdit()">✏ 메타데이터 편집</button>
+        <div class="edit-body" id="edit-body">
+          <div class="edit-row">
+            <label>제목 (별칭)</label>
+            <input class="edit-input" id="edit-alias" type="text"
+                   value="{{ v.alias or '' }}"
+                   placeholder="{{ v.name|e }}">
+            <button class="edit-save" onclick="saveAlias()">저장</button>
+          </div>
+          <div class="edit-row">
+            <label>설명</label>
+            <textarea class="edit-input" id="edit-desc" rows="4"
+                      placeholder="설명 없음">{{ v.description or '' }}</textarea>
+            <button class="edit-save" onclick="saveDesc()">저장</button>
+          </div>
+          <div class="edit-row">
+            <label>태그</label>
+            <div class="edit-tag-chips" id="edit-tags">
+              {% for tg in v.tags %}
+              <span class="edit-tag-chip" data-tag="{{ tg|e }}">{{ tg }}
+                <button class="rm-tag" onclick="removeTag(this)" title="삭제">×</button>
+              </span>
+              {% endfor %}
+            </div>
+            <div class="edit-tag-add">
+              <input type="text" id="new-tag" placeholder="새 태그 입력..."
+                     onkeydown="if(event.key==='Enter'){addTag();event.preventDefault()}">
+              <button onclick="addTag()">+ 추가</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <aside>
+<div id="save-toast"></div>
       <div class="side-vids">
         <h3>관련 영상</h3>
         {% for r in related %}
@@ -618,23 +783,110 @@ _VIDEO = _BASE.replace('__BODY__', """
   </div>
 </div>
 """).replace('__SCRIPTS__', '''<script>
-// Plyr 플레이어 초기화 및 확장 기능 설정
-document.addEventListener('DOMContentLoaded', () => {
-  const player = new Plyr('#vp', {
-    keyboard: { focused: true, global: true }, // 방향키, 스페이스바 전역 단축키 
-    controls: [
-      'play-large', // 중앙의 큰 재생 버튼
-      'restart',    // 처음부터 다시 재생
-      'play',       // 하단 재생/일시정지
-      'progress',   // 탐색 바
-      'current-time', 'duration', // 시간
-      'mute', 'volume', // 볼륨 컨트롤
-      'settings',   // 톱니바퀴 (배속 설정 등)
-      'pip',        // 화면 속 화면 (PIP)
-      'fullscreen'  // 전체화면
-    ],
-    settings: ['speed'], // 설정 메뉴에 배속 조절 활성화
-    speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] }, // 배속 옵션
+var VID_ID = '{{ v.id }}';
+
+function toggleEdit(){
+  var body = document.getElementById('edit-body');
+  var btn  = document.getElementById('edit-toggle-btn');
+  body.classList.toggle('open');
+  btn.textContent = body.classList.contains('open') ? '✕ 닫기' : '✏ 메타데이터 편집';
+}
+
+var _toastTid;
+function showToast(msg, ok){
+  var t = document.getElementById('save-toast');
+  t.textContent = msg;
+  t.style.background = (ok===false) ? '#5a1a1a' : '#1a5a1a';
+  t.classList.add('show');
+  clearTimeout(_toastTid);
+  _toastTid = setTimeout(function(){ t.classList.remove('show'); }, 2500);
+}
+
+function saveAlias(){
+  var val = document.getElementById('edit-alias').value.trim();
+  fetch('/api/video/'+VID_ID+'/alias',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({alias:val})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      var h1=document.getElementById('player-title');
+      h1.textContent=val||h1.dataset.filename;
+      showToast('제목 저장됨');
+    } else showToast('저장 실패',false);
+  }).catch(()=>showToast('오류 발생',false));
+}
+
+function saveDesc(){
+  var val=document.getElementById('edit-desc').value.trim();
+  fetch('/api/video/'+VID_ID+'/description',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({description:val})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      var el=document.getElementById('player-desc');
+      if(val){el.textContent=val;el.style.display='';}
+      else{el.textContent='';el.style.display='none';}
+      showToast('설명 저장됨');
+    } else showToast('저장 실패',false);
+  }).catch(()=>showToast('오류 발생',false));
+}
+
+function removeTag(btn){
+  var chip=btn.closest('.edit-tag-chip');
+  var tag=chip.dataset.tag;
+  fetch('/api/video/'+VID_ID+'/tags/remove',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({tag:tag})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      chip.remove();
+      document.querySelectorAll('#player-tag-bar .tag-pill').forEach(function(p){
+        if(p.textContent.trim()===tag) p.remove();
+      });
+      showToast('태그 삭제됨');
+    } else showToast('저장 실패',false);
+  }).catch(()=>showToast('오류 발생',false));
+}
+
+function addTag(){
+  var input=document.getElementById('new-tag');
+  var tag=input.value.trim();
+  if(!tag) return;
+  fetch('/api/video/'+VID_ID+'/tags/add',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({tag:tag})
+  }).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      var chips=document.getElementById('edit-tags');
+      var chip=document.createElement('span');
+      chip.className='edit-tag-chip'; chip.dataset.tag=tag;
+      chip.innerHTML=_esc(tag)+' <button class="rm-tag" onclick="removeTag(this)" title="삭제">\xd7</button>';
+      chips.appendChild(chip);
+      var bar=document.getElementById('player-tag-bar');
+      var pill=document.createElement('a');
+      pill.className='tag-pill';
+      pill.href='/tag/'+encodeURIComponent(tag);
+      pill.textContent=tag;
+      bar.appendChild(pill);
+      input.value='';
+      showToast('태그 추가됨');
+    } else showToast(d.error||'저장 실패',false);
+  }).catch(()=>showToast('오류 발생',false));
+}
+
+function _esc(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.addEventListener('DOMContentLoaded',()=>{
+  new Plyr('#vp',{
+    keyboard:{focused:true,global:true},
+    controls:['play-large','restart','play','progress',
+              'current-time','duration','mute','volume',
+              'settings','pip','fullscreen'],
+    settings:['speed'],
+    speed:{selected:1,options:[0.5,0.75,1,1.25,1.5,2]},
   });
 });
 </script>
@@ -928,11 +1180,18 @@ def tag_page(tagname):
 
 @app.route('/search')
 def search_page():
-    q    = request.args.get('q', '').strip()
-    pg   = int(request.args.get('page', 1))
-    PER  = 40
+    q         = request.args.get('q', '').strip()
+    pg        = int(request.args.get('page', 1))
+    PER       = 40
+    in_title  = request.args.get('in_title')  is not None
+    in_tags   = request.args.get('in_tags')   is not None
+    in_folder = request.args.get('in_folder') is not None
+    if not (in_title or in_tags or in_folder):
+        in_title = True
     vids, total = _query_videos(search=q if q else None,
-                                offset=(pg-1)*PER, limit=PER)
+                                offset=(pg-1)*PER, limit=PER,
+                                in_title=in_title, in_tags=in_tags,
+                                in_folder=in_folder)
     c    = _conn()
     for v in vids:
         v['id']      = _vid_id(v['path'])
@@ -941,7 +1200,10 @@ def search_page():
             "SELECT tag FROM tags WHERE path=? ORDER BY tag",
             (v['path'],)).fetchall()]
     return _render(_SEARCH, nav='search', q=q, videos=vids,
-                   total=total, page=pg, pages=(total+PER-1)//PER)
+                   total=total, page=pg, pages=(total+PER-1)//PER,
+                   in_title_s='1' if in_title else '',
+                   in_tags_s='1' if in_tags else '',
+                   in_folder_s='1' if in_folder else '')
 
 @app.route('/shorts')
 def shorts_page():
@@ -1099,6 +1361,56 @@ def stream_video(vid_id):
     return rv
 
 # ─────────────────────────────────────────────────
+#  영상 메타 쓰기 API
+# ─────────────────────────────────────────────────
+@app.route('/api/video/<vid_id>/alias', methods=['POST'])
+def api_update_alias(vid_id):
+    path = _get_path(vid_id)
+    if not path: abort(404)
+    data  = request.get_json(force=True, silent=True) or {}
+    alias = data.get('alias', '').strip() or None
+    c = _conn()
+    c.execute("UPDATE files SET alias=? WHERE path=?", (alias, path))
+    c.commit()
+    return jsonify({'ok': True, 'alias': alias or ''})
+
+@app.route('/api/video/<vid_id>/description', methods=['POST'])
+def api_update_description(vid_id):
+    path = _get_path(vid_id)
+    if not path: abort(404)
+    data = request.get_json(force=True, silent=True) or {}
+    desc = data.get('description', '').strip() or None
+    c = _conn()
+    c.execute("UPDATE files SET description=? WHERE path=?", (desc, path))
+    c.commit()
+    return jsonify({'ok': True})
+
+@app.route('/api/video/<vid_id>/tags/add', methods=['POST'])
+def api_add_tag(vid_id):
+    path = _get_path(vid_id)
+    if not path: abort(404)
+    data = request.get_json(force=True, silent=True) or {}
+    tag  = data.get('tag', '').strip()
+    if not tag:
+        return jsonify({'ok': False, 'error': '태그가 비어있습니다'})
+    c = _conn()
+    c.execute("INSERT OR IGNORE INTO tags(path, tag) VALUES(?,?)", (path, tag))
+    c.commit()
+    return jsonify({'ok': True, 'tag': tag})
+
+@app.route('/api/video/<vid_id>/tags/remove', methods=['POST'])
+def api_remove_tag(vid_id):
+    path = _get_path(vid_id)
+    if not path: abort(404)
+    data = request.get_json(force=True, silent=True) or {}
+    tag  = data.get('tag', '').strip()
+    if not tag: abort(400)
+    c = _conn()
+    c.execute("DELETE FROM tags WHERE path=? AND tag=?", (path, tag))
+    c.commit()
+    return jsonify({'ok': True})
+
+# ─────────────────────────────────────────────────
 #  서버 시작
 # ─────────────────────────────────────────────────
 def start(db_path, thumb_dir, port=8765):
@@ -1108,6 +1420,9 @@ def start(db_path, thumb_dir, port=8765):
     _cfg['port']      = port
 
     _build_cache()
+
+    with sqlite3.connect(str(db_path), timeout=10) as _wc:
+        _wc.execute("PRAGMA journal_mode=WAL")
 
     if _srv and _srv.is_alive():
         webbrowser.open(f'http://localhost:{port}')

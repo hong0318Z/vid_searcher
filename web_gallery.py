@@ -157,6 +157,19 @@ def _get_shorts(offset=0, limit=20, tag=None):
     return out, total
 
 
+def _fetch_tags_map(c, paths: list) -> dict:
+    """paths 목록의 태그를 단일 쿼리로 일괄 조회. {path: [tag, ...]} 반환."""
+    if not paths:
+        return {}
+    ph  = ','.join('?' * len(paths))
+    rows = c.execute(
+        f"SELECT path, tag FROM tags WHERE path IN ({ph}) ORDER BY path, tag",
+        paths).fetchall()
+    result: dict = {p: [] for p in paths}
+    for path, tag in rows:
+        result[path].append(tag)
+    return result
+
 def _get_related(vid_id, limit=16):
     path = _get_path(vid_id)
     if not path: return []
@@ -1139,12 +1152,11 @@ def index():
     tags        = _get_tags_with_stats()
     tag_groups  = _get_tag_groups(limit_tags=2, vids_per_tag=4)
     c           = _conn()
+    tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
     for v in vids:
         v['id']      = _vid_id(v['path'])
         v['dur_str'] = _fmt_dur(v['duration'])
-        v['tags']    = [x[0] for x in c.execute(
-            "SELECT tag FROM tags WHERE path=? ORDER BY tag",
-            (v['path'],)).fetchall()]
+        v['tags']    = tags_map.get(v['path'], [])
     return _render(_HOME, nav='home', videos=vids, tags=tags,
                    tag_groups=tag_groups,
                    total=total, page=pg, pages=(total+PER-1)//PER)
@@ -1166,12 +1178,11 @@ def tag_page(tagname):
         "FROM tag_meta WHERE tag=?", (tagname,)).fetchone()
     desc, tag_type, thumb_path, extra_info = row if row else ('', '', '', '')
     has_custom_thumb = bool(thumb_path and Path(thumb_path).exists())
+    tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
     for v in vids:
         v['id']      = _vid_id(v['path'])
         v['dur_str'] = _fmt_dur(v['duration'])
-        v['tags']    = [x[0] for x in c.execute(
-            "SELECT tag FROM tags WHERE path=? ORDER BY tag",
-            (v['path'],)).fetchall()]
+        v['tags']    = tags_map.get(v['path'], [])
     return _render(_TAG_PAGE, nav='tags', tag=tagname,
                    desc=desc, tag_type=tag_type,
                    extra_info=extra_info, has_custom_thumb=has_custom_thumb,
@@ -1193,12 +1204,11 @@ def search_page():
                                 in_title=in_title, in_tags=in_tags,
                                 in_folder=in_folder)
     c    = _conn()
+    tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
     for v in vids:
         v['id']      = _vid_id(v['path'])
         v['dur_str'] = _fmt_dur(v['duration'])
-        v['tags']    = [x[0] for x in c.execute(
-            "SELECT tag FROM tags WHERE path=? ORDER BY tag",
-            (v['path'],)).fetchall()]
+        v['tags']    = tags_map.get(v['path'], [])
     return _render(_SEARCH, nav='search', q=q, videos=vids,
                    total=total, page=pg, pages=(total+PER-1)//PER,
                    in_title_s='1' if in_title else '',

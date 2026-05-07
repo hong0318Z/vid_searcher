@@ -268,7 +268,7 @@ class DB:
     # ── 핵심: SQL 기반 페이지 쿼리 ─────────────
     def query_page(self, active_exts, folder, tag, sort, short_filter,
                    search, offset, limit, min_dur=0, folder_search=False,
-                   sort_asc=None):
+                   sort_asc=None, only_missing_thumb=False):
         import sys
         print(f"[query_page] active_exts={active_exts} folder={folder} "
               f"tag={tag} sort={sort} short={short_filter} "
@@ -304,6 +304,10 @@ class DB:
         if folder:
             where.append("f.folder = ?")
             params.append(folder)
+
+        # 3-b) 썸네일 미생성 필터 (폴더 현황 우클릭 → 미생성만 보기)
+        if only_missing_thumb:
+            where.append("f.thumb_ok = 0")
 
         # 4) 태그/검색 JOIN
         use_tag_join = bool(tag or search)
@@ -1326,7 +1330,8 @@ class VidSort(tk.Tk):
         # 프리페치
         self._prefetch_stop   = threading.Event()
         self._prefetch_thread = None
-        self._daily_pick_mode = False
+        self._daily_pick_mode    = False
+        self._only_missing_thumb = False
 
         # 썸네일 큐/스레드/팝업
         self._thumb_queue  = []
@@ -1571,7 +1576,7 @@ class VidSort(tk.Tk):
                 arrow_lbl.config(text='▶')
                 is_open.set(False)
             else:
-                body.pack(fill='x', padx=0)
+                body.pack(fill='x', padx=0, after=hdr)
                 arrow_lbl.config(text='▼')
                 is_open.set(True)
 
@@ -3494,29 +3499,33 @@ class VidSort(tk.Tk):
 
     # ── 핵심: SQL 쿼리로 데이터 가져오기 ─────────
     def _reload(self):
-        active_exts   = self._active_exts()
-        folder        = self.folder_var.get()
-        tag           = self.tag_var.get()
-        sort          = self.sort_var.get()
-        sort_asc      = self.sort_asc_var.get()
-        short         = self.short_filter_var.get()
-        search        = self.search_var.get().strip()
-        min_dur       = self.min_dur_var.get()
-        folder_search = self.folder_search_var.get()
+        active_exts        = self._active_exts()
+        folder             = self.folder_var.get()
+        tag                = self.tag_var.get()
+        sort               = self.sort_var.get()
+        sort_asc           = self.sort_asc_var.get()
+        short              = self.short_filter_var.get()
+        search             = self.search_var.get().strip()
+        min_dur            = self.min_dur_var.get()
+        folder_search      = self.folder_search_var.get()
+        only_missing_thumb = self._only_missing_thumb
+        self._only_missing_thumb = False  # 1회 사용 후 해제
 
         threading.Thread(
             target=self._bg_query,
             args=(active_exts, folder, tag, sort, short, search,
-                  self._offset, min_dur, folder_search, sort_asc),
+                  self._offset, min_dur, folder_search, sort_asc,
+                  only_missing_thumb),
             daemon=True).start()
 
     def _bg_query(self, active_exts, folder, tag, sort, short, search,
-                  offset, min_dur=0, folder_search=False, sort_asc=None):
+                  offset, min_dur=0, folder_search=False, sort_asc=None,
+                  only_missing_thumb=False):
         rows, total, total_size = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
             offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search,
-            sort_asc=sort_asc)
+            sort_asc=sort_asc, only_missing_thumb=only_missing_thumb)
 
         # 현재 페이지에서 실제로 존재하지 않는 파일 제거
         def _exists(p):
@@ -4894,53 +4903,98 @@ class VidSort(tk.Tk):
 
     # ── 폴더 현황 ───────────────────────────────
     def _show_folder_overview(self):
-        win=tk.Toplevel(self); win.title('📊 폴더 현황')
-        win.configure(bg='#0d0d14'); win.geometry('720x500')
-        cols=('folder','count','size','thumbed','missing')
-        tree=ttk.Treeview(win,columns=cols,show='headings')
-        for c,w,lbl in [('folder',300,'폴더'),('count',70,'파일수'),
-                        ('size',90,'용량'),('thumbed',80,'썸네일'),('missing',80,'미생성')]:
-            tree.heading(c,text=lbl); tree.column(c,width=w,
-                anchor='center' if c!='folder' else 'w')
-        vsb=ttk.Scrollbar(win,orient='vertical',command=tree.yview)
+        win = tk.Toplevel(self); win.title('📊 폴더 현황')
+        win.configure(bg='#0d0d14'); win.geometry('760x520')
+
+        cols = ('folder','count','size','thumbed','missing')
+        tree = ttk.Treeview(win, columns=cols, show='headings')
+        for c, w, lbl in [('folder',310,'폴더'),('count',70,'파일수'),
+                           ('size',90,'용량'),('thumbed',90,'썸네일'),('missing',80,'미생성')]:
+            tree.heading(c, text=lbl)
+            tree.column(c, width=w, anchor='center' if c != 'folder' else 'w')
+        vsb = ttk.Scrollbar(win, orient='vertical', command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
-        vsb.pack(side='right',fill='y'); tree.pack(fill='both',expand=True,padx=8,pady=8)
-        tree.bind('<Double-Button-1>',lambda e:(
-            tree.selection() and (
-                setattr(self,'_offset',0),
-                self.folder_var.set(tree.item(tree.selection()[0])['values'][0]),
-                self._reload(),
-                win.destroy())))
+        vsb.pack(side='right', fill='y')
+        tree.pack(fill='both', expand=True, padx=8, pady=8)
 
-        stats=self.db.folder_stats()
-        tc=ts=tt=tm=0
+        stats = self.db.folder_stats()
+        tc = ts = tt = tm = 0
         for r in stats:
-            miss=r['count']-r['thumbed']
-            tree.insert('','end',values=(
-                r['folder'],r['count'],fmt_size(r['size'] or 0),
-                f"{r['thumbed']}/{r['count']}",miss))
-            tc+=r['count']; ts+=r['size'] or 0
-            tt+=r['thumbed']; tm+=miss
-        tree.insert('','end',values=(
-            f"[전체 {len(stats)}개 폴더]",tc,fmt_size(ts),
-            f'{tt}/{tc}',tm),tags=('total',))
-        tree.tag_configure('total',foreground='#7c6ff7')
-        if tm>0:
-            ttk.Button(win,text=f'🖼 미생성 {tm}개 썸네일 생성',
-                       style='Acc.TButton',
-                       command=lambda:(win.destroy(),self._start_thumbs())
-                       ).pack(pady=(8,2))
+            miss = r['count'] - r['thumbed']
+            tree.insert('', 'end', values=(
+                r['folder'], r['count'], fmt_size(r['size'] or 0),
+                f"{r['thumbed']}/{r['count']}", miss))
+            tc += r['count']; ts += r['size'] or 0
+            tt += r['thumbed']; tm += miss
+        tree.insert('', 'end', values=(
+            f"[전체 {len(stats)}개 폴더]", tc, fmt_size(ts),
+            f'{tt}/{tc}', tm), tags=('total',))
+        tree.tag_configure('total', foreground='#7c6ff7')
 
-        # 썸네일 초기화 버튼
-        bf=tk.Frame(win,bg='#0d0d14'); bf.pack(pady=4)
-        ttk.Button(bf,text='🗑 선택 폴더 썸네일만 초기화',
-                   command=lambda:(win.destroy(), self._reset_thumbs(
-                       tree.item(tree.selection()[0])['values'][0]
+        def _go_folder(folder_path, only_missing=False):
+            self.folder_var.set(folder_path)
+            self.tag_var.set('')
+            self._offset = 0
+            if folder_path in self._folder_paths:
+                idx = self._folder_paths.index(folder_path)
+                self.fl.selection_clear(0, 'end')
+                self.fl.selection_set(idx)
+                self.fl.see(idx)
+            self._only_missing_thumb = only_missing
+            self._reload()
+            win.destroy()
+
+        def _on_dbl(e):
+            sel = tree.selection()
+            if not sel: return
+            fp = str(tree.item(sel[0])['values'][0])
+            if fp.startswith('['): return  # 합계 행 무시
+            _go_folder(fp)
+
+        def _on_rclick(e):
+            iid = tree.identify_row(e.y)
+            if not iid: return
+            tree.selection_set(iid)
+            vals = tree.item(iid)['values']
+            fp   = str(vals[0])
+            if fp.startswith('['): return
+            miss = int(vals[4])
+            m = tk.Menu(win, tearoff=0, bg='#1a1a28', fg='#dcdcf0',
+                        activebackground='#7c6ff7', activeforeground='#fff')
+            m.add_command(label='🔍 이 폴더 영상만 보기',
+                          command=lambda: _go_folder(fp))
+            if miss > 0:
+                m.add_command(label=f'🔍 썸네일 미생성만 보기  ({miss}개)',
+                              command=lambda: _go_folder(fp, only_missing=True))
+                m.add_separator()
+                m.add_command(label='🖼 썸네일 생성 시작',
+                              command=lambda: (win.destroy(), self._start_thumbs(fp)))
+            m.add_separator()
+            m.add_command(label='🗑 이 폴더 썸네일 초기화',
+                          command=lambda: (win.destroy(), self._reset_thumbs(fp)))
+            m.tk_popup(e.x_root, e.y_root)
+
+        tree.bind('<Double-Button-1>', _on_dbl)
+        tree.bind('<Button-3>', _on_rclick)
+
+        if tm > 0:
+            ttk.Button(win, text=f'🖼 미생성 {tm}개 썸네일 전체 생성',
+                       style='Acc.TButton',
+                       command=lambda: (win.destroy(), self._start_thumbs())
+                       ).pack(pady=(6, 2))
+
+        bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=4)
+        ttk.Button(bf, text='🗑 선택 폴더 썸네일 초기화',
+                   command=lambda: (win.destroy(), self._reset_thumbs(
+                       str(tree.item(tree.selection()[0])['values'][0])
                        if tree.selection() else None))
-                   ).pack(side='left',padx=4)
-        ttk.Button(bf,text='🗑 전체 썸네일 초기화',
-                   command=lambda:(win.destroy(), self._reset_thumbs(None))
-                   ).pack(side='left',padx=4)
+                   ).pack(side='left', padx=4)
+        ttk.Button(bf, text='🗑 전체 썸네일 초기화',
+                   command=lambda: (win.destroy(), self._reset_thumbs(None))
+                   ).pack(side='left', padx=4)
+
+        tk.Label(win, text='더블클릭: 해당 폴더로 필터  |  우클릭: 옵션 메뉴',
+                 bg='#0d0d14', fg='#555', font=('Consolas', 8)).pack(pady=(0, 6))
 
     def _reset_thumbs(self, folder=None):
         """썸네일 파일 삭제 + DB thumb_ok 리셋"""

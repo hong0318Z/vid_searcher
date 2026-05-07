@@ -412,12 +412,14 @@ a{color:inherit;text-decoration:none}
   letter-spacing:.5px;padding:8px 0 2px;border-top:1px solid #2a2a2a;margin-top:4px}
 /* EDIT PANEL */
 .edit-panel{background:#161620;border:1px solid #2a2a3a;border-radius:8px;
-  margin-top:12px;overflow:hidden}
-.edit-toggle{display:flex;align-items:center;gap:8px;padding:10px 16px;
-  cursor:pointer;font-size:13px;color:#aaa;background:none;border:none;
-  width:100%;text-align:left;transition:.15s;font-family:inherit}
-.edit-toggle:hover{background:#1e1e2e;color:var(--acc)}
-.edit-body{padding:16px;border-top:1px solid #2a2a3a;display:none}
+  margin-top:14px;overflow:hidden}
+/* 편집 버튼 — player-meta 내 btn-open과 flex row로 나란히 */
+.edit-toggle{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;
+  cursor:pointer;font-size:13px;color:#ccc;background:#1e1e30;
+  border:1px solid #3a3a5a;border-radius:6px;
+  transition:.15s;font-family:inherit;white-space:nowrap}
+.edit-toggle:hover{background:#2a2a4a;color:var(--acc);border-color:var(--acc)}
+.edit-body{padding:16px;display:none}
 .edit-body.open{display:block}
 .edit-row{margin-bottom:16px}
 .edit-row:last-child{margin-bottom:0}
@@ -728,18 +730,17 @@ _VIDEO = _BASE.replace('__BODY__', """
           <a href="/tag/{{ tg|urlencode }}" class="tag-pill">{{ tg }}</a>
         {% endfor %}
         </div>
-        {% if v.description %}
-        <div class="player-desc" id="player-desc">{{ v.description }}</div>
-        {% else %}
-        <div class="player-desc" id="player-desc" style="display:none"></div>
-        {% endif %}
-        <button class="btn-open" onclick="openNative('{{ v.id }}')">
-          📂 시스템 플레이어로 열기
-        </button>
+        <div class="player-desc" id="player-desc"{% if not v.description %} style="display:none"{% endif %}>{{ v.description or '' }}</div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+          <button class="btn-open" onclick="openNative('{{ v.id }}')">
+            📂 시스템 플레이어로 열기
+          </button>
+          <button class="edit-toggle" id="edit-toggle-btn" onclick="toggleEdit()"
+                  style="flex:1;min-width:160px">✏ 메타데이터 편집</button>
+        </div>
       </div>
       <!-- 편집 패널 -->
-      <div class="edit-panel">
-        <button class="edit-toggle" id="edit-toggle-btn" onclick="toggleEdit()">✏ 메타데이터 편집</button>
+      <div class="edit-panel" id="edit-panel-wrap">
         <div class="edit-body" id="edit-body">
           <div class="edit-row">
             <label>제목 (별칭)</label>
@@ -799,10 +800,13 @@ _VIDEO = _BASE.replace('__BODY__', """
 var VID_ID = '{{ v.id }}';
 
 function toggleEdit(){
-  var body = document.getElementById('edit-body');
-  var btn  = document.getElementById('edit-toggle-btn');
+  var panel   = document.getElementById('edit-panel-wrap');
+  var body    = document.getElementById('edit-body');
+  var btn     = document.getElementById('edit-toggle-btn');
+  var opening = !body.classList.contains('open');
   body.classList.toggle('open');
-  btn.textContent = body.classList.contains('open') ? '✕ 닫기' : '✏ 메타데이터 편집';
+  btn.textContent = opening ? '✕ 편집 닫기' : '✏ 메타데이터 편집';
+  if (opening) panel.scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 
 var _toastTid;

@@ -832,6 +832,15 @@ def thumb_file(path):
     THUMB_DIR.mkdir(exist_ok=True)
     return THUMB_DIR/(hashlib.md5(path.encode()).hexdigest()+'.jpg')
 
+_IMG_CACHE_MAX = 500
+
+def _cache_put(cache: dict, key, value):
+    """PhotoImage 캐시 삽입 + 500개 초과 시 오래된 50개 제거."""
+    cache[key] = value
+    if len(cache) > _IMG_CACHE_MAX:
+        for k in list(cache.keys())[:50]:
+            del cache[k]
+
 def open_thumb(path: str):
     """ThumbDB 또는 개별 파일에서 PIL Image 반환. 없으면 None."""
     import io as _io
@@ -997,9 +1006,9 @@ class CanvasGrid(tk.Frame):
             iw,ih = img.size
             scale = min(tw/iw, th/ih) if iw and ih else 1
             nw,nh = max(1,int(iw*scale)), max(1,int(ih*scale))
-            img = img.resize((nw,nh), Image.LANCZOS)
+            img = img.resize((nw,nh), Image.BILINEAR)
             ph  = ImageTk.PhotoImage(img)
-            self._img_cache[cache_key] = ph
+            _cache_put(self._img_cache, cache_key, ph)
             self._phs[path] = ph
         except: return
 
@@ -1103,9 +1112,9 @@ class CanvasGrid(tk.Frame):
                     iw,ih = img.size
                     scale = min(tw/iw,th/ih) if iw and ih else 1
                     nw,nh = max(1,int(iw*scale)),max(1,int(ih*scale))
-                    img = img.resize((nw,nh),Image.LANCZOS)
+                    img = img.resize((nw,nh),Image.BILINEAR)
                     ph  = ImageTk.PhotoImage(img)
-                    self._img_cache[cache_key] = ph
+                    _cache_put(self._img_cache, cache_key, ph)
                     self._phs[path] = ph
             except: pass
 
@@ -1989,7 +1998,7 @@ class VidSort(tk.Tk):
             if path and Path(path).exists():
                 try:
                     from PIL import Image as _Img, ImageTk as _ITk
-                    img = _Img.open(path).resize((128, 72), _Img.LANCZOS)
+                    img = _Img.open(path).resize((128, 72), _Img.BILINEAR)
                     photo = _ITk.PhotoImage(img)
                     thumb_lbl.config(image=photo, text='', bg='#000')
                     thumb_lbl._img = photo
@@ -3661,9 +3670,9 @@ class VidSort(tk.Tk):
                     iw,ih = img.size
                     scale = min(tw/iw, th/ih) if iw and ih else 1
                     nw,nh = max(1,int(iw*scale)), max(1,int(ih*scale))
-                    img = img.resize((nw,nh), Image.LANCZOS)
+                    img = img.resize((nw,nh), Image.BILINEAR)
                     ph  = ImageTk.PhotoImage(img)
-                    self._img_cache[cache_key] = ph
+                    _cache_put(self._img_cache, cache_key, ph)
             except: pass
 
     # ── SCAN ────────────────────────────────────
@@ -4279,7 +4288,7 @@ class VidSort(tk.Tk):
                 if img:
                     fw = max(player_frame.winfo_width(), 480)
                     fh = max(player_frame.winfo_height(), 300)
-                    img.thumbnail((fw, fh - 40), Image.LANCZOS)
+                    img.thumbnail((fw, fh - 40), Image.BILINEAR)
                     photo = ImageTk.PhotoImage(img)
                     lbl = tk.Label(player_frame, image=photo, bg='#000',
                                    cursor='hand2')

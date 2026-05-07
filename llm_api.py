@@ -303,16 +303,37 @@ class LLMClient:
             '}\n\n'
             '배우 목록:\n'
         )
-        # 입력 토큰 추정 (4자 ≈ 1토큰), MAX_OUTPUT_TOKENS의 60% 초과 시 분할
+        # 입력 토큰 추정 (4자 ≈ 1토큰), 초과 시 이터레이티브 배치 분할
         _MAX_INPUT_CHARS = int(MAX_OUTPUT_TOKENS * 0.6 * 4)
-        lines = '\n'.join(f'{i+1}. {n}' for i, n in enumerate(names))
-        if len(_PROMPT_HEADER) + len(lines) > _MAX_INPUT_CHARS:
-            mid = len(names) // 2
-            result = {}
-            result.update(self.analyze_actor_names(names[:mid]))
-            result.update(self.analyze_actor_names(names[mid:]))
+        result: dict = {}
+        batch: list = []
+        batch_chars = len(_PROMPT_HEADER)
+        for name in names:
+            entry = f'{len(batch)+1}. {name}\n'
+            if batch_chars + len(entry) > _MAX_INPUT_CHARS and batch:
+                lines = '\n'.join(f'{i+1}. {n}' for i, n in enumerate(batch))
+                prompt = _PROMPT_HEADER + lines
+                try:
+                    raw = self._chat(
+                        [{'role': 'system',
+                          'content': '당신은 성인 영상 배우 데이터베이스 전문가입니다. JSON만 출력하세요.'},
+                         {'role': 'user', 'content': prompt}],
+                        max_tokens=MAX_OUTPUT_TOKENS,
+                    )
+                    if raw.startswith('```'):
+                        raw = raw.split('```')[1].lstrip('json').strip()
+                    brace = raw.find('{')
+                    if brace > 0: raw = raw[brace:]
+                    result.update(json.loads(raw.strip()))
+                except Exception:
+                    pass
+                batch = []
+                batch_chars = len(_PROMPT_HEADER)
+            batch.append(name)
+            batch_chars += len(entry)
+        if not batch:
             return result
-
+        lines = '\n'.join(f'{i+1}. {n}' for i, n in enumerate(batch))
         prompt = _PROMPT_HEADER + lines
         try:
             raw = self._chat(
@@ -325,9 +346,10 @@ class LLMClient:
                 raw = raw.split('```')[1].lstrip('json').strip()
             brace = raw.find('{')
             if brace > 0: raw = raw[brace:]
-            return json.loads(raw.strip())
+            result.update(json.loads(raw.strip()))
         except Exception:
-            return {}
+            pass
+        return result
 
     def classify_tags(self, tag_list: list) -> dict:
         """태그 목록 → {"태그명": "행위"|"인물"|"레이블"|"기타"} 분류.
@@ -400,41 +422,48 @@ class LLMClient:
         
         body_text = '\n'.join(lines)
 
-        # 3. 토큰 초과 방지 (스크래핑 원문이 길 수 있으므로 넉넉하게 절반으로 쪼개기)
-        _MAX_INPUT_CHARS = int(MAX_OUTPUT_TOKENS * 0.5 * 4) 
-        if len(_PROMPT_HEADER) + len(body_text) > _MAX_INPUT_CHARS:
-            items = list(actor_data.items())
-            mid = len(items) // 2
-            
-            result = {}
-            result.update(self.generate_actor_info_batch(dict(items[:mid])))
-            result.update(self.generate_actor_info_batch(dict(items[mid:])))
+        # 3. 토큰 초과 방지 — 이터레이티브 배치 분할 (재귀 대신)
+        _MAX_INPUT_CHARS = int(MAX_OUTPUT_TOKENS * 0.5 * 4)
+        all_items = list(actor_data.items())
+        result: dict = {}
+
+        def _call_batch(batch_items):
+            lines = []
+            for name, raw in batch_items:
+                lines.append(f'[{name}]\n{raw or "(없음)"}\n' + '-' * 20)
+            prompt = _PROMPT_HEADER + '\n'.join(lines)
+            try:
+                raw_resp = self._chat(
+                    [{'role': 'system',
+                      'content': '당신은 성인 영상 배우 정보 정리 전문가입니다. 오직 순수 JSON 문자열만 반환합니다.'},
+                     {'role': 'user', 'content': prompt}],
+                    max_tokens=MAX_OUTPUT_TOKENS,
+                )
+                if raw_resp.startswith('```'):
+                    raw_resp = raw_resp.split('```')[1].lstrip('json').strip()
+                brace = raw_resp.find('{')
+                if brace > 0: raw_resp = raw_resp[brace:]
+                return json.loads(raw_resp.strip())
+            except Exception:
+                return {}
+
+        batch: list = []
+        batch_chars = len(_PROMPT_HEADER)
+        for name, raw in all_items:
+            entry_text = f'[{name}]\n{raw or "(없음)"}\n' + '-' * 20 + '\n'
+            if batch_chars + len(entry_text) > _MAX_INPUT_CHARS and batch:
+                result.update(_call_batch(batch))
+                batch = []
+                batch_chars = len(_PROMPT_HEADER)
+            batch.append((name, raw))
+            batch_chars += len(entry_text)
+
+        if not batch:
             return result
 
-        prompt = _PROMPT_HEADER + body_text
-
-        # 4. LLM 호출 및 방어적 파싱
-        try:
-            raw_response = self._chat(
-                [{'role': 'system', 'content': '당신은 성인 영상 배우 정보 정리 전문가입니다. 오직 순수 JSON 문자열만 반환합니다.'},
-                 {'role': 'user', 'content': prompt}],
-                max_tokens=MAX_OUTPUT_TOKENS,
-            )
-            
-            # LLM이 말을 안 듣고 ```json 블록을 썼을 경우를 대비한 물리적 제거
-            if raw_response.startswith('```'):
-                raw_response = raw_response.split('```')[1].lstrip('json').strip()
-            
-            # JSON 시작 괄호 찾기 (앞에 쓸데없는 인사말이 붙었을 경우 대비)
-            brace = raw_response.find('{')
-            if brace > 0: 
-                raw_response = raw_response[brace:]
-                
-            return json.loads(raw_response.strip())
-            
-        except Exception as e:
-            print(f"[generate_actor_info_batch] JSON 파싱 실패: {e}")
-            return {}
+        # 마지막 남은 배치 처리
+        result.update(_call_batch(batch))
+        return result
 
     def generate_action_desc(self, action_name: str,
                              context_tags: str = '') -> str:

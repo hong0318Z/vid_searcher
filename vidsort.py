@@ -1256,7 +1256,7 @@ class CanvasGrid(tk.Frame):
 class VidSort(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('VidSort v5 — 동영상 아카이브')
+        self.title('VidSort v6 — 동영상 아카이브')
         self.geometry('1400x900'); self.minsize(900,600)
         self.configure(bg='#0d0d14')
         self._style()
@@ -1457,125 +1457,95 @@ class VidSort(tk.Tk):
 
     # ── UI ──────────────────────────────────────
     def _build_ui(self):
-        # TOP
-        top=tk.Frame(self,bg='#08080f',height=54)
+        # 사이드바에서 사용할 변수를 미리 초기화
+        self.min_dur_var = tk.IntVar(value=0)
+
+        # ── 상단 바 ─────────────────────────────────────────
+        top = tk.Frame(self, bg='#08080f', height=54)
         top.pack(fill='x'); top.pack_propagate(False)
-        tk.Label(top,text='VidSort',bg='#08080f',fg='#7c6ff7',
-                 font=('Consolas',20,'bold')).pack(side='left',padx=16,pady=8)
-        tk.Label(top,text='v5',bg='#08080f',fg='#333',
-                 font=('Consolas',10)).pack(side='left')
 
-        sw=tk.Frame(top,bg='#1a1a28',padx=10)
-        sw.pack(side='left',padx=20,pady=10,fill='y')
-        tk.Label(sw,text='🔍',bg='#1a1a28',fg='#555').pack(side='left')
-        se=ttk.Entry(sw,textvariable=self.search_var,width=42,font=('Consolas',11))
-        se.pack(side='left',ipady=3)
-        se.bind('<Escape>',lambda e: self.search_var.set(''))
-        tk.Label(sw,text='파일명·별칭·태그',bg='#1a1a28',
-                 fg='#444',font=('Consolas',8)).pack(side='left',padx=(8,2))
-        tk.Checkbutton(sw, text='폴더명', variable=self.folder_search_var,
-                       bg='#1a1a28', fg='#555', selectcolor='#1a1a28',
-                       activebackground='#1a1a28', font=('Consolas',8),
-                       cursor='hand2',
-                       command=lambda: self.after(0, self._reload)
-                       ).pack(side='left')
+        tk.Label(top, text='VidSort', bg='#08080f', fg='#7c6ff7',
+                 font=('Consolas', 20, 'bold')).pack(side='left', padx=16, pady=8)
+        tk.Label(top, text='v6', bg='#08080f', fg='#444',
+                 font=('Consolas', 10)).pack(side='left')
 
-        self.lbl_ff=tk.Label(top,text='',bg='#08080f',font=('Consolas',9))
-        self.lbl_ff.pack(side='right',padx=10)
-        self.lbl_stats=tk.Label(top,text='',bg='#08080f',fg='#555',font=('Consolas',9))
-        self.lbl_stats.pack(side='right',padx=10)
+        sw = tk.Frame(top, bg='#1a1a28', padx=12)
+        sw.pack(side='left', padx=20, pady=10, fill='y')
+        tk.Label(sw, text='🔍', bg='#1a1a28', fg='#555').pack(side='left')
+        se = ttk.Entry(sw, textvariable=self.search_var, width=48, font=('Consolas', 11))
+        se.pack(side='left', ipady=3)
+        se.bind('<Escape>', lambda e: self.search_var.set(''))
 
-        # TOOLBAR
-        tb=tk.Frame(self,bg='#111120',pady=6); tb.pack(fill='x')
-        ttk.Button(tb,text='📁 폴더 추가',style='Acc.TButton',
-                   command=self._add_folder).pack(side='left',padx=(10,4))
-        ttk.Button(tb,text='🔄 업데이트',command=self._ask_update).pack(side='left',padx=4)
-        ttk.Separator(tb,orient='vertical').pack(side='left',fill='y',padx=8,pady=4)
+        self.lbl_ff = tk.Label(top, text='', bg='#08080f', font=('Consolas', 9))
+        self.lbl_ff.pack(side='right', padx=10)
+        self.lbl_stats = tk.Label(top, text='', bg='#08080f', fg='#555', font=('Consolas', 9))
+        self.lbl_stats.pack(side='right', padx=10)
 
-        tk.Label(tb,text='태그:',bg='#111120',fg='#666',font=('Consolas',9)).pack(side='left',padx=(4,0))
-        self.tag_cb=ttk.Combobox(tb,textvariable=self.tag_var,
-                                  values=[''],width=14,state='readonly',font=('Consolas',9))
-        self.tag_cb.pack(side='left',padx=4)
-        self.tag_cb.bind('<<ComboboxSelected>>',lambda e: self._reload())
+        # ── 툴바 (핵심 컨트롤만) ────────────────────────────
+        tb = tk.Frame(self, bg='#111120', pady=5); tb.pack(fill='x')
 
-        tk.Label(tb,text='정렬:',bg='#111120',fg='#666',font=('Consolas',9)).pack(side='left',padx=(8,0))
-        ttk.Combobox(tb,textvariable=self.sort_var,
-                     values=['이름','크기','날짜추가','재생시간'],
-                     width=10,state='readonly',font=('Consolas',9)).pack(side='left',padx=(4,0))
-        # 오름/내림차순 토글 버튼
+        # 왼쪽: 폴더 추가 / 태그 / 정렬 / 썸네일 크기
+        ttk.Button(tb, text='📁 폴더 추가', style='Acc.TButton',
+                   command=self._add_folder).pack(side='left', padx=(10, 4))
+        ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=8, pady=4)
+
+        tk.Label(tb, text='태그:', bg='#111120', fg='#666',
+                 font=('Consolas', 9)).pack(side='left', padx=(0, 2))
+        self.tag_cb = ttk.Combobox(tb, textvariable=self.tag_var,
+                                   values=[''], width=16, state='readonly',
+                                   font=('Consolas', 9))
+        self.tag_cb.pack(side='left', padx=(0, 6))
+        self.tag_cb.bind('<<ComboboxSelected>>', lambda e: self._reload())
+
+        tk.Label(tb, text='정렬:', bg='#111120', fg='#666',
+                 font=('Consolas', 9)).pack(side='left', padx=(0, 2))
+        ttk.Combobox(tb, textvariable=self.sort_var,
+                     values=['이름', '크기', '날짜추가', '재생시간'],
+                     width=8, state='readonly', font=('Consolas', 9)).pack(side='left')
         self._sort_dir_btn = tk.Button(
             tb, text='▲', bg='#111120', fg='#7c6ff7',
-            font=('Consolas', 10, 'bold'), bd=0, padx=4, pady=2,
+            font=('Consolas', 10, 'bold'), bd=0, padx=5, pady=2,
             cursor='hand2', activebackground='#1a1a28',
             command=self._toggle_sort_dir)
-        self._sort_dir_btn.pack(side='left', padx=(2, 4))
+        self._sort_dir_btn.pack(side='left', padx=(2, 0))
 
-        tk.Checkbutton(tb,text='2글자↓ 무시',variable=self.short_filter_var,
-                       bg='#111120',fg='#888',selectcolor='#111120',
-                       activebackground='#111120',font=('Consolas',9),
-                       cursor='hand2').pack(side='left',padx=8)
+        ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=8, pady=4)
+        tk.Label(tb, text='🖼', bg='#111120', fg='#666').pack(side='left')
+        ttk.Scale(tb, from_=0, to=len(THUMB_SIZES)-1, variable=self.thumb_step_var,
+                  orient='horizontal', length=74,
+                  command=lambda v: self.after(100, self._rerender)).pack(side='left', padx=2)
+        tk.Label(tb, text='🔲', bg='#111120', fg='#555').pack(side='left')
 
-        # 우측
-        self.lbl_clip=tk.Label(tb,text='',bg='#111120',fg='#ffd166',font=('Consolas',9))
-        self.lbl_clip.pack(side='right',padx=8)
-        ttk.Button(tb,text='📂 붙여넣기',command=self._paste).pack(side='right',padx=4)
-        ttk.Button(tb,text='📥 다운로더',command=self._open_downloader).pack(side='right',padx=4)
-        ttk.Separator(tb,orient='vertical').pack(side='right',fill='y',padx=6,pady=4)
+        # 오른쪽: 보조 액션
+        self.lbl_clip = tk.Label(tb, text='', bg='#111120', fg='#ffd166', font=('Consolas', 9))
+        self.lbl_clip.pack(side='right', padx=8)
+        ttk.Button(tb, text='📂 붙여넣기', command=self._paste).pack(side='right', padx=4)
+        ttk.Separator(tb, orient='vertical').pack(side='right', fill='y', padx=6, pady=4)
+        ttk.Button(tb, text='📥 다운로더', command=self._open_downloader).pack(side='right', padx=4)
+        ttk.Button(tb, text='🌐 갤러리', command=self._gallery_view).pack(side='right', padx=4)
 
-        # 짧은 영상 제외 필터
-        self.min_dur_var = tk.IntVar(value=0)
-        tk.Label(tb,text='초↓제외:',bg='#111120',fg='#666',
-                 font=('Consolas',9)).pack(side='right',padx=(4,0))
-        dur_entry = ttk.Entry(tb, textvariable=self.min_dur_var,
-                              width=5, font=('Consolas',9))
-        dur_entry.pack(side='right', padx=2)
-        dur_entry.bind('<Return>', lambda e: self._reload())
-        ttk.Button(tb, text='30초',
-                   command=lambda:(self.min_dur_var.set(30), self._reload())
-                   ).pack(side='right', padx=2)
-        ttk.Button(tb, text='60초',
-                   command=lambda:(self.min_dur_var.set(60), self._reload())
-                   ).pack(side='right', padx=2)
-        ttk.Button(tb, text='끄기',
-                   command=lambda:(self.min_dur_var.set(0), self._reload())
-                   ).pack(side='right', padx=2)
-        ttk.Separator(tb,orient='vertical').pack(side='right',fill='y',padx=6,pady=4)
+        # ── 메인 영역 ────────────────────────────────────────
+        main = tk.Frame(self, bg='#0d0d14'); main.pack(fill='both', expand=True)
 
-        tk.Checkbutton(tb,text='🐛 디버그',variable=self.debug_var,
-                       bg='#111120',fg='#888',selectcolor='#111120',
-                       activebackground='#111120',font=('Consolas',9),
-                       cursor='hand2').pack(side='right',padx=4)
-        ttk.Separator(tb,orient='vertical').pack(side='right',fill='y',padx=6,pady=4)
-        tk.Label(tb,text='🔲',bg='#111120',fg='#888').pack(side='right')
-        ttk.Scale(tb,from_=0,to=len(THUMB_SIZES)-1,variable=self.thumb_step_var,
-                  orient='horizontal',length=80,
-                  command=lambda v: self.after(100,self._rerender)).pack(side='right',padx=2)
-        tk.Label(tb,text='🖼',bg='#111120',fg='#888').pack(side='right')
-
-        # MAIN
-        main=tk.Frame(self,bg='#0d0d14'); main.pack(fill='both',expand=True)
-
-        # 사이드바
-        self.sidebar=tk.Frame(main,bg='#0a0a12',width=265)
-        self.sidebar.pack(side='left',fill='y'); self.sidebar.pack_propagate(False)
+        self.sidebar = tk.Frame(main, bg='#0a0a12', width=265)
+        self.sidebar.pack(side='left', fill='y'); self.sidebar.pack_propagate(False)
         self._build_sidebar()
 
-        # 오른쪽
-        self._right=tk.Frame(main,bg='#0d0d14')
-        self._right.pack(side='left',fill='both',expand=True)
-        self.grid_widget=CanvasGrid(self._right,
-                                    on_open=self._on_grid_open,
-                                    on_ctx=self._ctx,
-                                    on_click=self._click)
-        self.grid_widget.pack(fill='both',expand=True)
+        self._right = tk.Frame(main, bg='#0d0d14')
+        self._right.pack(side='left', fill='both', expand=True)
+        self.grid_widget = CanvasGrid(self._right,
+                                      on_open=self._on_grid_open,
+                                      on_ctx=self._ctx,
+                                      on_click=self._click)
+        self.grid_widget.pack(fill='both', expand=True)
 
-        # STATUS
-        sb=tk.Frame(self,bg='#08080f',height=26)
-        sb.pack(fill='x',side='bottom'); sb.pack_propagate(False)
-        self.progress=ttk.Progressbar(sb,length=200,mode='determinate')
-        self.progress.pack(side='right',padx=10,pady=3)
-        self.lbl_status=tk.Label(sb,text='준비',bg='#08080f',fg='#444',font=('Consolas',9))
-        self.lbl_status.pack(side='left',padx=10)
+        # ── 상태바 ───────────────────────────────────────────
+        sb = tk.Frame(self, bg='#08080f', height=26)
+        sb.pack(fill='x', side='bottom'); sb.pack_propagate(False)
+        self.progress = ttk.Progressbar(sb, length=200, mode='determinate')
+        self.progress.pack(side='right', padx=10, pady=3)
+        self.lbl_status = tk.Label(sb, text='준비', bg='#08080f', fg='#444', font=('Consolas', 9))
+        self.lbl_status.pack(side='left', padx=10)
 
     def _make_collapsible(self, parent, title, initially_open=True):
         """접기/펼치기 가능한 섹션 헤더 + 콘텐츠 프레임 반환.
@@ -1612,10 +1582,14 @@ class VidSort(tk.Tk):
         return hdr, body
 
     def _build_sidebar(self):
-        # ── 폴더 섹션 ──────────────────────────
-        _, fold_body = self._make_collapsible(self.sidebar, '📁  폴더', True)
+        SB  = self.sidebar
+        BG  = '#0a0a12'
+        def _sep(): ttk.Separator(SB).pack(fill='x', padx=8, pady=2)
 
-        self.fl = tk.Listbox(fold_body, bg='#0a0a12', fg='#999',
+        # ── 📁 폴더 ──────────────────────────────
+        _, fold_body = self._make_collapsible(SB, '📁  폴더', True)
+
+        self.fl = tk.Listbox(fold_body, bg=BG, fg='#999',
                              selectbackground='#7c6ff7', font=('Consolas', 9),
                              borderwidth=0, highlightthickness=0, activestyle='none',
                              height=5)
@@ -1623,119 +1597,164 @@ class VidSort(tk.Tk):
         self.fl.bind('<<ListboxSelect>>', self._sb_folder)
         self.fl.bind('<Button-3>', self._fl_ctx)
 
-        bf = tk.Frame(fold_body, bg='#0a0a12')
+        bf = tk.Frame(fold_body, bg=BG)
         bf.pack(fill='x', padx=6, pady=(0, 6))
-        ttk.Button(bf, text='➕', command=self._add_folder
-                   ).pack(side='left', fill='x', expand=True, padx=2)
-        ttk.Button(bf, text='✕', command=self._remove_folder
-                   ).pack(side='left', fill='x', expand=True, padx=2)
+        ttk.Button(bf, text='➕ 추가', command=self._add_folder
+                   ).pack(side='left', fill='x', expand=True, padx=(0, 2))
+        ttk.Button(bf, text='✕ 제거', command=self._remove_folder
+                   ).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(bf, text='📊', command=self._show_folder_overview
                    ).pack(side='left', padx=2)
 
-        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+        _sep()
 
-        # ── 퀵 액션 ─────────────────────────────
-        qa = tk.Frame(self.sidebar, bg='#0a0a12')
+        # ── 🔍 검색 필터 (기본 열림) ─────────────
+        _, flt_body = self._make_collapsible(SB, '🔍  검색 필터', True)
+
+        # 체크박스 옵션
+        opts_f = tk.Frame(flt_body, bg=BG)
+        opts_f.pack(fill='x', padx=8, pady=(4, 2))
+        ckw = dict(bg=BG, fg='#999', selectcolor='#7c6ff7',
+                   activebackground=BG, activeforeground='#dcdcf0',
+                   font=('Consolas', 9), cursor='hand2')
+        tk.Checkbutton(opts_f, text='폴더명 포함 검색',
+                       variable=self.folder_search_var,
+                       command=lambda: self.after(0, self._reload),
+                       **ckw).pack(anchor='w', pady=1)
+        tk.Checkbutton(opts_f, text='2글자 이하 태그 무시',
+                       variable=self.short_filter_var,
+                       **ckw).pack(anchor='w', pady=1)
+
+        # 최소 재생시간 필터
+        dur_f = tk.Frame(flt_body, bg=BG)
+        dur_f.pack(fill='x', padx=8, pady=(4, 6))
+        tk.Label(dur_f, text='최소 재생시간', bg=BG, fg='#666',
+                 font=('Consolas', 8)).pack(anchor='w', pady=(0, 3))
+        dur_row = tk.Frame(dur_f, bg=BG); dur_row.pack(fill='x')
+        dur_entry = ttk.Entry(dur_row, textvariable=self.min_dur_var,
+                              width=5, font=('Consolas', 9))
+        dur_entry.pack(side='left', padx=(0, 2))
+        dur_entry.bind('<Return>', lambda e: self._reload())
+        tk.Label(dur_row, text='초', bg=BG, fg='#555',
+                 font=('Consolas', 9)).pack(side='left', padx=(0, 4))
+        ttk.Button(dur_row, text='30초',
+                   command=lambda: (self.min_dur_var.set(30), self._reload())
+                   ).pack(side='left', padx=2)
+        ttk.Button(dur_row, text='60초',
+                   command=lambda: (self.min_dur_var.set(60), self._reload())
+                   ).pack(side='left', padx=2)
+        ttk.Button(dur_row, text='초기화',
+                   command=lambda: (self.min_dur_var.set(0), self._reload())
+                   ).pack(side='left', padx=2)
+
+        _sep()
+
+        # ── 퀵 액션 ──────────────────────────────
+        qa = tk.Frame(SB, bg=BG)
         qa.pack(fill='x', padx=6, pady=(4, 4))
-        row1 = tk.Frame(qa, bg='#0a0a12'); row1.pack(fill='x', pady=1)
-        row2 = tk.Frame(qa, bg='#0a0a12'); row2.pack(fill='x', pady=1)
-        row3 = tk.Frame(qa, bg='#0a0a12'); row3.pack(fill='x', pady=1)
 
-        ttk.Button(row1, text='전체 보기',
+        r1 = tk.Frame(qa, bg=BG); r1.pack(fill='x', pady=1)
+        ttk.Button(r1, text='📋 전체 보기',
                    command=self._show_all).pack(side='left', fill='x', expand=True, padx=(0, 2))
-        ttk.Button(row1, text='🎲 오늘의 추천',
+        ttk.Button(r1, text='🎲 오늘의 추천',
                    command=self._show_daily_pick).pack(side='left', fill='x', expand=True)
-        ttk.Button(row2, text='🔄 재스캔',
+
+        r2 = tk.Frame(qa, bg=BG); r2.pack(fill='x', pady=1)
+        ttk.Button(r2, text='🔄 폴더 재스캔',
                    command=self._rescan_all_folders).pack(side='left', fill='x', expand=True, padx=(0, 2))
-        ttk.Button(row2, text='🌐 갤러리',
-                   command=self._gallery_view).pack(side='left', fill='x', expand=True)
-        ttk.Button(row3, text='👯 중복 파일 찾기', style='Acc.TButton',
-                   command=self._find_duplicates_dlg).pack(side='left', fill='x', expand=True)
+        ttk.Button(r2, text='🔄 업데이트',
+                   command=self._ask_update).pack(side='left', fill='x', expand=True)
 
-        # ── 🎯 AI 영상 추천 (강조) ───────────────
-        ttk.Button(self.sidebar, text='🎯  AI 영상 추천', style='Acc.TButton',
-                   command=self._ai_recommend_dlg).pack(fill='x', padx=6, pady=(6, 6))
+        ttk.Button(qa, text='👯 중복 파일 찾기', style='Acc.TButton',
+                   command=self._find_duplicates_dlg).pack(fill='x', pady=(1, 0))
 
-        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+        # ── 🎯 AI 영상 추천 ───────────────────────
+        ttk.Button(SB, text='🎯  AI 영상 추천', style='Acc.TButton',
+                   command=self._ai_recommend_dlg).pack(fill='x', padx=6, pady=(6, 4))
 
-        # ── 태그 패널 ────────────────────────────
-        tag_hdr_f = tk.Frame(self.sidebar, bg='#0a0a12')
+        _sep()
+
+        # ── 🏷 태그 패널 (expand=True로 남은 공간 차지) ──
+        tag_hdr_f = tk.Frame(SB, bg=BG)
         tag_hdr_f.pack(fill='x', padx=6, pady=(4, 2))
-        tk.Label(tag_hdr_f, text='🏷  태그', bg='#0a0a12', fg='#555',
+        tk.Label(tag_hdr_f, text='🏷  태그', bg=BG, fg='#555',
                  font=('Consolas', 9, 'bold')).pack(side='left', padx=4)
         ttk.Button(tag_hdr_f, text='관리',
                    command=self._tag_manage_dlg).pack(side='right')
 
-        tag_outer = tk.Frame(self.sidebar, bg='#0a0a12')
+        tag_outer = tk.Frame(SB, bg=BG)
         tag_outer.pack(fill='both', expand=True, padx=4)
-        self._tag_canvas = tk.Canvas(tag_outer, bg='#0a0a12', highlightthickness=0)
+        self._tag_canvas = tk.Canvas(tag_outer, bg=BG, highlightthickness=0)
         tag_canvas = self._tag_canvas
-        tag_vsb    = ttk.Scrollbar(tag_outer, orient='vertical', command=tag_canvas.yview)
+        tag_vsb = ttk.Scrollbar(tag_outer, orient='vertical', command=tag_canvas.yview)
         tag_canvas.configure(yscrollcommand=tag_vsb.set)
         tag_vsb.pack(side='right', fill='y')
         tag_canvas.pack(fill='both', expand=True)
-        self._tag_btn_frame = tk.Frame(tag_canvas, bg='#0a0a12')
+        self._tag_btn_frame = tk.Frame(tag_canvas, bg=BG)
         tag_canvas.create_window((0, 0), window=self._tag_btn_frame, anchor='nw')
         self._tag_btn_frame.bind('<Configure>',
             lambda e: tag_canvas.configure(scrollregion=tag_canvas.bbox('all')))
-        # Windows / macOS
         tag_canvas.bind('<MouseWheel>',
             lambda e: tag_canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
-        # Linux
         tag_canvas.bind('<Button-4>', lambda e: tag_canvas.yview_scroll(-1, 'units'))
         tag_canvas.bind('<Button-5>', lambda e: tag_canvas.yview_scroll(1, 'units'))
 
-        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+        _sep()
 
-        # ── 포맷 필터 (접기/펼치기, 기본 접힘) ───
-        _, fmt_body = self._make_collapsible(self.sidebar, '🎬  포맷 필터', False)
+        # ── 🎬 포맷 필터 (기본 접힘) ─────────────
+        _, fmt_body = self._make_collapsible(SB, '🎬  포맷 필터', False)
 
-        fmt_frame = tk.Frame(fmt_body, bg='#0a0a12')
+        fmt_frame = tk.Frame(fmt_body, bg=BG)
         fmt_frame.pack(fill='x', padx=6, pady=(4, 2))
         for i, (label, ext) in enumerate(FORMAT_LIST):
             r, c = i // 2, i % 2
             tk.Checkbutton(fmt_frame, text=label, variable=self._fmt_vars[ext],
-                           bg='#0a0a12', fg='#999', selectcolor='#7c6ff7',
-                           activebackground='#0a0a12', activeforeground='#dcdcf0',
+                           bg=BG, fg='#999', selectcolor='#7c6ff7',
+                           activebackground=BG, activeforeground='#dcdcf0',
                            font=('Consolas', 8), cursor='hand2'
                            ).grid(row=r, column=c, sticky='w', padx=4, pady=1)
 
-        bf2 = tk.Frame(fmt_body, bg='#0a0a12')
+        bf2 = tk.Frame(fmt_body, bg=BG)
         bf2.pack(fill='x', padx=6, pady=(2, 2))
         ttk.Button(bf2, text='전체 ON',
                    command=lambda: [v.set(True) for v in self._fmt_vars.values()]
-                   ).pack(side='left', fill='x', expand=True, padx=2)
+                   ).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(bf2, text='전체 OFF',
                    command=lambda: [v.set(False) for v in self._fmt_vars.values()]
-                   ).pack(side='left', fill='x', expand=True, padx=2)
+                   ).pack(side='left', fill='x', expand=True)
         ttk.Button(fmt_body, text='✅  포맷 적용', style='Acc.TButton',
                    command=self._apply_format).pack(fill='x', padx=6, pady=(2, 6))
 
-        ttk.Separator(self.sidebar).pack(fill='x', padx=8, pady=2)
+        _sep()
 
-        # ── AI 도구 (접기/펼치기, 기본 접힘) ────
-        _, ai_body = self._make_collapsible(self.sidebar, '🤖  AI 도구', False)
+        # ── 🤖 AI 도구 (기본 접힘) ───────────────
+        _, ai_body = self._make_collapsible(SB, '🤖  AI 도구', False)
 
-        ai_top = tk.Frame(ai_body, bg='#0a0a12')
+        ai_top = tk.Frame(ai_body, bg=BG)
         ai_top.pack(fill='x', padx=6, pady=(4, 2))
         ttk.Button(ai_top, text='⚙ 설정/토큰',
                    command=self._llm_settings_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(ai_top, text='🔌 연결 테스트',
                    command=self._llm_test_dlg).pack(side='left', fill='x', expand=True)
 
-        ai_mid = tk.Frame(ai_body, bg='#0a0a12')
+        ai_mid = tk.Frame(ai_body, bg=BG)
         ai_mid.pack(fill='x', padx=6, pady=1)
         ttk.Button(ai_mid, text='▶ AI 자동 태그', style='Acc.TButton',
                    command=self._llm_auto_tag_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(ai_mid, text='🔍 패턴 분석',
                    command=self._llm_pattern_dlg).pack(side='left', fill='x', expand=True)
 
-        ai_bot = tk.Frame(ai_body, bg='#0a0a12')
-        ai_bot.pack(fill='x', padx=6, pady=(1, 6))
+        ai_bot = tk.Frame(ai_body, bg=BG)
+        ai_bot.pack(fill='x', padx=6, pady=(1, 4))
         ttk.Button(ai_bot, text='🌐 웹 자동태그',
                    command=self._jav_process_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(ai_bot, text='📋 웹태그 DB',
                    command=self._jav_db_dlg).pack(side='left', fill='x', expand=True)
+
+        tk.Checkbutton(ai_body, text='🐛 디버그 모드', variable=self.debug_var,
+                       bg=BG, fg='#555', selectcolor=BG,
+                       activebackground=BG, font=('Consolas', 8),
+                       cursor='hand2').pack(anchor='w', padx=10, pady=(0, 6))
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):

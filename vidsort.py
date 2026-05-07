@@ -1124,6 +1124,7 @@ class CanvasGrid(tk.Frame):
 
         cx=x+cw//2; cy=y+th//2+4
         if cache_key in self._img_cache:
+            self._phs[path] = self._img_cache[cache_key]   # GC 방지: canvas가 Tk 레벨만 참조하므로 Python 레퍼런스 명시 보관
             iid=self.cv.create_image(cx,cy,image=self._img_cache[cache_key],
                                      anchor='center',tags=(th_tag,card_tag))
         else:

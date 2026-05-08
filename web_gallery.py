@@ -293,8 +293,15 @@ a{color:inherit;text-decoration:none}
   box-shadow:0 6px 24px rgba(0,0,0,.6)}
 .vid-card .vc-thumb{position:relative;aspect-ratio:16/9;background:#000;overflow:hidden}
 .vid-card .vc-thumb img{width:100%;height:100%;object-fit:cover;
-  transition:transform .3s}
+  transition:transform .3s,opacity .25s}
 .vid-card:hover .vc-thumb img{transform:scale(1.05)}
+.vc-preview{position:absolute;inset:0;width:100%;height:100%;
+  object-fit:cover;opacity:0;transition:opacity .25s;pointer-events:none}
+.vc-preview.ready{opacity:1}
+.vc-preview-badge{position:absolute;top:6px;left:6px;
+  background:rgba(124,111,247,.85);color:#fff;font-size:9px;font-weight:700;
+  padding:2px 5px;border-radius:3px;opacity:0;transition:opacity .2s;pointer-events:none}
+.vid-card:hover .vc-preview-badge{opacity:1}
 .vid-card .vc-dur{position:absolute;bottom:6px;right:6px;
   background:rgba(0,0,0,.82);color:#fff;font-size:11px;font-weight:700;
   padding:2px 6px;border-radius:3px}
@@ -529,6 +536,45 @@ function openNative(vid_id){
     if(oF.checked)  addHidden('in_folder');
     // 아무것도 안 체크되면 title 기본 적용
     if(!oT.checked && !oTg.checked && !oF.checked) addHidden('in_title');
+  });
+})();
+
+// ── 프리뷰 클립 호버 재생 ──────────────────────────
+(function(){
+  var _timer = null;
+  document.addEventListener('mouseover', function(e){
+    var thumb = e.target.closest('.vc-thumb[data-preview]');
+    if(!thumb) return;
+    if(thumb.querySelector('.vc-preview')) return; // 이미 생성됨
+    _timer = setTimeout(function(){
+      var src = thumb.getAttribute('data-preview');
+      if(!src) return;
+      // 배지
+      var badge = document.createElement('span');
+      badge.className = 'vc-preview-badge';
+      badge.textContent = '▶ PREVIEW';
+      thumb.appendChild(badge);
+      // 비디오 오버레이
+      var vid = document.createElement('video');
+      vid.className = 'vc-preview';
+      vid.src = src;
+      vid.autoplay = true;
+      vid.muted = true;
+      vid.loop = true;
+      vid.playsInline = true;
+      vid.addEventListener('canplay', function(){ vid.classList.add('ready'); });
+      thumb.appendChild(vid);
+      vid.play().catch(function(){});
+    }, 200);
+  });
+  document.addEventListener('mouseout', function(e){
+    var thumb = e.target.closest('.vc-thumb[data-preview]');
+    if(!thumb) return;
+    if(_timer){ clearTimeout(_timer); _timer = null; }
+    var vid = thumb.querySelector('.vc-preview');
+    if(vid){ vid.pause(); vid.remove(); }
+    var badge = thumb.querySelector('.vc-preview-badge');
+    if(badge){ badge.remove(); }
   });
 })();
 </script>
@@ -1111,9 +1157,13 @@ def _render(template, **ctx):
         desc  = v.get('description', '') or ''
         desc_html = (f'<div class="vc-desc">{escape(desc)}</div>' if desc else '')
         title = escape(v.get("alias") or v["name"])
+        # 프리뷰 클립 존재 여부 확인
+        preview_dir = Path(_cfg['thumb_dir']).parent / '.previews'
+        has_preview = (preview_dir / (v['id'] + '.mp4')).exists()
+        preview_attr = f' data-preview="/preview/{v["id"]}"' if has_preview else ''
         return Markup(f'''
         <a href="/video/{v["id"]}" class="vid-card">
-          <div class="vc-thumb">{thumb}{dur}
+          <div class="vc-thumb"{preview_attr}>{thumb}{dur}
             <div class="vc-play"><div class="vc-play-ico">▶</div></div>
           </div>
           <div class="vc-info">
@@ -1302,6 +1352,15 @@ def serve_thumb(h):
     p = Path(_cfg['thumb_dir']) / (h + '.jpg')
     if p.exists():
         return send_file(str(p), mimetype='image/jpeg', max_age=86400)
+    abort(404)
+
+@app.route('/preview/<h>')
+def serve_preview(h):
+    preview_dir = Path(_cfg['thumb_dir']).parent / '.previews'
+    p = preview_dir / (h + '.mp4')
+    if p.exists():
+        return send_file(str(p), mimetype='video/mp4',
+                         max_age=86400, conditional=True)
     abort(404)
 
 @app.route('/stream/<vid_id>')

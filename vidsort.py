@@ -76,6 +76,7 @@ except (ImportError, OSError, FileNotFoundError) as _vlc_load_err:
 # ─────────────────────────────────────────────────────
 _BASE     = Path(sys.executable).parent if getattr(sys,'frozen',False) else Path(__file__).parent
 THUMB_DIR    = _BASE / ".thumbs"
+PREVIEW_DIR  = _BASE / ".previews"
 THUMB_DB_PATH = _BASE / "thumbs.db"
 DB_PATH   = _BASE / "vidsort.db"
 CFG_PATH  = _BASE / "vidsort_cfg.json"
@@ -147,6 +148,45 @@ def _find(name):
 FFMPEG  = _find('ffmpeg')
 FFPROBE = _find('ffprobe')
 _NW = subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
+
+def preview_file(path: str) -> Path:
+    """영상 경로 → 프리뷰 클립 파일 경로 (.previews/<md5>.mp4)"""
+    PREVIEW_DIR.mkdir(exist_ok=True)
+    return PREVIEW_DIR / (hashlib.md5(path.encode()).hexdigest() + '.mp4')
+
+
+def make_preview(src: str, dst: str) -> bool:
+    """영상 중간 랜덤 구간 3~5초 저해상도 MP4 클립 생성.
+    반환: 성공 여부"""
+    if not FFMPEG or not FFPROBE:
+        return False
+    import random as _rng
+    try:
+        r = subprocess.run(
+            [FFPROBE, '-v', 'error',
+             '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', src],
+            capture_output=True, text=True, timeout=15, creationflags=_NW)
+        dur = float(r.stdout.strip() or 0)
+        if dur < 8:
+            return False
+        clip_dur = _rng.uniform(3.0, 5.0)
+        # 20%~70% 구간 내에서 랜덤 시작점
+        start_min = dur * 0.20
+        start_max = max(start_min + 1, dur * 0.70 - clip_dur)
+        start = _rng.uniform(start_min, start_max)
+        r2 = subprocess.run(
+            [FFMPEG, '-ss', f'{start:.2f}', '-i', src,
+             '-t', f'{clip_dur:.2f}',
+             '-vf', 'scale=320:-2',
+             '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+             '-an', '-movflags', '+faststart',
+             '-y', dst],
+            capture_output=True, timeout=60, creationflags=_NW)
+        return r2.returncode == 0 and Path(dst).exists()
+    except Exception:
+        return False
+
 
 def make_thumb(src, dst):
     if not FFMPEG or not FFPROBE: return False,0,0,0.0
@@ -4262,6 +4302,9 @@ class VidSort(tk.Tk):
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))
         m.add_command(label='📋  복사',             command=lambda:self._clipop('copy',paths))
         m.add_separator()
+        m.add_command(label='🎬  프리뷰 클립 생성',
+                      command=lambda: self._make_previews(paths))
+        m.add_separator()
         m.add_command(label='🔄  태그 초기화',
                       command=lambda: self._reset_tags_dlg(paths))
         m.add_command(label='🚫  웹 자동태그 제외',
@@ -4989,6 +5032,73 @@ class VidSort(tk.Tk):
         self.lbl_clip.config(
             text=f"{icon} {len(paths)}개 {'잘라내기' if mode=='cut' else '복사'} 대기")
 
+    def _batch_previews(self):
+        """DB 전체 영상을 대상으로 프리뷰 클립 일괄 생성."""
+        rows = self.db.get_all_for_thumbs()
+        paths = [r['path'] for r in rows if Path(r['path']).exists()]
+        if not paths:
+            messagebox.showinfo('알림', '생성할 영상이 없습니다.')
+            return
+        self._make_previews(paths)
+
+    def _make_previews(self, paths: list):
+        """선택 영상들의 프리뷰 클립을 백그라운드에서 생성."""
+        if not FFMPEG:
+            messagebox.showerror('오류', 'ffmpeg를 찾을 수 없습니다.\n(PATH 또는 실행 파일 옆에 ffmpeg.exe 필요)')
+            return
+
+        todo = paths[:]
+        total = len(todo)
+
+        # 진행 다이얼로그
+        dlg = tk.Toplevel(self)
+        dlg.title('🎬 프리뷰 클립 생성')
+        dlg.configure(bg='#0d0d14')
+        dlg.geometry('360x130')
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        lbl = tk.Label(dlg, text=f'0 / {total}', bg='#0d0d14', fg='#dcdcf0',
+                       font=('Consolas', 11))
+        lbl.pack(pady=(20, 6))
+        bar = ttk.Progressbar(dlg, length=300, maximum=total, mode='determinate')
+        bar.pack()
+        sub = tk.Label(dlg, text='', bg='#0d0d14', fg='#555', font=('Consolas', 8))
+        sub.pack(pady=4)
+
+        _cancelled = [False]
+        ttk.Button(dlg, text='취소', command=lambda: _cancelled.__setitem__(0, True)
+                   ).pack(pady=4)
+
+        def worker():
+            ok = skip = err = 0
+            for i, path in enumerate(todo):
+                if _cancelled[0]:
+                    break
+                name = Path(path).name[:50]
+                dlg.after(0, lambda n=name, idx=i: (
+                    lbl.config(text=f'{idx} / {total}'),
+                    sub.config(text=n),
+                    bar.config(value=idx),
+                ))
+                pf = preview_file(path)
+                if pf.exists():
+                    skip += 1
+                    continue
+                if make_preview(path, str(pf)):
+                    ok += 1
+                else:
+                    err += 1
+
+            def _done():
+                dlg.destroy()
+                messagebox.showinfo('완료',
+                    f'프리뷰 클립 생성 완료\n'
+                    f'생성: {ok}개  건너뜀: {skip}개  실패: {err}개')
+            dlg.after(0, _done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _open_downloader(self):
         """downloader/downloader.py(개발) 또는 downloader/downloader.exe(EXE빌드) 실행."""
         dl_dir = _BASE / 'downloader'
@@ -5260,6 +5370,11 @@ class VidSort(tk.Tk):
                        style='Acc.TButton',
                        command=lambda: (win.destroy(), self._start_thumbs())
                        ).pack(pady=(6, 2))
+
+        # 프리뷰 클립 일괄 생성
+        ttk.Button(win, text='🎬 전체 프리뷰 클립 일괄 생성',
+                   command=lambda: (win.destroy(), self._batch_previews())
+                   ).pack(pady=(2, 0))
 
         bf = tk.Frame(win, bg='#0d0d14'); bf.pack(pady=4)
         ttk.Button(bf, text='🗑 선택 폴더 썸네일 초기화',

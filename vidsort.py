@@ -1530,15 +1530,19 @@ class VidSort(tk.Tk):
         ttk.Button(tb, text='📥 다운로더', command=self._open_downloader).pack(side='right', padx=4)
         ttk.Button(tb, text='🌐 갤러리', command=self._gallery_view).pack(side='right', padx=4)
 
-        # ── 메인 영역 ────────────────────────────────────────
-        main = tk.Frame(self, bg='#0d0d14'); main.pack(fill='both', expand=True)
+        # ── 메인 영역 (PanedWindow로 사이드바 크기 조절 가능) ────
+        main = tk.PanedWindow(self, orient='horizontal', bg='#0d0d14',
+                              sashwidth=4, sashrelief='flat', sashpad=0)
+        main.pack(fill='both', expand=True)
 
-        self.sidebar = tk.Frame(main, bg='#0a0a12', width=265)
-        self.sidebar.pack(side='left', fill='y'); self.sidebar.pack_propagate(False)
+        self.sidebar = tk.Frame(main, bg='#0a0a12')
+        main.add(self.sidebar, minsize=180, width=265)
+        main.paneconfigure(self.sidebar, stretch='never')
         self._build_sidebar()
 
         self._right = tk.Frame(main, bg='#0d0d14')
-        self._right.pack(side='left', fill='both', expand=True)
+        main.add(self._right, minsize=300)
+        main.paneconfigure(self._right, stretch='always')
         self.grid_widget = CanvasGrid(self._right,
                                       on_open=self._on_grid_open,
                                       on_ctx=self._ctx,
@@ -1676,7 +1680,9 @@ class VidSort(tk.Tk):
 
         # ── 🎯 AI 영상 추천 ───────────────────────
         ttk.Button(SB, text='🎯  AI 영상 추천', style='Acc.TButton',
-                   command=self._ai_recommend_dlg).pack(fill='x', padx=6, pady=(6, 4))
+                   command=self._ai_recommend_dlg).pack(fill='x', padx=6, pady=(6, 2))
+        ttk.Button(SB, text='🌍  AI 외부 검색', style='Acc.TButton',
+                   command=self._ai_external_search_dlg).pack(fill='x', padx=6, pady=(2, 4))
 
         _sep()
 
@@ -3453,6 +3459,214 @@ class VidSort(tk.Tk):
         load_btn.configure(command=_load_results)
         entry.focus_set()
 
+    def _ai_external_search_dlg(self):
+        """자연어로 외부 사이트(JavDB/FC2DB)에서 영상을 찾아 AI가 소개."""
+        llm = self._get_llm_client()
+        if not llm:
+            return
+
+        import jav_scraper as _js
+
+        win = tk.Toplevel(self)
+        win.title('🌍 AI 외부 검색')
+        win.geometry('780x620')
+        win.configure(bg='#0d0d14')
+        win.resizable(True, True)
+        win.minsize(600, 480)
+
+        # ── 입력 영역 ────────────────────────────────────
+        top_f = tk.Frame(win, bg='#0d0d14')
+        top_f.pack(fill='x', padx=16, pady=(14, 6))
+        tk.Label(top_f, text='외부 DB(JavDB/FC2DB)에서 어떤 영상을 찾으세요?',
+                 bg='#0d0d14', fg='#dcdcf0', font=('Consolas', 11, 'bold')
+                 ).pack(anchor='w', pady=(0, 6))
+
+        inp_f = tk.Frame(top_f, bg='#1a1a28', padx=8, pady=6)
+        inp_f.pack(fill='x')
+        query_var = tk.StringVar()
+        entry = ttk.Entry(inp_f, textvariable=query_var,
+                          font=('Consolas', 11), width=46)
+        entry.pack(side='left', fill='x', expand=True, ipady=4)
+        search_btn = ttk.Button(inp_f, text='🔍 검색', style='Acc.TButton')
+        search_btn.pack(side='left', padx=(8, 0))
+
+        status_lbl = tk.Label(win, text='', bg='#0d0d14', fg='#7c6ff7',
+                              font=('Consolas', 9))
+        status_lbl.pack(anchor='w', padx=16, pady=(0, 4))
+
+        # ── 메인 PanedWindow (결과 카드 + 점원 설명) ──────
+        paned = tk.PanedWindow(win, orient='vertical', bg='#0d0d14',
+                               sashwidth=4, sashrelief='flat')
+        paned.pack(fill='both', expand=True, padx=12, pady=(0, 6))
+
+        # 위: 결과 카드 리스트 (Treeview)
+        res_f = tk.Frame(paned, bg='#111120')
+        paned.add(res_f, minsize=160)
+        cols = ('code', 'title', 'actresses', 'genres', 'date', 'source')
+        tree = ttk.Treeview(res_f, columns=cols, show='headings',
+                            selectmode='browse', height=8)
+        for col, hdr, w in [('code','코드',90), ('title','제목',300),
+                             ('actresses','배우',120), ('genres','장르',120),
+                             ('date','날짜',80), ('source','출처',60)]:
+            tree.heading(col, text=hdr)
+            tree.column(col, width=w, stretch=(col == 'title'))
+        tree_vsb = ttk.Scrollbar(res_f, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=tree_vsb.set)
+        tree_vsb.pack(side='right', fill='y')
+        tree.pack(fill='both', expand=True)
+
+        # 아래: AI 점원 설명
+        msg_f = tk.Frame(paned, bg='#0d0d14')
+        paned.add(msg_f, minsize=120)
+        tk.Label(msg_f, text='🧑‍💼 점원의 소개', bg='#0d0d14', fg='#555',
+                 font=('Consolas', 8, 'bold')).pack(anchor='w', padx=4)
+        txt_f = tk.Frame(msg_f, bg='#111120')
+        txt_f.pack(fill='both', expand=True, pady=(2, 0))
+        msg_txt = tk.Text(txt_f, bg='#111120', fg='#dcdcf0',
+                          font=('Consolas', 9), wrap='word',
+                          borderwidth=0, highlightthickness=0,
+                          state='disabled', relief='flat')
+        msg_vsb = ttk.Scrollbar(txt_f, orient='vertical', command=msg_txt.yview)
+        msg_txt.configure(yscrollcommand=msg_vsb.set)
+        msg_vsb.pack(side='right', fill='y')
+        msg_txt.pack(fill='both', expand=True, padx=8, pady=6)
+
+        # ── 하단 버튼 ────────────────────────────────────
+        bot_f = tk.Frame(win, bg='#0d0d14')
+        bot_f.pack(fill='x', padx=16, pady=(0, 10))
+        open_url_btn = ttk.Button(bot_f, text='🔗 선택항목 브라우저로 열기',
+                                  state='disabled')
+        open_url_btn.pack(side='left')
+        ttk.Button(bot_f, text='닫기', command=win.destroy).pack(side='right')
+
+        _state = {'results': [], 'running': False}
+
+        def _set_msg(text: str):
+            msg_txt.configure(state='normal')
+            msg_txt.delete('1.0', 'end')
+            msg_txt.insert('end', text)
+            msg_txt.configure(state='disabled')
+            msg_txt.see('end')
+
+        def _append_msg(chunk: str):
+            msg_txt.configure(state='normal')
+            msg_txt.insert('end', chunk)
+            msg_txt.configure(state='disabled')
+            msg_txt.see('end')
+
+        def _open_selected():
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            results = _state['results']
+            if idx < len(results):
+                url = results[idx].get('url', '')
+                if url:
+                    import webbrowser
+                    webbrowser.open(url)
+
+        open_url_btn.configure(command=_open_selected)
+
+        def _on_select(_event=None):
+            open_url_btn.configure(
+                state='normal' if tree.selection() else 'disabled')
+
+        tree.bind('<<TreeviewSelect>>', _on_select)
+        tree.bind('<Double-1>', lambda _: _open_selected())
+
+        def _run(query: str):
+            if not query.strip() or _state['running']:
+                return
+            _state['running'] = True
+            search_btn.configure(state='disabled')
+            open_url_btn.configure(state='disabled')
+            for row in tree.get_children():
+                tree.delete(row)
+            _set_msg('')
+            _state['results'] = []
+
+            def worker():
+                # ── Call 1: 검색 키워드 추출 ──────────
+                win.after(0, lambda: status_lbl.config(
+                    text='[1/2] 🔍 AI 검색 키워드 추출 중...'))
+                try:
+                    parsed   = llm.external_search_query(query)
+                    searches = parsed.get('searches', [query])[:10]
+                    intent   = parsed.get('intent', '')
+                except Exception as e:
+                    win.after(0, lambda err=e: status_lbl.config(text=f'오류: {err}'))
+                    _state['running'] = False
+                    win.after(0, lambda: search_btn.configure(state='normal'))
+                    return
+
+                kw_str = ', '.join(f'"{k}"' for k in searches[:5])
+                win.after(0, lambda s=kw_str: status_lbl.config(
+                    text=f'[2/2] 🌐 키워드 검색 중: {s}'))
+
+                # ── 외부 사이트 검색 ──────────────────
+                all_results = []
+                seen_codes  = set()
+                for kw in searches:
+                    for item in _js.search_external(kw, max_per_site=5):
+                        code = item.get('code', '') or item.get('url', '')
+                        if code and code not in seen_codes:
+                            seen_codes.add(code)
+                            all_results.append(item)
+                        if len(all_results) >= 30:
+                            break
+                    if len(all_results) >= 30:
+                        break
+
+                _state['results'] = all_results
+
+                def _fill_tree():
+                    for row in tree.get_children():
+                        tree.delete(row)
+                    for item in all_results:
+                        tree.insert('', 'end', values=(
+                            item.get('code', ''),
+                            item.get('title', ''),
+                            ', '.join((item.get('actresses') or [])[:2]),
+                            ', '.join((item.get('genres') or [])[:3]),
+                            item.get('date', ''),
+                            item.get('source', ''),
+                        ))
+                win.after(0, _fill_tree)
+
+                if not all_results:
+                    win.after(0, lambda: (
+                        status_lbl.config(text='검색 결과가 없습니다.'),
+                        _set_msg('죄송합니다 손님, 해당 키워드로는 결과를 찾지 못했어요. 😓\n다른 표현으로 시도해보시겠어요?'),
+                        search_btn.configure(state='normal'),
+                    ))
+                    _state['running'] = False
+                    return
+
+                n = len(all_results)
+                win.after(0, lambda n=n, s=kw_str: status_lbl.config(
+                    text=f'[점원 설명] {n}개 발견 ({s})'))
+
+                # ── Call 2: 점원 설명 (스트리밍) ──────
+                win.after(0, lambda: _set_msg(''))
+
+                def on_chunk(piece):
+                    win.after(0, lambda p=piece: _append_msg(p))
+
+                llm.external_search_explain(query, all_results, on_chunk=on_chunk)
+
+                win.after(0, lambda n=n: (
+                    status_lbl.config(text=f'✅ 완료 — {n}개 결과'),
+                    search_btn.configure(state='normal'),
+                ))
+                _state['running'] = False
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        search_btn.configure(command=lambda: _run(query_var.get()))
+        entry.bind('<Return>', lambda _: _run(query_var.get()))
+        entry.focus_set()
+
     def _show_daily_pick(self):
         """태그/별칭 없는 파일 중 랜덤 100개 — 오늘의 추천"""
         self._set_status('오늘의 추천 선정 중...')
@@ -4722,7 +4936,7 @@ class VidSort(tk.Tk):
 
     def _open_downloader(self):
         """downloader/downloader.py 를 별도 프로세스로 실행."""
-        script = Path(__file__).parent / 'downloader' / 'downloader.py'
+        script = _BASE / 'downloader' / 'downloader.py'
         if not script.exists():
             messagebox.showerror('오류', f'다운로더를 찾을 수 없습니다.\n{script}')
             return

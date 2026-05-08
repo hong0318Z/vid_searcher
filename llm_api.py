@@ -351,6 +351,88 @@ class LLMClient:
             pass
         return result
 
+    def external_search_query(self, user_query: str,
+                              on_chunk: callable = None) -> dict:
+        """[1차 호출] 자연어 쿼리 → 외부 사이트 검색용 키워드 조합 추출.
+        반환: {"searches": ["keyword1", "keyword2", ...], "intent": "..."}
+        - searches: 실제로 사이트 검색창에 입력할 키워드 (10개 이내)
+        - 각 키워드는 개별 검색 요청에 사용됨"""
+        system = (
+            "당신은 성인영상 DB 사이트(JavDB, FC2DB) 검색 전문가입니다.\n"
+            "사용자의 자연어 요청을 분석하여 각 사이트 검색창에 입력할 최적의 검색 키워드를 추출하세요.\n"
+            "키워드는 일본어/영어 혼용 가능. 배우명, 장르명, 스튜디오명 등 구체적일수록 좋습니다.\n"
+            "반드시 JSON만 출력하세요. 그 외 텍스트는 절대 출력하지 마세요."
+        )
+        user = (
+            f'검색 요청: "{user_query}"\n\n'
+            '응답 형식 (JSON만):\n'
+            '{\n'
+            '  "searches": ["키워드1", "키워드2", "키워드3"],\n'
+            '  "intent": "검색 의도 한 줄 요약"\n'
+            '}\n\n'
+            '키워드는 JavDB/FC2DB 검색창에 직접 입력할 단어/구문으로, 최대 10개 제안하세요.'
+        )
+        try:
+            content, _, _ = self._chat_tracked(
+                [{"role": "system", "content": system},
+                 {"role": "user",   "content": user}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+                on_chunk=on_chunk,
+            )
+            if content.startswith('```'):
+                content = content.split('```')[1].lstrip('json').strip()
+            return json.loads(content.strip())
+        except Exception:
+            return {"searches": [user_query.strip()], "intent": user_query}
+
+    def external_search_explain(self, user_query: str, results: list,
+                                on_chunk: callable = None) -> str:
+        """[2차 호출] 외부 사이트 검색 결과를 가게 점원 스타일로 설명.
+        results: [{"title": ..., "code": ..., "actresses": [...], "genres": [...],
+                   "date": ..., "cover_url": ..., "source": ..., "url": ...}, ...]"""
+        lines = []
+        for i, r in enumerate(results[:20], 1):
+            title = r.get('title', '')
+            code  = r.get('code', '')
+            acts  = ', '.join((r.get('actresses') or [])[:3])
+            genres = ', '.join((r.get('genres') or [])[:4])
+            date  = r.get('date', '')
+            src   = r.get('source', '')
+            line  = f"{i}. [{code}] 『{title}』"
+            if acts:
+                line += f"  배우: {acts}"
+            if genres:
+                line += f"  장르: {genres}"
+            if date:
+                line += f"  ({date})"
+            if src:
+                line += f"  [{src}]"
+            lines.append(line)
+        vid_str = '\n'.join(lines) if lines else '(검색 결과 없음)'
+
+        system = (
+            "당신은 동네 작은 영상 가게의 친절하고 유쾌한 점원입니다.\n"
+            "손님이 원하는 영상을 외부 데이터베이스에서 찾아드렸어요.\n"
+            "자연스럽고 친근한 말투로, 마치 실제 가게에서 이야기하듯 설명해주세요.\n"
+            "찾은 영상 중 특히 잘 맞을 것 같은 것을 콕 집어서 왜 추천하는지 이유도 말해주세요.\n"
+            "너무 길지 않게, 자연스럽게 대화하듯 써주세요."
+        )
+        user = (
+            f'손님이 찾으시는 영상: "{user_query}"\n\n'
+            f'외부 DB에서 찾아드린 영상 ({len(results[:20])}개):\n{vid_str}\n\n'
+            '가게 점원으로서 이 영상들을 소개해주세요.'
+        )
+        try:
+            content, _, _ = self._chat_tracked(
+                [{"role": "system", "content": system},
+                 {"role": "user",   "content": user}],
+                max_tokens=MAX_OUTPUT_TOKENS,
+                on_chunk=on_chunk,
+            )
+            return content
+        except Exception as e:
+            return f"(설명 생성 실패: {e})"
+
     def classify_tags(self, tag_list: list) -> dict:
         """태그 목록 → {"태그명": "행위"|"인물"|"레이블"|"기타"} 분류.
         판단 불가한 경우 "기타"로 반환."""

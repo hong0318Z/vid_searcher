@@ -71,6 +71,16 @@ def extract_code(filename: str) -> str | None:
         FC2-PPV-1234567, FC2PPV1234567 → FC2-PPV-1234567"""
     stem = Path(filename).stem.upper()
 
+    # 날짜+시간 패턴이 포함된 파일명 스킵 (e.g. "2019-08-03 16_01_55" 형태의 녹화 파일)
+    if re.search(r'\d{4}[-_]\d{2}[-_]\d{2}', stem):
+        return None
+    # 파이프 구분자가 있으면 스킵 (e.g. "TITLE | DATE_TIME_CODE")
+    if ' | ' in stem or '｜' in stem:
+        return None
+    # HH_MM_SS 시간 패턴 스킵
+    if re.search(r'\b\d{2}_\d{2}_\d{2}\b', stem):
+        return None
+
     # FC2-PPV 우선 처리 (숫자 6-8자리)
     fc2 = re.search(r'FC2[-_]?PPV[-_]?(\d{4,8})', stem)
     if fc2:
@@ -989,6 +999,93 @@ def offline_db_stats() -> str:
     if _OFFLINE_DB:
         return f'오프라인 DB: {len(_OFFLINE_DB):,}개 코드'
     return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
+
+def search_javdb(keyword: str, max_results: int = 10) -> list:
+    """JavDB에서 키워드로 영상 검색. 반환: [meta_dict, ...] (최대 max_results개)"""
+    if not _HAS_BS4:
+        return []
+    try:
+        import urllib.parse
+        url = f'{JAVDB_BASE}/search?q={urllib.parse.quote(keyword)}&f=all'
+        print(f'[JavDB 키워드검색] GET {url}', flush=True)
+        r = _get(url)
+        if r.status != 200:
+            print(f'[JavDB 키워드검색] HTTP {r.status}', flush=True)
+            return []
+        soup = _soup(r.text)
+        cards = soup.select('.movie-list .item, .search-video-section .item')
+        print(f'[JavDB 키워드검색] 카드 {len(cards)}개', flush=True)
+        results = []
+        for card in cards[:max_results]:
+            a = card.select_one('a')
+            if not a:
+                continue
+            href = a.get('href', '')
+            uid_el = card.select_one('.uid, .video-title strong')
+            code = uid_el.get_text(strip=True) if uid_el else ''
+            title_el = card.select_one('.video-title, .title')
+            title = title_el.get_text(strip=True) if title_el else ''
+            img_el = card.select_one('img')
+            cover = img_el.get('src') or img_el.get('data-src', '') if img_el else ''
+            url_detail = (JAVDB_BASE + href) if href.startswith('/') else href
+            results.append({
+                'code': code, 'title': title, 'cover_url': cover,
+                'url': url_detail, 'source': 'javdb',
+                'actresses': [], 'genres': [],
+            })
+        return results
+    except Exception as e:
+        print(f'[JavDB 키워드검색] 예외: {e}', flush=True)
+        return []
+
+
+def search_fc2db(keyword: str, max_results: int = 10) -> list:
+    """FC2DB에서 키워드로 영상 검색. 반환: [meta_dict, ...] (최대 max_results개)"""
+    if not _HAS_BS4:
+        return []
+    try:
+        import urllib.parse
+        url = f'{FC2DB_BASE}/?s={urllib.parse.quote(keyword)}'
+        print(f'[FC2DB 키워드검색] GET {url}', flush=True)
+        r = _get(url)
+        if r.status != 200:
+            print(f'[FC2DB 키워드검색] HTTP {r.status}', flush=True)
+            return []
+        soup = _soup(r.text)
+        # FC2DB 검색 결과 카드
+        cards = soup.select('article.post, .work-list .item, .entry, .post')
+        print(f'[FC2DB 키워드검색] 카드 {len(cards)}개', flush=True)
+        results = []
+        for card in cards[:max_results]:
+            a = card.select_one('a[href*="/work/"]')
+            if not a:
+                continue
+            href = a.get('href', '')
+            m = re.search(r'/work/(\d+)', href)
+            code = f'FC2-PPV-{m.group(1)}' if m else ''
+            title_el = card.select_one('h2, h3, .entry-title, .title')
+            title = title_el.get_text(strip=True) if title_el else ''
+            img_el = card.select_one('img')
+            cover = img_el.get('src') or img_el.get('data-src', '') if img_el else ''
+            tags = [t.get_text(strip=True) for t in card.select('a[href*="work-tags"]')]
+            results.append({
+                'code': code, 'title': title, 'cover_url': cover,
+                'url': href if href.startswith('http') else FC2DB_BASE + href,
+                'source': 'fc2db', 'actresses': [], 'genres': tags,
+            })
+        return results
+    except Exception as e:
+        print(f'[FC2DB 키워드검색] 예외: {e}', flush=True)
+        return []
+
+
+def search_external(keyword: str, max_per_site: int = 5) -> list:
+    """JavDB + FC2DB 에서 키워드 검색 후 결과 합산."""
+    results = []
+    results.extend(search_javdb(keyword, max_per_site))
+    results.extend(search_fc2db(keyword, max_per_site))
+    return results
+
 
 def fetch_javdatabase_info(slug: str) -> tuple:
     """javdatabase.com/idols/{slug}/ 에서 JAV 배우 프로필 스크래핑.

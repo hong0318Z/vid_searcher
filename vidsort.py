@@ -3463,10 +3463,10 @@ class VidSort(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title('🌍 AI 외부 검색')
-        win.geometry('780x620')
+        win.geometry('900x700')
         win.configure(bg='#0d0d14')
         win.resizable(True, True)
-        win.minsize(600, 480)
+        win.minsize(640, 500)
 
         # ── 입력 영역 ────────────────────────────────────
         top_f = tk.Frame(win, bg='#0d0d14')
@@ -3486,22 +3486,22 @@ class VidSort(tk.Tk):
 
         status_lbl = tk.Label(win, text='', bg='#0d0d14', fg='#7c6ff7',
                               font=('Consolas', 9))
-        status_lbl.pack(anchor='w', padx=16, pady=(0, 4))
+        status_lbl.pack(anchor='w', padx=16, pady=(0, 2))
 
-        # ── 메인 PanedWindow (결과 카드 + 점원 설명) ──────
+        # ── 메인 PanedWindow ─────────────────────────────
         paned = tk.PanedWindow(win, orient='vertical', bg='#0d0d14',
-                               sashwidth=4, sashrelief='flat')
-        paned.pack(fill='both', expand=True, padx=12, pady=(0, 6))
+                               sashwidth=5, sashrelief='flat')
+        paned.pack(fill='both', expand=True, padx=12, pady=(0, 4))
 
-        # 위: 결과 카드 리스트 (Treeview)
+        # 1) 결과 Treeview
         res_f = tk.Frame(paned, bg='#111120')
-        paned.add(res_f, minsize=160)
+        paned.add(res_f, minsize=120)
         cols = ('code', 'title', 'actresses', 'genres', 'date', 'source')
         tree = ttk.Treeview(res_f, columns=cols, show='headings',
-                            selectmode='browse', height=8)
-        for col, hdr, w in [('code','코드',90), ('title','제목',300),
-                             ('actresses','배우',120), ('genres','장르',120),
-                             ('date','날짜',80), ('source','출처',60)]:
+                            selectmode='browse', height=7)
+        for col, hdr, w in [('code','코드',90), ('title','제목',280),
+                             ('actresses','배우',110), ('genres','장르',110),
+                             ('date','날짜',78), ('source','출처',58)]:
             tree.heading(col, text=hdr)
             tree.column(col, width=w, stretch=(col == 'title'))
         tree_vsb = ttk.Scrollbar(res_f, orient='vertical', command=tree.yview)
@@ -3509,9 +3509,9 @@ class VidSort(tk.Tk):
         tree_vsb.pack(side='right', fill='y')
         tree.pack(fill='both', expand=True)
 
-        # 아래: AI 점원 설명
+        # 2) AI 점원 설명
         msg_f = tk.Frame(paned, bg='#0d0d14')
-        paned.add(msg_f, minsize=120)
+        paned.add(msg_f, minsize=80)
         tk.Label(msg_f, text='🧑‍💼 점원의 소개', bg='#0d0d14', fg='#555',
                  font=('Consolas', 8, 'bold')).pack(anchor='w', padx=4)
         txt_f = tk.Frame(msg_f, bg='#111120')
@@ -3525,15 +3525,55 @@ class VidSort(tk.Tk):
         msg_vsb.pack(side='right', fill='y')
         msg_txt.pack(fill='both', expand=True, padx=8, pady=6)
 
+        # 3) 디버그 로그 (토글 가능)
+        log_visible = tk.BooleanVar(value=False)
+        log_f = tk.Frame(paned, bg='#060610')
+
+        def _toggle_log():
+            if log_visible.get():
+                paned.forget(log_f)
+                log_visible.set(False)
+                log_btn.config(text='📋 로그 보기')
+            else:
+                paned.add(log_f, minsize=80)
+                log_visible.set(True)
+                log_btn.config(text='📋 로그 숨기기')
+
+        tk.Label(log_f, text='🔍 디버그 로그', bg='#060610', fg='#444',
+                 font=('Consolas', 8, 'bold')).pack(anchor='w', padx=6, pady=(4, 0))
+        log_inner = tk.Frame(log_f, bg='#060610')
+        log_inner.pack(fill='both', expand=True)
+        log_txt = tk.Text(log_inner, bg='#060610', fg='#4caf50',
+                          font=('Consolas', 8), wrap='none',
+                          borderwidth=0, highlightthickness=0,
+                          state='disabled', relief='flat')
+        log_xsb = ttk.Scrollbar(log_inner, orient='horizontal', command=log_txt.xview)
+        log_vsb = ttk.Scrollbar(log_inner, orient='vertical', command=log_txt.yview)
+        log_txt.configure(xscrollcommand=log_xsb.set, yscrollcommand=log_vsb.set)
+        log_vsb.pack(side='right', fill='y')
+        log_xsb.pack(side='bottom', fill='x')
+        log_txt.pack(fill='both', expand=True, padx=4, pady=2)
+
         # ── 하단 버튼 ────────────────────────────────────
         bot_f = tk.Frame(win, bg='#0d0d14')
         bot_f.pack(fill='x', padx=16, pady=(0, 10))
         open_url_btn = ttk.Button(bot_f, text='🔗 선택항목 브라우저로 열기',
                                   state='disabled')
         open_url_btn.pack(side='left')
+        log_btn = ttk.Button(bot_f, text='📋 로그 보기', command=_toggle_log)
+        log_btn.pack(side='left', padx=(8, 0))
         ttk.Button(bot_f, text='닫기', command=win.destroy).pack(side='right')
 
         _state = {'results': [], 'running': False}
+
+        def _log(msg: str):
+            """워커 스레드에서 호출 가능 — after()로 UI 스레드에 전달."""
+            def _append():
+                log_txt.configure(state='normal')
+                log_txt.insert('end', msg + '\n')
+                log_txt.configure(state='disabled')
+                log_txt.see('end')
+            win.after(0, _append)
 
         def _set_msg(text: str):
             msg_txt.configure(state='normal')
@@ -3579,16 +3619,24 @@ class VidSort(tk.Tk):
                 tree.delete(row)
             _set_msg('')
             _state['results'] = []
+            # 로그 초기화
+            log_txt.configure(state='normal')
+            log_txt.delete('1.0', 'end')
+            log_txt.configure(state='disabled')
 
             def worker():
                 # ── Call 1: 검색 키워드 추출 ──────────
                 win.after(0, lambda: status_lbl.config(
                     text='[1/2] 🔍 AI 검색 키워드 추출 중...'))
+                _log(f'[AI] 쿼리 분석 시작: "{query}"')
                 try:
                     parsed   = llm.external_search_query(query)
                     searches = parsed.get('searches', [query])[:10]
                     intent   = parsed.get('intent', '')
+                    _log(f'[AI] 의도: {intent}')
+                    _log(f'[AI] 검색 키워드 {len(searches)}개: {searches}')
                 except Exception as e:
+                    _log(f'[AI] 오류: {e}')
                     win.after(0, lambda err=e: status_lbl.config(text=f'오류: {err}'))
                     _state['running'] = False
                     win.after(0, lambda: search_btn.configure(state='normal'))
@@ -3602,8 +3650,14 @@ class VidSort(tk.Tk):
                 all_results = []
                 seen_codes  = set()
                 for kw in searches:
-                    for item in _js.search_external(kw, max_per_site=5):
+                    _log(f'\n[검색] 키워드: "{kw}"')
+                    items = _js.search_external(kw, max_per_site=5, on_log=_log)
+                    _log(f'[검색] 소계: {len(items)}개')
+                    for item in items:
                         code = item.get('code', '') or item.get('url', '')
+                        title = item.get('title', '')
+                        src   = item.get('source', '')
+                        _log(f'  [{src}] {code} — {title[:60]}')
                         if code and code not in seen_codes:
                             seen_codes.add(code)
                             all_results.append(item)
@@ -3612,6 +3666,7 @@ class VidSort(tk.Tk):
                     if len(all_results) >= 30:
                         break
 
+                _log(f'\n[결과] 중복 제거 후 {len(all_results)}개')
                 _state['results'] = all_results
 
                 def _fill_tree():

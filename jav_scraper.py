@@ -1000,21 +1000,33 @@ def offline_db_stats() -> str:
         return f'오프라인 DB: {len(_OFFLINE_DB):,}개 코드'
     return '오프라인 DB: 없음 (jav_offline.json 배치 시 우선 사용)'
 
-def search_javdb(keyword: str, max_results: int = 10) -> list:
+def search_javdb(keyword: str, max_results: int = 10,
+                  on_log: callable = None) -> list:
     """JavDB에서 키워드로 영상 검색. 반환: [meta_dict, ...] (최대 max_results개)"""
+    def _log(msg):
+        print(msg, flush=True)
+        if on_log:
+            on_log(msg)
+
     if not _HAS_BS4:
+        _log('[JavDB] beautifulsoup4 미설치 — 건너뜀')
         return []
     try:
         import urllib.parse
         url = f'{JAVDB_BASE}/search?q={urllib.parse.quote(keyword)}&f=all'
-        print(f'[JavDB 키워드검색] GET {url}', flush=True)
+        _log(f'[JavDB] GET {url}')
         r = _get(url)
+        _log(f'[JavDB] HTTP {r.status}  (본문 {len(r.text):,}바이트)')
         if r.status != 200:
-            print(f'[JavDB 키워드검색] HTTP {r.status}', flush=True)
+            _log(f'[JavDB] 실패 — HTTP {r.status}')
             return []
         soup = _soup(r.text)
         cards = soup.select('.movie-list .item, .search-video-section .item')
-        print(f'[JavDB 키워드검색] 카드 {len(cards)}개', flush=True)
+        _log(f'[JavDB] 카드 {len(cards)}개 파싱됨')
+        if not cards:
+            # Cloudflare 차단 여부 확인용 힌트
+            cf = soup.select_one('title')
+            _log(f'[JavDB] 페이지 <title>: {cf.get_text(strip=True) if cf else "(없음)"}')
         results = []
         for card in cards[:max_results]:
             a = card.select_one('a')
@@ -1028,33 +1040,49 @@ def search_javdb(keyword: str, max_results: int = 10) -> list:
             img_el = card.select_one('img')
             cover = img_el.get('src') or img_el.get('data-src', '') if img_el else ''
             url_detail = (JAVDB_BASE + href) if href.startswith('/') else href
+            _log(f'  → {code} | {title[:50]}')
             results.append({
                 'code': code, 'title': title, 'cover_url': cover,
                 'url': url_detail, 'source': 'javdb',
                 'actresses': [], 'genres': [],
             })
+        _log(f'[JavDB] 최종 {len(results)}개 반환')
         return results
     except Exception as e:
-        print(f'[JavDB 키워드검색] 예외: {e}', flush=True)
+        import traceback
+        _log(f'[JavDB] 예외: {e}')
+        _log(traceback.format_exc())
         return []
 
 
-def search_fc2db(keyword: str, max_results: int = 10) -> list:
+def search_fc2db(keyword: str, max_results: int = 10,
+                  on_log: callable = None) -> list:
     """FC2DB에서 키워드로 영상 검색. 반환: [meta_dict, ...] (최대 max_results개)"""
+    def _log(msg):
+        print(msg, flush=True)
+        if on_log:
+            on_log(msg)
+
     if not _HAS_BS4:
+        _log('[FC2DB] beautifulsoup4 미설치 — 건너뜀')
         return []
     try:
         import urllib.parse
         url = f'{FC2DB_BASE}/?s={urllib.parse.quote(keyword)}'
-        print(f'[FC2DB 키워드검색] GET {url}', flush=True)
+        _log(f'[FC2DB] GET {url}')
         r = _get(url)
+        _log(f'[FC2DB] HTTP {r.status}  (본문 {len(r.text):,}바이트)')
         if r.status != 200:
-            print(f'[FC2DB 키워드검색] HTTP {r.status}', flush=True)
+            _log(f'[FC2DB] 실패 — HTTP {r.status}')
             return []
         soup = _soup(r.text)
-        # FC2DB 검색 결과 카드
         cards = soup.select('article.post, .work-list .item, .entry, .post')
-        print(f'[FC2DB 키워드검색] 카드 {len(cards)}개', flush=True)
+        _log(f'[FC2DB] 카드 {len(cards)}개 파싱됨 (선택자: article.post / .work-list .item / .entry / .post)')
+        if not cards:
+            cf = soup.select_one('title')
+            _log(f'[FC2DB] 페이지 <title>: {cf.get_text(strip=True) if cf else "(없음)"}')
+            # HTML 앞부분 200자 덤프
+            _log(f'[FC2DB] HTML 앞부분: {r.text[:300].replace(chr(10)," ")}')
         results = []
         for card in cards[:max_results]:
             a = card.select_one('a[href*="/work/"]')
@@ -1068,22 +1096,27 @@ def search_fc2db(keyword: str, max_results: int = 10) -> list:
             img_el = card.select_one('img')
             cover = img_el.get('src') or img_el.get('data-src', '') if img_el else ''
             tags = [t.get_text(strip=True) for t in card.select('a[href*="work-tags"]')]
+            _log(f'  → {code} | {title[:50]}')
             results.append({
                 'code': code, 'title': title, 'cover_url': cover,
                 'url': href if href.startswith('http') else FC2DB_BASE + href,
                 'source': 'fc2db', 'actresses': [], 'genres': tags,
             })
+        _log(f'[FC2DB] 최종 {len(results)}개 반환')
         return results
     except Exception as e:
-        print(f'[FC2DB 키워드검색] 예외: {e}', flush=True)
+        import traceback
+        _log(f'[FC2DB] 예외: {e}')
+        _log(traceback.format_exc())
         return []
 
 
-def search_external(keyword: str, max_per_site: int = 5) -> list:
+def search_external(keyword: str, max_per_site: int = 5,
+                    on_log: callable = None) -> list:
     """JavDB + FC2DB 에서 키워드 검색 후 결과 합산."""
     results = []
-    results.extend(search_javdb(keyword, max_per_site))
-    results.extend(search_fc2db(keyword, max_per_site))
+    results.extend(search_javdb(keyword, max_per_site, on_log=on_log))
+    results.extend(search_fc2db(keyword, max_per_site, on_log=on_log))
     return results
 
 

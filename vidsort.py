@@ -1575,7 +1575,7 @@ class VidSort(tk.Tk):
                 arrow_lbl.config(text='▶')
                 is_open.set(False)
             else:
-                body.pack(fill='x', padx=0)
+                body.pack(fill='x', padx=0, after=hdr)
                 arrow_lbl.config(text='▼')
                 is_open.set(True)
 
@@ -4925,13 +4925,21 @@ class VidSort(tk.Tk):
             text=f"{icon} {len(paths)}개 {'잘라내기' if mode=='cut' else '복사'} 대기")
 
     def _open_downloader(self):
-        """downloader/downloader.py 를 별도 프로세스로 실행."""
-        script = _BASE / 'downloader' / 'downloader.py'
-        if not script.exists():
-            messagebox.showerror('오류', f'다운로더를 찾을 수 없습니다.\n{script}')
-            return
-        subprocess.Popen([sys.executable, str(script)],
-                         cwd=str(script.parent))
+        """downloader/downloader.py(개발) 또는 downloader/downloader.exe(EXE빌드) 실행."""
+        dl_dir = _BASE / 'downloader'
+        if getattr(sys, 'frozen', False):
+            # EXE 빌드 모드: 옆에 있는 downloader.exe 실행
+            exe = dl_dir / 'downloader.exe'
+            if not exe.exists():
+                messagebox.showerror('오류', f'다운로더 EXE를 찾을 수 없습니다.\n{exe}')
+                return
+            subprocess.Popen([str(exe)], cwd=str(dl_dir))
+        else:
+            script = dl_dir / 'downloader.py'
+            if not script.exists():
+                messagebox.showerror('오류', f'다운로더를 찾을 수 없습니다.\n{script}')
+                return
+            subprocess.Popen([sys.executable, str(script)], cwd=str(dl_dir))
 
     def _paste(self):
         if not self._clipboard:

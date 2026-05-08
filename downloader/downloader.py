@@ -113,6 +113,7 @@ class DownloadItem:
     eta:          str = ''
     size:         str = ''
     error:        str = ''
+    retry_count:  int = 0       # 현재 재시도 횟수
 
 
 # ──────────────────────────────────────────────
@@ -513,6 +514,8 @@ class DownloaderApp(tk.Tk):
         self._workers: dict[str, Downloader] = {}   # uid -> Downloader
         self._ui_queue: queue.Queue = queue.Queue()
         self._analyzing = False
+        self._seq_var = tk.BooleanVar(value=False)  # 순차 다운로드 모드
+        self._seq_busy = False                       # 순차 모드 진행 중 여부
 
         self._style()
         self._build_ui()
@@ -739,6 +742,18 @@ class DownloaderApp(tk.Tk):
         ttk.Button(btn_bar, text='✕ 선택 제거',
                    command=self._remove_selected).pack(side='left', padx=(0, 4))
 
+        ttk.Separator(btn_bar, orient='vertical').pack(
+            side='left', fill='y', padx=8, pady=4)
+
+        seq_chk = ttk.Checkbutton(
+            btn_bar, text='🔁 순차 다운로드',
+            variable=self._seq_var,
+            command=self._on_seq_toggle)
+        seq_chk.pack(side='left')
+        self._seq_lbl = ttk.Label(btn_bar, text='', foreground=FG2,
+                                   font=('Segoe UI', 8))
+        self._seq_lbl.pack(side='left', padx=(6, 0))
+
         ttk.Button(btn_bar, text='📂 폴더 열기',
                    command=self._open_folder).pack(side='right')
 
@@ -923,10 +938,34 @@ class DownloaderApp(tk.Tk):
             cfg['save_dir'] = d
             save_cfg(cfg)
 
+    def _on_seq_toggle(self):
+        if self._seq_var.get():
+            self._seq_lbl.config(text='켜짐 — 완료 후 자동으로 다음 항목 시작')
+            # 이미 진행 중인 게 없으면 첫 번째 pending 즉시 시작
+            if not self._seq_busy:
+                self._seq_next()
+        else:
+            self._seq_lbl.config(text='')
+
+    def _seq_next(self):
+        """순차 모드: 대기 중인 첫 번째 항목을 시작."""
+        if not self._seq_var.get():
+            return
+        # 트리 순서 기준으로 첫 번째 pending 항목 찾기
+        for uid in self._tree.get_children():
+            item = self._items.get(uid)
+            if item and item.status == 'pending':
+                self._seq_busy = True
+                self._run_download(item)
+                return
+        # 더 이상 대기 항목 없음
+        self._seq_busy = False
+        self._seq_lbl.config(text='모두 완료')
+
     def _start_selected(self):
         sel = self._tree.selection()
         if not sel:
-            sel = list(self._items.keys())
+            sel = list(self._tree.get_children())  # 트리 순서 유지
         for uid in sel:
             item = self._items.get(uid)
             if item and item.status == 'pending':
@@ -1012,16 +1051,36 @@ class DownloaderApp(tk.Tk):
                 ev = self._ui_queue.get_nowait()
                 event = ev[0]
                 if event == 'log':
-                    # ('log', msg, color)
                     self._log_msg(ev[1], ev[2])
                 else:
-                    # ('progress'|'done'|'error', item)
                     item = ev[1]
-                    self._update_row(item)
                     if event == 'done':
+                        self._workers.pop(item.uid, None)
+                        self._update_row(item)
                         self._log_msg(f'완료: {item.title or item.url}', GREEN)
+                        if self._seq_var.get():
+                            self.after(300, self._seq_next)
                     elif event == 'error':
-                        self._log_msg(f'오류: {item.error}', RED)
+                        self._workers.pop(item.uid, None)
+                        MAX_RETRY = 3
+                        if self._seq_var.get() and item.retry_count < MAX_RETRY:
+                            item.retry_count += 1
+                            item.status = 'pending'
+                            item.progress = 0.0
+                            item.speed = ''
+                            item.eta   = ''
+                            self._update_row(item)
+                            self._log_msg(
+                                f'재시도 {item.retry_count}/{MAX_RETRY}: '
+                                f'{item.title or item.url}  [{item.error}]', YELLOW)
+                            self.after(1500, self._seq_next)
+                        else:
+                            self._update_row(item)
+                            self._log_msg(f'오류: {item.error}', RED)
+                            if self._seq_var.get():
+                                self.after(300, self._seq_next)
+                    else:
+                        self._update_row(item)
         except queue.Empty:
             pass
         self.after(200, self._poll_ui)
@@ -1030,15 +1089,18 @@ class DownloaderApp(tk.Tk):
         if not self._tree.exists(item.uid):
             return
 
-        status_map = {
-            'pending':     ('대기',     'pending'),
-            'downloading': ('다운로드', 'downloading'),
-            'merging':     ('병합 중',  'merging'),
-            'done':        ('완료',     'done'),
-            'error':       ('오류',     'error'),
-            'cancelled':   ('취소됨',   'cancelled'),
-        }
-        status_label, tag = status_map.get(item.status, (item.status, ''))
+        if item.status == 'pending' and item.retry_count > 0:
+            status_label, tag = f'재시도 {item.retry_count}/3', 'merging'
+        else:
+            status_map = {
+                'pending':     ('대기',     'pending'),
+                'downloading': ('다운로드', 'downloading'),
+                'merging':     ('병합 중',  'merging'),
+                'done':        ('완료',     'done'),
+                'error':       ('실패',     'error'),
+                'cancelled':   ('취소됨',   'cancelled'),
+            }
+            status_label, tag = status_map.get(item.status, (item.status, ''))
         progress_str = f'{item.progress:.0f}%' if item.progress else '0%'
 
         display_title = (item.custom_title

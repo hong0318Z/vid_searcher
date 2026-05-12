@@ -53,12 +53,16 @@ def _fmt_size(b):
 #  DB 쿼리
 # ─────────────────────────────────────────────────
 def _query_videos(tag=None, search=None, offset=0, limit=40,
-                  in_title=True, in_tags=False, in_folder=False):
+                  in_title=True, in_tags=False, in_folder=False,
+                  category=None):
     c  = _conn()
     wh = []; pa = []
     if tag:
         wh.append("f.path IN (SELECT path FROM tags WHERE tag=?)")
         pa.append(tag)
+    if category:
+        wh.append("f.path IN (SELECT path FROM file_categories WHERE category=?)")
+        pa.append(category)
     if search:
         conds = []
         if in_title:
@@ -95,8 +99,11 @@ def _get_video(vid_id):
         "FROM files WHERE path=?", (path,)).fetchone()
     if not r: return None
     v = dict(zip(('path','name','alias','duration','size','width','height','folder','description'), r))
-    v['tags'] = [x[0] for x in c.execute(
+    v['tags']       = [x[0] for x in c.execute(
         "SELECT tag FROM tags WHERE path=? ORDER BY tag", (path,)).fetchall()]
+    v['categories'] = [x[0] for x in c.execute(
+        "SELECT category FROM file_categories WHERE path=? ORDER BY category",
+        (path,)).fetchall()]
     v['id']   = vid_id
     v['dur_str']  = _fmt_dur(v['duration'])
     v['size_str'] = _fmt_size(v['size'])
@@ -215,6 +222,36 @@ def _get_tags_with_stats():
                     'custom_thumb': custom_thumb})
     return out
 
+def _get_categories_with_stats():
+    c    = _conn()
+    rows = c.execute(
+        "SELECT c.name, c.description, COUNT(fc.path) as cnt "
+        "FROM categories c LEFT JOIN file_categories fc ON c.name=fc.category "
+        "GROUP BY c.name ORDER BY cnt DESC, c.name COLLATE NOCASE"
+    ).fetchall()
+    out = []
+    for name, desc, cnt in rows:
+        r = c.execute(
+            "SELECT f.path FROM files f "
+            "JOIN file_categories fc ON f.path=fc.path "
+            "WHERE fc.category=? AND f.thumb_ok=1 ORDER BY RANDOM() LIMIT 1",
+            (name,)).fetchone()
+        out.append({'name': name, 'desc': desc or '', 'cnt': cnt,
+                    'thumb': _vid_id(r[0]) if r else None})
+    return out
+
+def _fetch_cats_map(c, paths: list) -> dict:
+    if not paths:
+        return {}
+    ph  = ','.join('?' * len(paths))
+    rows = c.execute(
+        f"SELECT path, category FROM file_categories WHERE path IN ({ph})",
+        paths).fetchall()
+    result: dict = {p: [] for p in paths}
+    for path, cat in rows:
+        result[path].append(cat)
+    return result
+
 # ─────────────────────────────────────────────────
 #  HTML 템플릿
 # ─────────────────────────────────────────────────
@@ -316,6 +353,11 @@ a{color:inherit;text-decoration:none}
 .vid-card .vc-title{font-size:13px;font-weight:600;line-height:1.4;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
   overflow:hidden;margin-bottom:6px;color:#fff}
+.vid-card .vc-cats{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:3px}
+.vc-cat{background:#0d2a15;color:#4dcc78;font-size:10px;
+  padding:2px 7px;border-radius:3px;cursor:pointer;transition:.15s;
+  border:1px solid #1a4a28;text-decoration:none}
+.vc-cat:hover{background:#1a4a28;color:#6aff9a}
 .vid-card .vc-tags{display:flex;flex-wrap:wrap;gap:4px}
 .vc-tag{background:#2a2a2a;color:var(--acc);font-size:10px;
   padding:2px 7px;border-radius:3px;cursor:pointer;transition:.15s}
@@ -480,7 +522,8 @@ a{color:inherit;text-decoration:none}
   </form>
   <nav id="hdr-nav">
     <a href="/" class="{{ 'act' if nav=='home' else '' }}">홈</a>
-    <a href="/tags" class="{{ 'act' if nav=='tags' else '' }}">카테고리</a>
+    <a href="/categories" class="{{ 'act' if nav=='categories' else '' }}">📂 카테고리</a>
+    <a href="/tags" class="{{ 'act' if nav=='tags' else '' }}">🏷 태그</a>
     <a href="/search" class="{{ 'act' if nav=='search' else '' }}">검색</a>
     <a href="/shorts" class="{{ 'act' if nav=='shorts' else '' }}">Shorts</a>
   </nav>
@@ -736,6 +779,72 @@ _TAG_PAGE = _BASE.replace('__BODY__', """
 </div>
 """).replace('__SCRIPTS__', '')
 
+_CATEGORIES = _BASE.replace('__BODY__', """
+<div class="wrap">
+  <div class="section-hdr">
+    <h2>📂 카테고리</h2>
+    <span class="cnt">{{ cats|length }}개 카테고리</span>
+  </div>
+  {% if not cats %}
+  <div style="text-align:center;padding:60px 0;color:#555;font-size:15px">
+    아직 카테고리가 없습니다.<br>
+    <span style="font-size:13px;color:#333">VidSort 앱의 태그 관리에서 태그를 카테고리로 승격하거나 새 카테고리를 추가하세요.</span>
+  </div>
+  {% else %}
+  <div class="tag-grid">
+  {% for c in cats %}
+    <a href="/category/{{ c.name|urlencode }}" class="tag-card">
+      {% if c.thumb %}
+      <img src="/thumb/{{ c.thumb }}" loading="lazy" alt="{{ c.name }}">
+      {% else %}
+      <div class="no-thumb" style="height:100%">📂</div>
+      {% endif %}
+      <div class="tc-info">
+        <div class="tc-name">{{ c.name }}</div>
+        <div class="tc-cnt">{{ c.cnt }}개 영상</div>
+        {% if c.desc %}<div class="tc-desc">{{ c.desc }}</div>{% endif %}
+      </div>
+    </a>
+  {% endfor %}
+  </div>
+  {% endif %}
+</div>
+""").replace('__SCRIPTS__', '')
+
+_CATEGORY_PAGE = _BASE.replace('__BODY__', """
+<div class="wrap">
+  <div class="breadcrumb">
+    <a href="/">홈</a> › <a href="/categories">카테고리</a> › {{ cat_name }}
+  </div>
+  <div style="display:flex;gap:20px;align-items:flex-start;margin-bottom:24px;
+              background:#0d1a0d;border-radius:10px;padding:20px;border:1px solid #1a4a1a">
+    <div style="flex-shrink:0">
+      {% if cat_thumb %}
+      <img src="/thumb/{{ cat_thumb }}"
+           style="width:160px;height:100px;object-fit:cover;border-radius:8px;
+                  border:2px solid #1a4a1a" alt="{{ cat_name }}">
+      {% else %}
+      <div style="width:160px;height:100px;background:#111;border-radius:8px;
+                  display:flex;align-items:center;justify-content:center;font-size:40px">📂</div>
+      {% endif %}
+    </div>
+    <div style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <h2 style="font-size:22px;font-weight:900;margin:0;color:#6aff9a">{{ cat_name }}</h2>
+        <span style="color:var(--sub);font-size:13px">{{ total }}개 영상</span>
+      </div>
+      {% if cat_desc %}
+      <p style="color:#aaa;font-size:14px;margin:0">{{ cat_desc }}</p>
+      {% endif %}
+    </div>
+  </div>
+  <div class="vid-grid">
+  {% for v in videos %}{{ _vid_card(v) }}{% endfor %}
+  </div>
+  {{ _pager(page, pages, '/category/'~cat_name) }}
+</div>
+""").replace('__SCRIPTS__', '')
+
 _SEARCH = _BASE.replace('__BODY__', """
 <div class="wrap">
   {% if q %}
@@ -771,6 +880,14 @@ _VIDEO = _BASE.replace('__BODY__', """
           {% if v.width %}<span><b>{{ v.width }}×{{ v.height }}</b></span>{% endif %}
           {% if v.size_str %}<span><b>{{ v.size_str }}</b></span>{% endif %}
         </div>
+        {% if v.categories %}
+        <div class="tag-bar" style="margin-bottom:4px">
+        {% for ct in v.categories %}
+          <a href="/category/{{ ct|urlencode }}" class="tag-pill"
+             style="background:#0d2a15;color:#4dcc78;border:1px solid #1a4a28">📂 {{ ct }}</a>
+        {% endfor %}
+        </div>
+        {% endif %}
         <div class="tag-bar" id="player-tag-bar">
         {% for tg in v.tags %}
           <a href="/tag/{{ tg|urlencode }}" class="tag-pill">{{ tg }}</a>
@@ -1146,6 +1263,9 @@ def _render(template, **ctx):
 
     def _vid_card(v):
         from markupsafe import escape
+        cats_html = ''.join(
+            f'<a href="/category/{quote(c)}" class="vc-cat">{escape(c)}</a>'
+            for c in v.get('categories', [])[:3])
         tags_html = ''.join(
             f'<span class="vc-tag">{escape(t)}</span>'
             for t in v.get('tags', [])[:4])
@@ -1161,6 +1281,7 @@ def _render(template, **ctx):
         preview_dir = Path(_cfg['thumb_dir']).parent / '.previews'
         has_preview = (preview_dir / (v['id'] + '.mp4')).exists()
         preview_attr = f' data-preview="/preview/{v["id"]}"' if has_preview else ''
+        cats_row = f'<div class="vc-cats">{cats_html}</div>' if cats_html else ''
         return Markup(f'''
         <a href="/video/{v["id"]}" class="vid-card">
           <div class="vc-thumb"{preview_attr}>{thumb}{dur}
@@ -1169,6 +1290,7 @@ def _render(template, **ctx):
           <div class="vc-info">
             <div class="vc-title">{title}</div>
             {desc_html}
+            {cats_row}
             <div class="vc-tags">{tags_html}</div>
           </div>
         </a>''')
@@ -1207,10 +1329,12 @@ def index():
     tag_groups  = _get_tag_groups(limit_tags=2, vids_per_tag=4)
     c           = _conn()
     tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
+    cats_map = _fetch_cats_map(c, [v['path'] for v in vids])
     for v in vids:
-        v['id']      = _vid_id(v['path'])
-        v['dur_str'] = _fmt_dur(v['duration'])
-        v['tags']    = tags_map.get(v['path'], [])
+        v['id']         = _vid_id(v['path'])
+        v['dur_str']    = _fmt_dur(v['duration'])
+        v['tags']       = tags_map.get(v['path'], [])
+        v['categories'] = cats_map.get(v['path'], [])
     return _render(_HOME, nav='home', videos=vids, tags=tags,
                    tag_groups=tag_groups,
                    total=total, page=pg, pages=(total+PER-1)//PER)
@@ -1233,13 +1357,47 @@ def tag_page(tagname):
     desc, tag_type, thumb_path, extra_info = row if row else ('', '', '', '')
     has_custom_thumb = bool(thumb_path and Path(thumb_path).exists())
     tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
+    cats_map_t = _fetch_cats_map(c, [v['path'] for v in vids])
     for v in vids:
-        v['id']      = _vid_id(v['path'])
-        v['dur_str'] = _fmt_dur(v['duration'])
-        v['tags']    = tags_map.get(v['path'], [])
+        v['id']         = _vid_id(v['path'])
+        v['dur_str']    = _fmt_dur(v['duration'])
+        v['tags']       = tags_map.get(v['path'], [])
+        v['categories'] = cats_map_t.get(v['path'], [])
     return _render(_TAG_PAGE, nav='tags', tag=tagname,
                    desc=desc, tag_type=tag_type,
                    extra_info=extra_info, has_custom_thumb=has_custom_thumb,
+                   videos=vids, total=total,
+                   page=pg, pages=(total+PER-1)//PER)
+
+@app.route('/categories')
+def categories_page():
+    cats = _get_categories_with_stats()
+    return _render(_CATEGORIES, nav='categories', cats=cats)
+
+@app.route('/category/<cat_name>')
+def category_page(cat_name):
+    pg  = int(request.args.get('page', 1))
+    PER = 40
+    vids, total = _query_videos(category=cat_name, offset=(pg-1)*PER, limit=PER)
+    c = _conn()
+    row = c.execute(
+        "SELECT description FROM categories WHERE name=?", (cat_name,)).fetchone()
+    cat_desc = row[0] if row else ''
+    tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
+    cats_map = _fetch_cats_map(c, [v['path'] for v in vids])
+    r = c.execute(
+        "SELECT f.path FROM files f "
+        "JOIN file_categories fc ON f.path=fc.path "
+        "WHERE fc.category=? AND f.thumb_ok=1 ORDER BY RANDOM() LIMIT 1",
+        (cat_name,)).fetchone()
+    cat_thumb = _vid_id(r[0]) if r else None
+    for v in vids:
+        v['id']         = _vid_id(v['path'])
+        v['dur_str']    = _fmt_dur(v['duration'])
+        v['tags']       = tags_map.get(v['path'], [])
+        v['categories'] = cats_map.get(v['path'], [])
+    return _render(_CATEGORY_PAGE, nav='categories',
+                   cat_name=cat_name, cat_desc=cat_desc, cat_thumb=cat_thumb,
                    videos=vids, total=total,
                    page=pg, pages=(total+PER-1)//PER)
 
@@ -1259,10 +1417,12 @@ def search_page():
                                 in_folder=in_folder)
     c    = _conn()
     tags_map = _fetch_tags_map(c, [v['path'] for v in vids])
+    cats_map_s = _fetch_cats_map(c, [v['path'] for v in vids])
     for v in vids:
-        v['id']      = _vid_id(v['path'])
-        v['dur_str'] = _fmt_dur(v['duration'])
-        v['tags']    = tags_map.get(v['path'], [])
+        v['id']         = _vid_id(v['path'])
+        v['dur_str']    = _fmt_dur(v['duration'])
+        v['tags']       = tags_map.get(v['path'], [])
+        v['categories'] = cats_map_s.get(v['path'], [])
     return _render(_SEARCH, nav='search', q=q, videos=vids,
                    total=total, page=pg, pages=(total+PER-1)//PER,
                    in_title_s='1' if in_title else '',

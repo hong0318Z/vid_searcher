@@ -1070,6 +1070,7 @@ class CanvasGrid(tk.Frame):
 
         self._videos    = []
         self._tags_map  = {}
+        self._cats_map  = {}
         self._sel       = set()
         self._cols      = 4
         self._tw        = 224
@@ -1094,9 +1095,10 @@ class CanvasGrid(tk.Frame):
         self.cv.bind('<Leave>',           self._hide_tip)
 
     def load(self, videos, tags_map, sel, tw, th, img_cache,
-             debug=False, page_offset=0):
+             debug=False, page_offset=0, cats_map=None):
         self._videos     = videos
         self._tags_map   = tags_map
+        self._cats_map   = cats_map or {}
         self._sel        = sel
         self._tw         = tw
         self._th         = th
@@ -1108,10 +1110,11 @@ class CanvasGrid(tk.Frame):
         self._draw()
 
     def hard_load(self, videos, tags_map, sel, tw, th, img_cache,
-                  debug=False, page_offset=0):
+                  debug=False, page_offset=0, cats_map=None):
         """동기 렌더 — after() 없이 전부 한 번에 그림. 새로고침용."""
         self._videos     = videos
         self._tags_map   = tags_map
+        self._cats_map   = cats_map or {}
         self._sel        = sel
         self._tw         = tw
         self._th         = th
@@ -1307,9 +1310,23 @@ class CanvasGrid(tk.Frame):
                             state=dbg_state,
                             tags=(card_tag,'dbg_overlay'))
 
-        # 태그
+        # 카테고리 뱃지
+        cats    = self._cats_map.get(path, [])
         ty=y+th+8; tx=x+6
-        for t in tags[:5]:
+        for c in cats[:2]:
+            cw2=len(c)*7+14
+            self.cv.create_rectangle(tx,ty,tx+cw2,ty+14,
+                                     fill='#1a4a2a',outline='#2a6a3a',tags=(card_tag,))
+            self.cv.create_text(tx+cw2//2,ty+7,text=c,fill='#6aff9a',
+                                font=self.FONT_TAG,tags=(card_tag,))
+            tx+=cw2+3
+
+        # 태그
+        if not cats:
+            pass  # 카테고리 없으면 태그를 같은 줄에
+        else:
+            ty+=17; tx=x+6
+        for t in tags[:4]:
             tw2=len(t)*7+10
             self.cv.create_rectangle(tx,ty,tx+tw2,ty+14,
                                      fill=self.TAG_BG,outline='',tags=(card_tag,))
@@ -3920,9 +3937,11 @@ class VidSort(tk.Tk):
             self._update_nav()
             step = int(self.thumb_step_var.get())
             tw, th = THUMB_SIZES[step]
+            cats_map2 = self.db.get_categories_for_paths([v['path'] for v in videos])
             self.grid_widget.load(videos, tags_map, self._sel,
                                   tw=tw, th=th, img_cache=self._img_cache,
-                                  debug=self.debug_var.get(), page_offset=0)
+                                  debug=self.debug_var.get(), page_offset=0,
+                                  cats_map=cats_map2)
             win.destroy()
 
         search_btn.configure(command=lambda: _run(query_var.get()))
@@ -4215,10 +4234,11 @@ class VidSort(tk.Tk):
         self._update_nav()
         step=int(self.thumb_step_var.get())
         tw,th=THUMB_SIZES[step]
+        cats_map_today = self.db.get_categories_for_paths([v['path'] for v in rows])
         self.grid_widget.load(rows, tags_map, self._sel,
                               tw=tw, th=th, img_cache=self._img_cache,
                               debug=self.debug_var.get(),
-                              page_offset=0)
+                              page_offset=0, cats_map=cats_map_today)
 
     def _toggle_sort_dir(self):
         asc = not self.sort_asc_var.get()
@@ -4294,12 +4314,14 @@ class VidSort(tk.Tk):
 
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
-        self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map))
+        cats_map = self.db.get_categories_for_paths(paths)
+        self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map, cats_map))
 
-    def _on_query_done(self, rows, total, total_size, tags_map):
+    def _on_query_done(self, rows, total, total_size, tags_map, cats_map=None):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
+        self._cats_map = cats_map or {}
         self._sel.clear(); self._anchor = None
 
         size_str = fmt_size(total_size)
@@ -4312,7 +4334,8 @@ class VidSort(tk.Tk):
         self.grid_widget.load(rows, tags_map, self._sel,
                               tw=tw, th=th, img_cache=self._img_cache,
                               debug=self.debug_var.get(),
-                              page_offset=self._offset)
+                              page_offset=self._offset,
+                              cats_map=self._cats_map)
 
         next_offset = self._offset + PAGE_SIZE
         if next_offset < total:
@@ -4356,7 +4379,8 @@ class VidSort(tk.Tk):
         self.grid_widget.load(self._videos, self._tags_map, self._sel,
                               tw=tw, th=th, img_cache=self._img_cache,
                               debug=self.debug_var.get(),
-                              page_offset=self._offset)
+                              page_offset=self._offset,
+                              cats_map=getattr(self, '_cats_map', {}))
 
     def _hard_refresh(self):
         self._set_status('강제 새로고침 중...')
@@ -4378,10 +4402,12 @@ class VidSort(tk.Tk):
             self._offset, PAGE_SIZE, min_dur=min_dur, sort_asc=sort_asc)
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
+        cats_map = self.db.get_categories_for_paths(paths)
 
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
+        self._cats_map = cats_map
         self._sel.clear(); self._anchor = None
 
         size_str = fmt_size(total_size)
@@ -4395,7 +4421,8 @@ class VidSort(tk.Tk):
         self.grid_widget.hard_load(rows, tags_map, self._sel,
                                    tw=tw, th=th, img_cache=self._img_cache,
                                    debug=self.debug_var.get(),
-                                   page_offset=self._offset)
+                                   page_offset=self._offset,
+                                   cats_map=cats_map)
 
     def _start_prefetch(self, next_offset, tw, th):
         """다음 페이지 썸네일을 백그라운드에서 미리 img_cache에 적재"""
@@ -5345,6 +5372,34 @@ class VidSort(tk.Tk):
         ttk.Button(panel, text='📋 전체 태그에서 선택',
                    command=_tag_picker).pack(anchor='w', padx=12, pady=(2,6))
 
+        # 카테고리
+        _lbl('카테고리', bold=True)
+        cats_wrap = tk.Frame(panel, bg='#0d1a10',
+                             highlightthickness=1, highlightbackground='#1a4a2a')
+        cats_wrap.pack(fill='x', padx=12, pady=(0,2))
+
+        def _refresh_cats(p):
+            for w in cats_wrap.winfo_children(): w.destroy()
+            cats = self.db.get_file_categories(p)
+            if not cats:
+                tk.Label(cats_wrap, text='(카테고리 없음)',
+                         bg='#0d1a10', fg='#2a4a2a', font=('Consolas', 8)
+                         ).pack(anchor='w', padx=6, pady=4)
+                return
+            for c in cats:
+                chip = tk.Frame(cats_wrap, bg='#1a4a2a', bd=0)
+                chip.pack(side='left', padx=(3,0), pady=3)
+                tk.Label(chip, text=c, bg='#1a4a2a', fg='#6aff9a',
+                         font=('Consolas', 8), padx=4).pack(side='left')
+
+        def _open_cat_assign():
+            p = _vlist[_cur[0]]['path']
+            self._cat_assign_dlg([p])
+            win.after(300, lambda: _refresh_cats(p))
+
+        ttk.Button(panel, text='📂 카테고리 지정',
+                   command=_open_cat_assign).pack(anchor='w', padx=12, pady=(3,0))
+
         # 저장 상태 레이블
         save_lbl = tk.Label(panel, text='', bg='#0d0d14', fg='#4dffb4',
                              font=('Consolas', 9))
@@ -5416,6 +5471,7 @@ class VidSort(tk.Tk):
             desc_txt.delete('1.0', 'end')
             desc_txt.insert('1.0', cur_desc)
             _refresh_tags(p)
+            _refresh_cats(p)
 
             # 파일 정보
             parts = []

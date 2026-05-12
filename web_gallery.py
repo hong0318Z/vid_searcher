@@ -686,7 +686,7 @@ _HOME = _BASE.replace('__BODY__', """
 _TAGS = _BASE.replace('__BODY__', """
 <div class="wrap">
   <div class="section-hdr">
-    <h2>카테고리 전체</h2>
+    <h2>🏷 태그 전체</h2>
     <span class="cnt" id="tag-cnt">{{ tags|length }}개 태그</span>
   </div>
   <div style="margin-bottom:14px">
@@ -737,7 +737,7 @@ _TAGS = _BASE.replace('__BODY__', """
 _TAG_PAGE = _BASE.replace('__BODY__', """
 <div class="wrap">
   <div class="breadcrumb">
-    <a href="/">홈</a> › <a href="/tags">카테고리</a> › {{ tag }}
+    <a href="/">홈</a> › <a href="/tags">🏷 태그</a> › {{ tag }}
   </div>
 
   <!-- 태그 프로필 헤더 -->

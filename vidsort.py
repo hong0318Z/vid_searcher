@@ -283,6 +283,26 @@ class DB:
                     f"ALTER TABLE tag_meta ADD COLUMN {_col} TEXT DEFAULT ''")
                 self.conn.commit()
 
+        # ── categories / file_categories 테이블 ──────
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS categories(
+                name TEXT PRIMARY KEY,
+                description TEXT DEFAULT ''
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS file_categories(
+                path TEXT NOT NULL,
+                category TEXT NOT NULL,
+                PRIMARY KEY(path, category)
+            )
+        """)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_fc_path ON file_categories(path)")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_fc_cat  ON file_categories(category)")
+        self.conn.commit()
+
         # ext 인덱스 (컬럼 확보 후 생성)
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_ext ON files(ext)")
@@ -308,7 +328,7 @@ class DB:
     # ── 핵심: SQL 기반 페이지 쿼리 ─────────────
     def query_page(self, active_exts, folder, tag, sort, short_filter,
                    search, offset, limit, min_dur=0, folder_search=False,
-                   sort_asc=None, only_missing_thumb=False):
+                   sort_asc=None, only_missing_thumb=False, category=None):
         import sys
         print(f"[query_page] active_exts={active_exts} folder={folder} "
               f"tag={tag} sort={sort} short={short_filter} "
@@ -329,7 +349,7 @@ class DB:
             where.append(f"f.ext IN ({ph})")
             params.extend(ext_list)
         else:
-            return [], 0
+            return [], 0, 0
 
         # 2) 2글자 이하 무시 — ext 앞부분(stem)만 체크
         if short_filter:
@@ -348,6 +368,12 @@ class DB:
         # 3-b) 썸네일 미생성 필터 (폴더 현황 우클릭 → 미생성만 보기)
         if only_missing_thumb:
             where.append("f.thumb_ok = 0")
+
+        # 3-c) 카테고리 필터
+        if category:
+            where.append(
+                "f.path IN (SELECT path FROM file_categories WHERE category=?)")
+            params.append(category)
 
         # 4) 태그/검색 JOIN
         use_tag_join = bool(tag or search)
@@ -753,6 +779,93 @@ class DB:
             self.conn.execute("DELETE FROM tags WHERE tag=?", (tag,))
             self.conn.execute("DELETE FROM tag_meta WHERE tag=?", (tag,))
             self.conn.commit()
+
+    # ── 카테고리 메서드 ──────────────────────────
+    def all_categories(self):
+        """(name, description) 목록"""
+        with self.lock:
+            return self.conn.execute(
+                "SELECT name, description FROM categories ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+
+    def add_category(self, name: str, description: str = ''):
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO categories(name, description) VALUES(?,?)",
+                (name, description))
+            self.conn.commit()
+
+    def delete_category(self, name: str):
+        with self.lock:
+            self.conn.execute("DELETE FROM file_categories WHERE category=?", (name,))
+            self.conn.execute("DELETE FROM categories WHERE name=?", (name,))
+            self.conn.commit()
+
+    def rename_category(self, old: str, new: str):
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO categories(name, description) "
+                "SELECT ?, description FROM categories WHERE name=?", (new, old))
+            self.conn.execute(
+                "INSERT OR IGNORE INTO file_categories(path, category) "
+                "SELECT path, ? FROM file_categories WHERE category=?", (new, old))
+            self.conn.execute("DELETE FROM file_categories WHERE category=?", (old,))
+            self.conn.execute("DELETE FROM categories WHERE name=?", (old,))
+            self.conn.commit()
+
+    def set_category_desc(self, name: str, description: str):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE categories SET description=? WHERE name=?", (description, name))
+            self.conn.commit()
+
+    def promote_tag_to_category(self, tag: str):
+        """태그를 카테고리로 승격: 카테고리 생성, 파일 연결 이전, 태그 삭제"""
+        with self.lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO categories(name, description) VALUES(?,?)",
+                (tag, ''))
+            self.conn.execute("""
+                INSERT OR IGNORE INTO file_categories(path, category)
+                SELECT path, ? FROM tags WHERE tag=?
+            """, (tag, tag))
+            self.conn.execute("DELETE FROM tags WHERE tag=?", (tag,))
+            self.conn.execute("DELETE FROM tag_meta WHERE tag=?", (tag,))
+            self.conn.commit()
+
+    def get_categories_for_paths(self, paths: list) -> dict:
+        """path → [category, ...] 매핑"""
+        if not paths:
+            return {}
+        ph = ','.join('?' * len(paths))
+        rows = self.conn.execute(
+            f"SELECT path, category FROM file_categories WHERE path IN ({ph})",
+            paths).fetchall()
+        result = {}
+        for path, cat in rows:
+            result.setdefault(path, []).append(cat)
+        return result
+
+    def assign_categories(self, path: str, categories: list):
+        """파일에 카테고리 목록 설정 (기존 것 대체)"""
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM file_categories WHERE path=?", (path,))
+            for cat in categories:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO categories(name,description) VALUES(?,'')",
+                    (cat,))
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO file_categories(path, category) VALUES(?,?)",
+                    (path, cat))
+            self.conn.commit()
+
+    def get_file_categories(self, path: str) -> list:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT category FROM file_categories WHERE path=? ORDER BY category",
+                (path,)).fetchall()
+            return [r[0] for r in rows]
 
     def recommend_search(self, tags: list, keywords: list,
                          active_exts: list, limit: int = 150) -> list:
@@ -1357,6 +1470,7 @@ class VidSort(tk.Tk):
         self.search_var       = tk.StringVar()
         self.folder_var       = tk.StringVar(value='')
         self.tag_var          = tk.StringVar(value='')
+        self.cat_var          = tk.StringVar(value='')
         self.sort_var         = tk.StringVar(value='이름')
         self.sort_asc_var     = tk.BooleanVar(value=True)   # True=오름차순, False=내림차순
         self.short_filter_var = tk.BooleanVar(value=False)
@@ -1726,6 +1840,19 @@ class VidSort(tk.Tk):
 
         _sep()
 
+        # ── 📂 카테고리 패널 ──────────────────────────
+        cat_hdr_f = tk.Frame(SB, bg=BG)
+        cat_hdr_f.pack(fill='x', padx=6, pady=(4, 2))
+        tk.Label(cat_hdr_f, text='📂  카테고리', bg=BG, fg='#555',
+                 font=('Consolas', 9, 'bold')).pack(side='left', padx=4)
+        ttk.Button(cat_hdr_f, text='관리',
+                   command=self._cat_manage_dlg).pack(side='right')
+
+        self._cat_btn_frame = tk.Frame(SB, bg=BG)
+        self._cat_btn_frame.pack(fill='x', padx=4, pady=(0, 2))
+
+        _sep()
+
         # ── 🏷 태그 패널 (expand=True로 남은 공간 차지) ──
         tag_hdr_f = tk.Frame(SB, bg=BG)
         tag_hdr_f.pack(fill='x', padx=6, pady=(4, 2))
@@ -1816,6 +1943,26 @@ class VidSort(tk.Tk):
         for f in folders:
             self.fl.insert('end','  '+(Path(f).name or f))
 
+        # 카테고리 버튼 패널 갱신
+        for w in self._cat_btn_frame.winfo_children():
+            w.destroy()
+        cats = self.db.all_categories()
+        BG2 = '#0a0a12'
+        for cat_name, _cat_desc in cats:
+            cn = cat_name
+            active = self.cat_var.get() == cn
+            btn = tk.Button(
+                self._cat_btn_frame, text=f'  📂 {cn}',
+                bg='#7c6ff7' if active else '#1a1a28',
+                fg='#fff' if active else '#dcdcf0',
+                font=('Consolas', 9), bd=0, padx=10, pady=4,
+                cursor='hand2', anchor='w',
+                command=lambda c=cn: self._filter_by_category(c))
+            btn.pack(fill='x', pady=1)
+            if not active:
+                btn.bind('<Enter>', lambda e, b=btn: b.config(bg='#2a2a3d'))
+                btn.bind('<Leave>', lambda e, b=btn: b.config(bg='#1a1a28'))
+
         # 태그 버튼 패널 갱신
         for w in self._tag_btn_frame.winfo_children():
             w.destroy()
@@ -1866,19 +2013,34 @@ class VidSort(tk.Tk):
             # 폴더명이 아닌 전체 경로로 필터 (동일 폴더명 중복 문제 해결)
             self.folder_var.set(self._folder_paths[i])
             self.tag_var.set('')
+            self.cat_var.set('')
             self._offset=0
             self._reload()
 
     def _filter_by_tag(self, tag):
         self.tag_var.set(tag)
+        self.cat_var.set('')
         self.folder_var.set('')
         self.fl.selection_clear(0,'end')
         self._offset=0
         self._reload()
 
+    def _filter_by_category(self, cat):
+        if self.cat_var.get() == cat:
+            self.cat_var.set('')
+        else:
+            self.cat_var.set(cat)
+        self.tag_var.set('')
+        self.folder_var.set('')
+        self.fl.selection_clear(0,'end')
+        self._offset=0
+        self._reload_sidebar()
+        self._reload()
+
     def _show_all(self):
         self.folder_var.set('')
         self.tag_var.set('')
+        self.cat_var.set('')
         self.fl.selection_clear(0,'end')
         self._offset=0
         self._reload()
@@ -2580,12 +2742,41 @@ class VidSort(tk.Tk):
         _cnt_lbl.pack(side='right', padx=4)
         cnt_lbl_ref[0] = _cnt_lbl
 
+        def promote_to_category():
+            if cur[0] is None: return
+            tag = tags_data[cur[0]][0]
+            cnt = self.db.conn.execute(
+                "SELECT COUNT(*) FROM tags WHERE tag=?", (tag,)).fetchone()[0]
+            if not messagebox.askyesno('카테고리로 승격',
+                    f'"{tag}" 태그를 카테고리로 승격합니까?\n\n'
+                    f'• {cnt}개 파일이 "{tag}" 카테고리로 이동됩니다\n'
+                    f'• 기존 태그 "{tag}"는 삭제됩니다',
+                    parent=win):
+                return
+            self.db.promote_tag_to_category(tag)
+            tags_data.pop(cur[0])
+            cur[0] = None
+            rename_var.set('')
+            rename_btn.config(state='disabled')
+            desc_txt.delete('1.0', 'end')
+            extra_txt.delete('1.0', 'end')
+            save_btn.config(state='disabled')
+            actor_btn.config(state='disabled')
+            _rebuild_lb()
+            self._reload_sidebar()
+            self._reload()
+            messagebox.showinfo('승격 완료',
+                f'"{tag}" 카테고리가 생성되었습니다.\n{cnt}개 파일이 이동되었습니다.',
+                parent=win)
+
         ttk.Button(bottom_f, text='닫기',
                    command=win.destroy).pack(side='right', padx=4)
         ttk.Button(bottom_f, text='🔗 AI 태그 통합',
                    command=_llm_merge_tags).pack(side='right', padx=4)
         ttk.Button(bottom_f, text='🗑 삭제', style='TButton',
                    command=delete_tag).pack(side='right', padx=4)
+        ttk.Button(bottom_f, text='📂 카테고리로 승격',
+                   command=promote_to_category).pack(side='right', padx=4)
         ttk.Button(bottom_f, text='⚡ 행위 일괄',
                    command=lambda: self._action_tags_dlg(win)).pack(side='left', padx=4)
         ttk.Button(bottom_f, text='👤 인물 일괄',
@@ -2694,6 +2885,246 @@ class VidSort(tk.Tk):
         start_btn = ttk.Button(dlg, text='▶ 분류 시작', style='Acc.TButton',
                                command=start_classify)
         start_btn.pack(pady=(0, 8))
+
+    # ── 카테고리 관리 다이얼로그 ─────────────────────
+    def _cat_manage_dlg(self):
+        win = tk.Toplevel(self); win.title('📂 카테고리 관리')
+        win.configure(bg='#0d0d14'); win.geometry('600x480')
+        win.resizable(True, True); win.grab_set()
+
+        BG = '#0d0d14'
+        tk.Label(win, text='카테고리 관리',
+                 bg=BG, fg='#dcdcf0',
+                 font=('Consolas', 12, 'bold')).pack(pady=(10, 4))
+
+        main_f = tk.Frame(win, bg=BG)
+        main_f.pack(fill='both', expand=True, padx=12, pady=4)
+
+        # 왼쪽: 목록
+        left_f = tk.Frame(main_f, bg=BG, width=200)
+        left_f.pack(side='left', fill='y', padx=(0, 8))
+        left_f.pack_propagate(False)
+
+        lb_sb = ttk.Scrollbar(left_f, orient='vertical')
+        lb = tk.Listbox(left_f, bg='#1a1a28', fg='#dcdcf0',
+                        selectbackground='#7c6ff7', selectforeground='#fff',
+                        font=('Consolas', 9), bd=0, highlightthickness=0,
+                        activestyle='none', yscrollcommand=lb_sb.set)
+        lb_sb.configure(command=lb.yview)
+        lb_sb.pack(side='right', fill='y')
+        lb.pack(fill='both', expand=True)
+
+        # 오른쪽: 편집
+        right_f = tk.Frame(main_f, bg=BG)
+        right_f.pack(side='left', fill='both', expand=True)
+
+        tk.Label(right_f, text='카테고리 이름', bg=BG, fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        name_f = tk.Frame(right_f, bg=BG)
+        name_f.pack(fill='x', pady=(2, 6))
+        name_var = tk.StringVar()
+        name_ent = ttk.Entry(name_f, textvariable=name_var,
+                             font=('Consolas', 11), width=20)
+        name_ent.pack(side='left', fill='x', expand=True, padx=(0, 4))
+        rename_btn = ttk.Button(name_f, text='✏ 이름 변경',
+                                style='Acc.TButton', state='disabled')
+        rename_btn.pack(side='left')
+
+        tk.Label(right_f, text='설명', bg=BG, fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        desc_txt = tk.Text(right_f, bg='#1a1a28', fg='#dcdcf0',
+                           font=('Consolas', 10), height=6, relief='flat',
+                           bd=0, highlightthickness=1,
+                           highlightbackground='#2a2a3d',
+                           insertbackground='#7c6ff7', wrap='word')
+        desc_txt.pack(fill='x', pady=(2, 6))
+
+        file_cnt_lbl = tk.Label(right_f, text='', bg=BG, fg='#7c6ff7',
+                                font=('Consolas', 9))
+        file_cnt_lbl.pack(anchor='w', pady=(0, 4))
+
+        save_btn = ttk.Button(right_f, text='💾 설명 저장',
+                              style='Acc.TButton', state='disabled')
+        save_btn.pack(anchor='e', pady=(0, 4))
+
+        # 새 카테고리 추가
+        add_f = tk.Frame(right_f, bg=BG)
+        add_f.pack(fill='x', pady=(8, 0))
+        ttk.Separator(add_f).pack(fill='x', pady=(0, 6))
+        tk.Label(add_f, text='새 카테고리 추가', bg=BG, fg='#888',
+                 font=('Consolas', 9)).pack(anchor='w')
+        new_f = tk.Frame(add_f, bg=BG)
+        new_f.pack(fill='x', pady=(2, 0))
+        new_var = tk.StringVar()
+        new_ent = ttk.Entry(new_f, textvariable=new_var,
+                            font=('Consolas', 10), width=18)
+        new_ent.pack(side='left', fill='x', expand=True, padx=(0, 4))
+        add_btn = ttk.Button(new_f, text='➕ 추가', style='Acc.TButton')
+        add_btn.pack(side='left')
+
+        # 데이터
+        cats_data = list(self.db.all_categories())  # [(name, desc), ...]
+        cur = [None]
+
+        def _rebuild_lb():
+            lb.delete(0, 'end')
+            for name, _ in cats_data:
+                cnt = self.db.conn.execute(
+                    "SELECT COUNT(*) FROM file_categories WHERE category=?",
+                    (name,)).fetchone()[0]
+                lb.insert('end', f'  {name}  ({cnt})')
+
+        def on_select(e=None):
+            sel = lb.curselection()
+            if not sel: return
+            cur[0] = sel[0]
+            name, desc = cats_data[cur[0]]
+            name_var.set(name)
+            desc_txt.delete('1.0', 'end')
+            desc_txt.insert('1.0', desc)
+            cnt = self.db.conn.execute(
+                "SELECT COUNT(*) FROM file_categories WHERE category=?",
+                (name,)).fetchone()[0]
+            file_cnt_lbl.config(text=f'포함 파일 수: {cnt}개')
+            rename_btn.config(state='normal')
+            save_btn.config(state='normal')
+
+        lb.bind('<<ListboxSelect>>', on_select)
+
+        def do_rename():
+            if cur[0] is None: return
+            old_name = cats_data[cur[0]][0]
+            new_name = name_var.get().strip()
+            if not new_name or new_name == old_name: return
+            self.db.rename_category(old_name, new_name)
+            cats_data[cur[0]] = (new_name, cats_data[cur[0]][1])
+            _rebuild_lb()
+            self._reload_sidebar()
+            if self.cat_var.get() == old_name:
+                self.cat_var.set(new_name)
+                self._reload()
+
+        def do_save():
+            if cur[0] is None: return
+            name = cats_data[cur[0]][0]
+            desc = desc_txt.get('1.0', 'end').strip()
+            self.db.set_category_desc(name, desc)
+            cats_data[cur[0]] = (name, desc)
+
+        def do_add():
+            name = new_var.get().strip()
+            if not name: return
+            self.db.add_category(name)
+            cats_data.clear()
+            cats_data.extend(self.db.all_categories())
+            _rebuild_lb()
+            new_var.set('')
+            self._reload_sidebar()
+
+        def do_delete():
+            if cur[0] is None: return
+            name = cats_data[cur[0]][0]
+            cnt = self.db.conn.execute(
+                "SELECT COUNT(*) FROM file_categories WHERE category=?",
+                (name,)).fetchone()[0]
+            if not messagebox.askyesno('카테고리 삭제',
+                    f'"{name}" 카테고리를 삭제합니까?\n'
+                    f'({cnt}개 파일에서 제거됩니다)',
+                    parent=win):
+                return
+            self.db.delete_category(name)
+            cats_data.pop(cur[0])
+            cur[0] = None
+            name_var.set('')
+            desc_txt.delete('1.0', 'end')
+            file_cnt_lbl.config(text='')
+            rename_btn.config(state='disabled')
+            save_btn.config(state='disabled')
+            _rebuild_lb()
+            if self.cat_var.get() == name:
+                self.cat_var.set('')
+                self._reload()
+            self._reload_sidebar()
+
+        rename_btn.config(command=do_rename)
+        save_btn.config(command=do_save)
+        add_btn.config(command=do_add)
+        new_ent.bind('<Return>', lambda e: do_add())
+        name_ent.bind('<Return>', lambda e: do_rename())
+
+        # 하단 버튼
+        bot_f = tk.Frame(win, bg=BG)
+        bot_f.pack(fill='x', padx=12, pady=(2, 8))
+        ttk.Button(bot_f, text='🗑 삭제', command=do_delete).pack(side='left', padx=4)
+        ttk.Button(bot_f, text='닫기', command=win.destroy).pack(side='right', padx=4)
+
+        _rebuild_lb()
+
+    def _cat_assign_dlg(self, paths):
+        """파일(들)에 카테고리 지정 다이얼로그"""
+        all_cats = self.db.all_categories()
+        if not all_cats:
+            if messagebox.askyesno('카테고리 없음',
+                    '카테고리가 없습니다.\n카테고리 관리 창을 열겠습니까?'):
+                self._cat_manage_dlg()
+            return
+
+        win = tk.Toplevel(self); win.title('📂 카테고리 지정')
+        win.configure(bg='#0d0d14'); win.geometry('380x420')
+        win.resizable(True, True); win.grab_set()
+
+        BG = '#0d0d14'
+        title = f'{len(paths)}개 파일' if len(paths) > 1 else Path(paths[0]).name
+        tk.Label(win, text=f'카테고리 지정: {title}',
+                 bg=BG, fg='#dcdcf0', font=('Consolas', 9, 'bold'),
+                 wraplength=340).pack(pady=(10, 6), padx=12)
+
+        # 현재 지정된 카테고리 (단일 파일일 때만 선로드)
+        current_cats = set()
+        if len(paths) == 1:
+            current_cats = set(self.db.get_file_categories(paths[0]))
+
+        # 체크박스 목록
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill='both', expand=True, padx=12, pady=4)
+        vsb = ttk.Scrollbar(frame, orient='vertical')
+        canvas = tk.Canvas(frame, bg=BG, highlightthickness=0,
+                           yscrollcommand=vsb.set)
+        vsb.configure(command=canvas.yview)
+        vsb.pack(side='right', fill='y')
+        canvas.pack(fill='both', expand=True)
+        inner = tk.Frame(canvas, bg=BG)
+        canvas.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind('<Configure>',
+                   lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+
+        cat_vars = {}
+        for cat_name, cat_desc in all_cats:
+            v = tk.BooleanVar(value=cat_name in current_cats)
+            cat_vars[cat_name] = v
+            row = tk.Frame(inner, bg=BG)
+            row.pack(fill='x', pady=1)
+            tk.Checkbutton(row, text=f'  📂 {cat_name}',
+                           variable=v, bg=BG, fg='#dcdcf0',
+                           selectcolor='#7c6ff7', activebackground=BG,
+                           activeforeground='#dcdcf0',
+                           font=('Consolas', 9), cursor='hand2',
+                           anchor='w').pack(side='left', fill='x')
+            if cat_desc:
+                tk.Label(row, text=cat_desc[:30], bg=BG, fg='#555',
+                         font=('Consolas', 8)).pack(side='left', padx=4)
+
+        def do_save():
+            selected = [c for c, v in cat_vars.items() if v.get()]
+            for path in paths:
+                self.db.assign_categories(path, selected)
+            win.destroy()
+            self._reload_sidebar()
+
+        bf = tk.Frame(win, bg=BG); bf.pack(pady=(4, 8))
+        ttk.Button(bf, text='저장', style='Acc.TButton',
+                   command=do_save).pack(side='left', padx=6)
+        ttk.Button(bf, text='취소', command=win.destroy).pack(side='left', padx=6)
 
     # ── 인물 일괄 처리 ───────────────────────────
     def _person_tags_dlg(self, parent_win):
@@ -3812,6 +4243,7 @@ class VidSort(tk.Tk):
         active_exts        = self._active_exts()
         folder             = self.folder_var.get()
         tag                = self.tag_var.get()
+        category           = self.cat_var.get()
         sort               = self.sort_var.get()
         sort_asc           = self.sort_asc_var.get()
         short              = self.short_filter_var.get()
@@ -3825,17 +4257,18 @@ class VidSort(tk.Tk):
             target=self._bg_query,
             args=(active_exts, folder, tag, sort, short, search,
                   self._offset, min_dur, folder_search, sort_asc,
-                  only_missing_thumb),
+                  only_missing_thumb, category),
             daemon=True).start()
 
     def _bg_query(self, active_exts, folder, tag, sort, short, search,
                   offset, min_dur=0, folder_search=False, sort_asc=None,
-                  only_missing_thumb=False):
+                  only_missing_thumb=False, category=None):
         rows, total, total_size = self.db.query_page(
             active_exts, folder or None, tag or None,
             sort, short, search or None,
             offset, PAGE_SIZE, min_dur=min_dur, folder_search=folder_search,
-            sort_asc=sort_asc, only_missing_thumb=only_missing_thumb)
+            sort_asc=sort_asc, only_missing_thumb=only_missing_thumb,
+            category=category or None)
 
         # 현재 페이지에서 실제로 존재하지 않는 파일 제거
         def _exists(p):
@@ -4297,6 +4730,7 @@ class VidSort(tk.Tk):
         m.add_command(label='✏  별칭 편집',        command=lambda:self._alias_dlg(path))
         m.add_command(label='📝  설명 편집',        command=lambda:self._desc_dlg(path))
         m.add_command(label='🏷  태그 편집',        command=lambda:self._tag_dlg(paths))
+        m.add_command(label='📂  카테고리 지정',    command=lambda:self._cat_assign_dlg(paths))
         m.add_command(label='🤖  AI 자동 태그',    command=lambda:self._llm_auto_tag_paths(paths))
         m.add_separator()
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))

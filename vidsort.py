@@ -1071,12 +1071,13 @@ class CanvasGrid(tk.Frame):
         self._videos    = []
         self._tags_map  = {}
         self._cats_map  = {}
+        self._subs_set  = set()
         self._sel       = set()
         self._cols      = 4
         self._tw        = 224
         self._th        = 140
         self._card_w    = 240
-        self._card_h    = 210
+        self._card_h    = 236
         self._img_cache = {}
         self._phs       = {}
         self._items     = {}
@@ -1095,31 +1096,33 @@ class CanvasGrid(tk.Frame):
         self.cv.bind('<Leave>',           self._hide_tip)
 
     def load(self, videos, tags_map, sel, tw, th, img_cache,
-             debug=False, page_offset=0, cats_map=None):
+             debug=False, page_offset=0, cats_map=None, subs_set=None):
         self._videos     = videos
         self._tags_map   = tags_map
         self._cats_map   = cats_map or {}
+        self._subs_set   = subs_set or set()
         self._sel        = sel
         self._tw         = tw
         self._th         = th
         self._card_w     = tw + 20
-        self._card_h     = th + 72
+        self._card_h     = th + 96
         self._img_cache  = img_cache
         self._debug      = debug
         self._page_offset= page_offset
         self._draw()
 
     def hard_load(self, videos, tags_map, sel, tw, th, img_cache,
-                  debug=False, page_offset=0, cats_map=None):
+                  debug=False, page_offset=0, cats_map=None, subs_set=None):
         """동기 렌더 — after() 없이 전부 한 번에 그림. 새로고침용."""
         self._videos     = videos
         self._tags_map   = tags_map
         self._cats_map   = cats_map or {}
+        self._subs_set   = subs_set or set()
         self._sel        = sel
         self._tw         = tw
         self._th         = th
         self._card_w     = tw + 20
-        self._card_h     = th + 72
+        self._card_h     = th + 96
         self._img_cache  = img_cache
         self._debug      = debug
         self._page_offset= page_offset
@@ -1149,12 +1152,6 @@ class CanvasGrid(tk.Frame):
             self._draw_card(i, v)
             if i % 100 == 99:
                 self.cv.update_idletasks()
-        """디버그 오버레이만 토글 — 카드 전체 재그리기 없음"""
-        self._debug = on
-        if on:
-            self.cv.itemconfig('dbg_overlay', state='normal')
-        else:
-            self.cv.itemconfig('dbg_overlay', state='hidden')
 
     def refresh_thumb(self, path):
         if not thumb_cached(path): return
@@ -1310,32 +1307,44 @@ class CanvasGrid(tk.Frame):
                             state=dbg_state,
                             tags=(card_tag,'dbg_overlay'))
 
+        # 자막 배지 (썸네일 우상단)
+        if path in self._subs_set:
+            bx1=x+cw-28; bx2=x+cw-2
+            self.cv.create_rectangle(bx1,y+4,bx2,y+16,
+                                     fill='#1a5a8a',outline='#2a8acc',tags=(card_tag,))
+            self.cv.create_text((bx1+bx2)//2,y+10,text='SUB',fill='#7acfff',
+                                font=self.FONT_META,tags=(card_tag,))
+
         # 카테고리 뱃지
         cats    = self._cats_map.get(path, [])
         ty=y+th+8; tx=x+6
         for c in cats[:2]:
             cw2=len(c)*7+14
+            if tx+cw2 > x+cw-4:  # 카드 너비 초과 방지
+                break
             self.cv.create_rectangle(tx,ty,tx+cw2,ty+14,
                                      fill='#1a4a2a',outline='#2a6a3a',tags=(card_tag,))
             self.cv.create_text(tx+cw2//2,ty+7,text=c,fill='#6aff9a',
                                 font=self.FONT_TAG,tags=(card_tag,))
             tx+=cw2+3
+        if cats:
+            ty+=17; tx=x+6
 
         # 태그
-        if not cats:
-            pass  # 카테고리 없으면 태그를 같은 줄에
-        else:
-            ty+=17; tx=x+6
         for t in tags[:4]:
             tw2=len(t)*7+10
+            if tx+tw2 > x+cw-4:  # 카드 너비 초과 방지
+                break
             self.cv.create_rectangle(tx,ty,tx+tw2,ty+14,
                                      fill=self.TAG_BG,outline='',tags=(card_tag,))
             self.cv.create_text(tx+tw2//2,ty+7,text=t,fill='#fff',
                                 font=self.FONT_TAG,tags=(card_tag,))
             tx+=tw2+3
+        if cats or tags:
+            ty+=17
 
-        # 텍스트
-        ty2=y+th+26
+        # 텍스트 (배지 아래부터 동적으로)
+        ty2 = ty + 2
         if alias:
             aid=self.cv.create_text(x+6,ty2,text=alias[:30],
                                     fill='#e0e0ff',font=self.FONT_ALIAS,
@@ -4315,13 +4324,28 @@ class VidSort(tk.Tk):
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
         cats_map = self.db.get_categories_for_paths(paths)
-        self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map, cats_map))
 
-    def _on_query_done(self, rows, total, total_size, tags_map, cats_map=None):
+        _SUB_EXTS = {'.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx'}
+        def _has_sub(p):
+            try:
+                stem = Path(p).stem
+                parent = Path(p).parent
+                for ext in _SUB_EXTS:
+                    if (parent / (stem + ext)).is_file():
+                        return True
+            except Exception:
+                pass
+            return False
+        subs_set = {v['path'] for v in rows if _has_sub(v['path'])}
+
+        self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map, cats_map, subs_set))
+
+    def _on_query_done(self, rows, total, total_size, tags_map, cats_map=None, subs_set=None):
         self._videos   = rows
         self._total    = total
         self._tags_map = tags_map
         self._cats_map = cats_map or {}
+        self._subs_set = subs_set or set()
         self._sel.clear(); self._anchor = None
 
         size_str = fmt_size(total_size)
@@ -4335,7 +4359,8 @@ class VidSort(tk.Tk):
                               tw=tw, th=th, img_cache=self._img_cache,
                               debug=self.debug_var.get(),
                               page_offset=self._offset,
-                              cats_map=self._cats_map)
+                              cats_map=self._cats_map,
+                              subs_set=self._subs_set)
 
         next_offset = self._offset + PAGE_SIZE
         if next_offset < total:

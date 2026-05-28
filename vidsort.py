@@ -1950,11 +1950,14 @@ class VidSort(tk.Tk):
                    command=self._llm_pattern_dlg).pack(side='left', fill='x', expand=True)
 
         ai_bot = tk.Frame(ai_body, bg=BG)
-        ai_bot.pack(fill='x', padx=6, pady=(1, 4))
+        ai_bot.pack(fill='x', padx=6, pady=(1, 2))
         ttk.Button(ai_bot, text='🌐 웹 자동태그',
                    command=self._jav_process_dlg).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(ai_bot, text='📋 웹태그 DB',
                    command=self._jav_db_dlg).pack(side='left', fill='x', expand=True)
+
+        ttk.Button(ai_body, text='📝 자막 기반 태그 추천',
+                   command=self._subtitle_tag_dlg).pack(fill='x', padx=6, pady=(1, 4))
 
         tk.Checkbutton(ai_body, text='🐛 디버그 모드', variable=self.debug_var,
                        bg=BG, fg='#555', selectcolor=BG,
@@ -3772,6 +3775,292 @@ class VidSort(tk.Tk):
 
 
     # ─────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────
+    #  📝 자막 기반 AI 태그 추천
+    # ─────────────────────────────────────────────────────
+    _SUB_EXTS_LIST = ['.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx']
+
+    def _find_subtitle_file(self, video_path):
+        """video_path 와 같은 폴더에서 자막 파일 경로 반환 (없으면 None)."""
+        try:
+            stem   = Path(video_path).stem
+            parent = Path(video_path).parent
+            for ext in self._SUB_EXTS_LIST:
+                p = parent / (stem + ext)
+                if p.is_file():
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _parse_subtitle_text(self, sub_path):
+        """자막 파일에서 평문 텍스트만 추출 (최대 3000자)."""
+        import re as _re
+        try:
+            with open(sub_path, encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            return ''
+
+        ext = Path(sub_path).suffix.lower()
+        if ext in ('.srt', '.vtt'):
+            content = _re.sub(r'<[^>]+>', '', content)
+            content = _re.sub(
+                r'\d{1,2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,\.]\d{3}',
+                '', content)
+            content = _re.sub(r'^WEBVTT.*', '', content, flags=_re.MULTILINE)
+            content = _re.sub(r'^\d+\s*$', '', content, flags=_re.MULTILINE)
+        elif ext in ('.ass', '.ssa'):
+            lines = []
+            for line in content.split('\n'):
+                if line.startswith('Dialogue:'):
+                    parts = line.split(',', 9)
+                    if len(parts) >= 10:
+                        t = _re.sub(r'\{[^}]*\}', '', parts[9])
+                        t = t.replace('\\N', ' ').replace('\\n', ' ')
+                        if t.strip():
+                            lines.append(t.strip())
+            content = ' '.join(lines)
+        elif ext == '.sub':
+            content = _re.sub(r'\{\d+\}\{\d+\}', '', content)
+            content = _re.sub(r'<[^>]+>', '', content)
+
+        lines = [l.strip() for l in content.split('\n')
+                 if l.strip() and not _re.match(r'^\d+$', l.strip())]
+        return ' '.join(lines)[:3000]
+
+    def _subtitle_tag_dlg(self):
+        """자막 파일이 있는 영상 목록 조회 → LLM 태그 추천 → 적용 다이얼로그."""
+        llm = self._get_llm_client()
+        if not llm:
+            return
+
+        # ── 자막 있는 파일 전체 검색 (DB 전체 순회, 백그라운드) ──
+        win = tk.Toplevel(self)
+        win.title('📝 자막 기반 AI 태그 추천')
+        win.geometry('900x620')
+        win.configure(bg='#0d0d14')
+        win.transient(self); win.grab_set()
+
+        BG = '#0d0d14'; BG2 = '#13131f'; FG = '#dcdcf0'
+
+        # 상단 안내
+        hdr = tk.Frame(win, bg=BG2, pady=8)
+        hdr.pack(fill='x')
+        tk.Label(hdr, text='📝  자막 기반 AI 태그 추천',
+                 bg=BG2, fg='#7c6ff7', font=('Consolas', 13, 'bold')).pack(side='left', padx=14)
+        lbl_count = tk.Label(hdr, text='목록 로딩 중…',
+                             bg=BG2, fg='#555', font=('Consolas', 9))
+        lbl_count.pack(side='right', padx=14)
+
+        # 트리뷰
+        cols = ('name', 'folder', 'status', 'tags')
+        frm_tree = tk.Frame(win, bg=BG)
+        frm_tree.pack(fill='both', expand=True, padx=10, pady=(8, 4))
+
+        style = ttk.Style()
+        style.configure('Sub.Treeview', background=BG2, foreground=FG,
+                        fieldbackground=BG2, rowheight=22,
+                        font=('Consolas', 9))
+        style.configure('Sub.Treeview.Heading', background='#1a1a2e',
+                        foreground='#7c6ff7', font=('Consolas', 9, 'bold'))
+        style.map('Sub.Treeview', background=[('selected', '#2a2a50')])
+
+        tv = ttk.Treeview(frm_tree, columns=cols, show='headings',
+                          style='Sub.Treeview', selectmode='extended')
+        tv.heading('name',   text='파일명')
+        tv.heading('folder', text='폴더')
+        tv.heading('status', text='상태')
+        tv.heading('tags',   text='추천 태그')
+        tv.column('name',   width=250, minwidth=120)
+        tv.column('folder', width=140, minwidth=80)
+        tv.column('status', width=80,  minwidth=60,  anchor='center')
+        tv.column('tags',   width=340, minwidth=150)
+
+        vsb = ttk.Scrollbar(frm_tree, orient='vertical',   command=tv.yview)
+        hsb = ttk.Scrollbar(frm_tree, orient='horizontal', command=tv.xview)
+        tv.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side='right', fill='y')
+        hsb.pack(side='bottom', fill='x')
+        tv.pack(fill='both', expand=True)
+
+        # 태그 상세 패널 (선택된 행의 태그 토글)
+        frm_detail = tk.LabelFrame(win, text=' 선택 항목의 추천 태그 (클릭으로 적용 토글) ',
+                                   bg=BG, fg='#555', font=('Consolas', 8),
+                                   bd=1, relief='flat')
+        frm_detail.pack(fill='x', padx=10, pady=(0, 4))
+        lbl_detail_hint = tk.Label(frm_detail,
+                                   text='트리에서 항목을 선택하면 추천 태그가 표시됩니다.',
+                                   bg=BG, fg='#444', font=('Consolas', 8))
+        lbl_detail_hint.pack(pady=6)
+
+        # 버튼 바
+        frm_btn = tk.Frame(win, bg=BG2, pady=6)
+        frm_btn.pack(fill='x', side='bottom')
+
+        btn_sel_all  = ttk.Button(frm_btn, text='모두 선택')
+        btn_sel_none = ttk.Button(frm_btn, text='전체 해제')
+        btn_analyze  = ttk.Button(frm_btn, text='▶ 선택 항목 분석', style='Acc.TButton')
+        btn_apply    = ttk.Button(frm_btn, text='✅ 분석된 항목 적용')
+        btn_close    = ttk.Button(frm_btn, text='닫기', command=win.destroy)
+
+        btn_sel_all.pack(side='left',  padx=(10, 2))
+        btn_sel_none.pack(side='left', padx=2)
+        btn_analyze.pack(side='left',  padx=(12, 2))
+        btn_apply.pack(side='left',    padx=2)
+        btn_close.pack(side='right',   padx=10)
+
+        lbl_progress = tk.Label(frm_btn, text='', bg=BG2, fg='#7c6ff7',
+                                font=('Consolas', 8))
+        lbl_progress.pack(side='left', padx=8)
+
+        # ── 내부 상태 ──────────────────────────────────────
+        # iid → {'path': ..., 'sub_path': ..., 'tags': [], 'apply': set()}
+        _state = {}
+        _tag_vars = {}   # iid → {tag: BooleanVar}
+
+        def _set_progress(msg):
+            win.after(0, lambda: lbl_progress.config(text=msg))
+
+        # ── 트리 선택 시 태그 상세 패널 갱신 ──
+        def _on_select(e=None):
+            for w in frm_detail.winfo_children():
+                w.destroy()
+            _tag_vars.clear()
+            sel = tv.selection()
+            if not sel:
+                tk.Label(frm_detail, text='선택된 항목 없음',
+                         bg=BG, fg='#444', font=('Consolas', 8)).pack(pady=6)
+                return
+            iid = sel[0]
+            st = _state.get(iid)
+            if not st or not st.get('tags'):
+                tk.Label(frm_detail, text='분석 전이거나 추천 태그 없음',
+                         bg=BG, fg='#444', font=('Consolas', 8)).pack(pady=6)
+                return
+            fname = tk.Label(frm_detail,
+                             text=Path(st['path']).name,
+                             bg=BG, fg='#7c6ff7', font=('Consolas', 8, 'bold'))
+            fname.pack(anchor='w', padx=8, pady=(4, 2))
+            tag_frm = tk.Frame(frm_detail, bg=BG)
+            tag_frm.pack(fill='x', padx=8, pady=(0, 6))
+            _tag_vars[iid] = {}
+            for tag in st['tags']:
+                var = tk.BooleanVar(value=(tag in st['apply']))
+                _tag_vars[iid][tag] = var
+                def _on_toggle(t=tag, v=var, i=iid):
+                    if v.get():
+                        _state[i]['apply'].add(t)
+                    else:
+                        _state[i]['apply'].discard(t)
+                cb = tk.Checkbutton(
+                    tag_frm, text=tag, variable=var,
+                    command=_on_toggle,
+                    bg=BG, fg='#7acfff', selectcolor='#1a1a2e',
+                    activebackground=BG, font=('Consolas', 9),
+                    cursor='hand2')
+                cb.pack(side='left', padx=(0, 10))
+
+        tv.bind('<<TreeviewSelect>>', _on_select)
+
+        # ── 버튼 동작 ──
+        btn_sel_all.config(command=lambda: tv.selection_set(tv.get_children()))
+        btn_sel_none.config(command=lambda: tv.selection_set([]))
+
+        def _start_analysis():
+            sel = tv.selection()
+            if not sel:
+                messagebox.showwarning('선택 없음', '분석할 항목을 선택하세요.', parent=win)
+                return
+            tag_pool = self.db.all_tags()
+            total = len(sel)
+            btn_analyze.config(state='disabled')
+            btn_apply.config(state='disabled')
+
+            def _worker():
+                for done, iid in enumerate(sel, 1):
+                    st = _state.get(iid)
+                    if not st:
+                        continue
+                    win.after(0, lambda i=iid: tv.set(i, 'status', '분석중…'))
+                    _set_progress(f'분석 중 {done}/{total}…')
+                    try:
+                        sub_text = self._parse_subtitle_text(st['sub_path'])
+                        if not sub_text.strip():
+                            win.after(0, lambda i=iid: tv.set(i, 'status', '자막 없음'))
+                            continue
+                        fname = Path(st['path']).name
+                        tags = llm.recommend_tags_from_subtitle(
+                            sub_text, fname, tag_pool)
+                        st['tags'] = tags
+                        st['apply'] = set(tags)  # 기본 전체 체크
+                        tag_str = '  '.join(tags)
+                        win.after(0, lambda i=iid, ts=tag_str: (
+                            tv.set(i, 'status', '✅ 완료'),
+                            tv.set(i, 'tags', ts)))
+                    except Exception as ex:
+                        err = str(ex)[:40]
+                        win.after(0, lambda i=iid, e=err: tv.set(i, 'status', f'오류: {e}'))
+
+                _set_progress(f'분석 완료 {total}개')
+                win.after(0, lambda: btn_analyze.config(state='normal'))
+                win.after(0, lambda: btn_apply.config(state='normal'))
+                win.after(0, _on_select)  # 선택된 항목 패널 갱신
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _apply_tags():
+            applied = 0
+            skipped = 0
+            for iid, st in _state.items():
+                if not st.get('apply'):
+                    skipped += 1
+                    continue
+                for tag in st['apply']:
+                    self.db.add_tag(st['path'], tag)
+                    applied += 1
+            if applied == 0:
+                messagebox.showinfo('적용', '적용할 태그가 없습니다.\n(분석 후 태그를 선택하세요.)',
+                                    parent=win)
+                return
+            self._reload_sidebar()
+            self._reload()
+            messagebox.showinfo('완료', f'태그 {applied}건 적용 완료\n(미선택 항목: {skipped}건)',
+                                parent=win)
+
+        btn_analyze.config(command=_start_analysis)
+        btn_apply.config(command=_apply_tags)
+
+        # ── 파일 목록 로드 (백그라운드) ──
+        def _load_files():
+            all_rows = self.db.conn.execute(
+                "SELECT path, name, folder FROM files ORDER BY folder, name"
+            ).fetchall()
+            found = []
+            for path, name, folder in all_rows:
+                sp = self._find_subtitle_file(path)
+                if sp:
+                    found.append((path, name, folder, sp))
+
+            def _populate():
+                lbl_count.config(text=f'자막 있는 영상 {len(found)}개')
+                for path, name, folder, sp in found:
+                    iid = tv.insert('', 'end', values=(
+                        name,
+                        Path(folder).name if folder else '',
+                        '대기',
+                        ''))
+                    _state[iid] = {
+                        'path': path, 'sub_path': sp,
+                        'tags': [], 'apply': set()}
+                if not found:
+                    tv.insert('', 'end', values=('자막 파일이 있는 영상이 없습니다.', '', '', ''))
+                    btn_analyze.config(state='disabled')
+
+            win.after(0, _populate)
+
+        threading.Thread(target=_load_files, daemon=True).start()
+
     #  🎯 AI 영상 추천
     # ─────────────────────────────────────────────────────
     def _ai_recommend_dlg(self):

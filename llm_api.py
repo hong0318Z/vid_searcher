@@ -617,3 +617,68 @@ class LLMClient:
 
         except Exception:
             return [[] for _ in filenames]
+
+    def recommend_tags_from_subtitle(
+            self,
+            subtitle_text: str,
+            filename: str,
+            tag_pool: list,
+            on_chunk: callable = None) -> list:
+        """자막 텍스트를 분석해 태그 5~6개 추천.
+
+        subtitle_text — 파싱된 자막 평문 (최대 2500자 권장)
+        filename      — 파일명 (맥락 참고용)
+        tag_pool      — 기존 DB 태그 목록 (우선 사용, 없으면 신규 생성 허용)
+        on_chunk      — 스트리밍 청크 콜백 (선택)
+
+        반환: 태그 문자열 리스트 (5~6개)
+        """
+        pool_str = ', '.join(f'"{t}"' for t in tag_pool[:100]) if tag_pool else '없음'
+
+        sys_msg = (
+            "당신은 영상 콘텐츠 분류 전문가입니다.\n"
+            "주어진 자막 내용과 파일명을 분석하여 영상의 장르, 분위기, "
+            "주요 키워드를 파악한 뒤 가장 적합한 태그 5~6개를 추천하세요.\n"
+            "기존 태그 풀에 맞는 것이 있으면 우선 사용하고, "
+            "없으면 간결한 한국어 신규 태그를 만드세요.\n"
+            "반드시 JSON 배열만 출력하세요: [\"태그1\", \"태그2\", ...]"
+        )
+
+        user_msg = (
+            f"파일명: {filename}\n\n"
+            f"기존 태그 풀: [{pool_str}]\n\n"
+            f"자막 내용:\n{subtitle_text[:2500]}\n\n"
+            "위 자막 내용을 분석하여 이 영상에 가장 적합한 태그 5~6개를 "
+            "JSON 배열로만 출력하세요."
+        )
+
+        try:
+            if on_chunk:
+                raw, _, _ = self._chat_tracked(
+                    [{"role": "system", "content": sys_msg},
+                     {"role": "user",   "content": user_msg}],
+                    max_tokens=512,
+                    on_chunk=on_chunk,
+                )
+            else:
+                raw = self._chat(
+                    [{"role": "system", "content": sys_msg},
+                     {"role": "user",   "content": user_msg}],
+                    max_tokens=512,
+                )
+
+            raw = raw.strip()
+            if '```' in raw:
+                parts = raw.split('```')
+                raw = parts[1].lstrip('json').strip() if len(parts) > 1 else raw
+            raw = raw.strip()
+
+            m = __import__('re').search(r'\[.*?\]', raw, __import__('re').DOTALL)
+            if m:
+                tags = json.loads(m.group())
+            else:
+                tags = json.loads(raw)
+
+            return [t.strip() for t in tags if isinstance(t, str) and t.strip()][:6]
+        except Exception:
+            return []

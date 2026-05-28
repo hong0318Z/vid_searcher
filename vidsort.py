@@ -4061,6 +4061,97 @@ class VidSort(tk.Tk):
 
         threading.Thread(target=_load_files, daemon=True).start()
 
+    def _subtitle_tag_single(self, path):
+        """단일 영상 자막 기반 AI 태그 추천 (우클릭 메뉴용)."""
+        sub_path = self._find_subtitle_file(path)
+        if not sub_path:
+            messagebox.showinfo('자막 없음',
+                                f'자막 파일을 찾을 수 없습니다.\n'
+                                f'(.srt/.ass/.vtt 등을 같은 폴더에 두세요.)')
+            return
+
+        llm = self._get_llm_client()
+        if not llm:
+            return
+
+        fname = Path(path).name
+        BG = '#0d0d14'; BG2 = '#13131f'; FG = '#dcdcf0'
+
+        win = tk.Toplevel(self)
+        win.title(f'📝 자막 태그 추천')
+        win.geometry('420x320')
+        win.configure(bg=BG)
+        win.transient(self); win.grab_set()
+        win.resizable(False, False)
+
+        tk.Label(win, text=fname[:48], bg=BG, fg='#7c6ff7',
+                 font=('Consolas', 9, 'bold')).pack(pady=(12, 2), padx=14, anchor='w')
+        tk.Label(win, text=f'자막: {sub_path.name}', bg=BG, fg='#555',
+                 font=('Consolas', 8)).pack(padx=14, anchor='w')
+
+        lbl_status = tk.Label(win, text='분석 중…', bg=BG, fg='#7c6ff7',
+                              font=('Consolas', 9))
+        lbl_status.pack(pady=8)
+
+        # 태그 체크박스 영역
+        frm_tags = tk.Frame(win, bg=BG2, bd=0)
+        frm_tags.pack(fill='x', padx=14, pady=4)
+
+        tag_vars = {}  # tag → BooleanVar
+
+        # 버튼
+        frm_btn = tk.Frame(win, bg=BG)
+        frm_btn.pack(fill='x', padx=14, pady=10, side='bottom')
+        btn_apply = ttk.Button(frm_btn, text='✅ 적용', state='disabled')
+        btn_close = ttk.Button(frm_btn, text='닫기', command=win.destroy)
+        btn_apply.pack(side='left', padx=(0, 6))
+        btn_close.pack(side='left')
+
+        def _apply():
+            chosen = [t for t, v in tag_vars.items() if v.get()]
+            if chosen:
+                for t in chosen:
+                    self.db.add_tag(path, t)
+                self._reload_sidebar()
+                self._reload()
+            win.destroy()
+
+        btn_apply.config(command=_apply)
+
+        def _worker():
+            try:
+                sub_text = self._parse_subtitle_text(sub_path)
+                if not sub_text.strip():
+                    win.after(0, lambda: lbl_status.config(
+                        text='자막 내용이 비어 있습니다.', fg='#f55'))
+                    return
+                tag_pool = self.db.all_tags()
+                tags = llm.recommend_tags_from_subtitle(sub_text, fname, tag_pool)
+
+                def _show(tags=tags):
+                    lbl_status.config(
+                        text=f'추천 태그 {len(tags)}개  (적용할 태그를 선택하세요)',
+                        fg='#aaa')
+                    for w in frm_tags.winfo_children():
+                        w.destroy()
+                    for tag in tags:
+                        var = tk.BooleanVar(value=True)
+                        tag_vars[tag] = var
+                        tk.Checkbutton(
+                            frm_tags, text=tag, variable=var,
+                            bg=BG2, fg='#7acfff', selectcolor='#1a1a28',
+                            activebackground=BG2, font=('Consolas', 10),
+                            cursor='hand2'
+                        ).pack(anchor='w', padx=10, pady=2)
+                    btn_apply.config(state='normal')
+
+                win.after(0, _show)
+            except Exception as ex:
+                err = str(ex)[:80]
+                win.after(0, lambda: lbl_status.config(text=f'오류: {err}', fg='#f55'))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     #  🎯 AI 영상 추천
     # ─────────────────────────────────────────────────────
     def _ai_recommend_dlg(self):
@@ -5073,6 +5164,7 @@ class VidSort(tk.Tk):
         m.add_command(label='🏷  태그 편집',        command=lambda:self._tag_dlg(paths))
         m.add_command(label='📂  카테고리 지정',    command=lambda:self._cat_assign_dlg(paths))
         m.add_command(label='🤖  AI 자동 태그',    command=lambda:self._llm_auto_tag_paths(paths))
+        m.add_command(label='📝  자막 기반 태그',   command=lambda:self._subtitle_tag_single(path))
         m.add_separator()
         m.add_command(label='✂  잘라내기',          command=lambda:self._clipop('cut',paths))
         m.add_command(label='📋  복사',             command=lambda:self._clipop('copy',paths))

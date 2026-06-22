@@ -1554,7 +1554,7 @@ class VidSort(tk.Tk):
         self._thumb_lbl_p  = None
         self._thumb_lbl_n  = None
 
-        self.search_var.trace_add('write', lambda *_: self.after(350, self._reload))
+        # 검색창은 실시간 적용 대신 Enter/검색 버튼으로만 명확히 트리거 (꼬임 방지)
         # 정렬 기준 변경 시 방향을 해당 기준의 기본값으로 리셋
         _sort_default_asc = {'이름': True, '크기': False, '날짜추가': False, '재생시간': False}
         def _on_sort_change(*_):
@@ -1692,7 +1692,10 @@ class VidSort(tk.Tk):
         tk.Label(sw, text='🔍', bg='#1a1a28', fg='#555').pack(side='left')
         se = ttk.Entry(sw, textvariable=self.search_var, width=48, font=('Consolas', 11))
         se.pack(side='left', ipady=3)
-        se.bind('<Escape>', lambda e: self.search_var.set(''))
+        se.bind('<Escape>', lambda e: (self.search_var.set(''), self._reload()))
+        se.bind('<Return>', lambda e: self._reload())
+        ttk.Button(top, text='검색', style='Acc.TButton',
+                   command=self._reload).pack(side='left', padx=(6, 0), pady=10)
 
         self.lbl_ff = tk.Label(top, text='', bg='#08080f', font=('Consolas', 9))
         self.lbl_ff.pack(side='right', padx=10)

@@ -222,7 +222,8 @@ class DB:
     def __init__(self):
         self.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA cache_size=-65536")   # 64MB
+        self.conn.execute("PRAGMA cache_size=-1048576")   # 1GB (RAM 여유 시 상주 캐시 확대)
+        self.conn.execute("PRAGMA mmap_size=8589934592")  # 8GB mmap
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.lock = threading.Lock()
@@ -962,6 +963,8 @@ class ThumbDB:
         if self._conn is None:
             self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA cache_size=-1048576")   # 1GB
+            self._conn.execute("PRAGMA mmap_size=8589934592")  # 8GB mmap — 썸네일 blob 상주
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS thumbs (hash TEXT PRIMARY KEY, data BLOB)")
@@ -1002,20 +1005,36 @@ def thumb_file(path):
     THUMB_DIR.mkdir(exist_ok=True)
     return THUMB_DIR/(hashlib.md5(path.encode()).hexdigest()+'.jpg')
 
-_IMG_CACHE_MAX = 500
+# RAM이 넉넉한 환경(수십~수백 GB)을 가정 — 썸네일을 디스크/DB에서 다시 읽지 않고
+# 최대한 상주시켜 스크롤/페이지 전환 중 디코드+리사이즈 재작업(렉)을 없앤다.
+_IMG_CACHE_MAX = 20000
 
 def _cache_put(cache: dict, key, value):
-    """PhotoImage 캐시 삽입 + 500개 초과 시 오래된 50개 제거."""
+    """PhotoImage 캐시 삽입 + 한도 초과 시 오래된 5%만 제거(가능한 한 상주 유지)."""
     cache[key] = value
     if len(cache) > _IMG_CACHE_MAX:
-        for k in list(cache.keys())[:50]:
+        evict = max(1, _IMG_CACHE_MAX // 20)
+        for k in list(cache.keys())[:evict]:
             del cache[k]
+
+# 썸네일 원본(JPEG bytes) 캐시 — open_thumb()이 매번 ThumbDB(SQLite)를
+# 다시 조회하지 않도록 한 번 읽은 blob을 메모리에 들고 있는다.
+_RAW_THUMB_CACHE: dict = {}
+_RAW_THUMB_CACHE_MAX = 100000
 
 def open_thumb(path: str):
     """ThumbDB 또는 개별 파일에서 PIL Image 반환. 없으면 None."""
     import io as _io
     h = hashlib.md5(path.encode()).hexdigest()
-    data = _thumb_db.get(h)
+    data = _RAW_THUMB_CACHE.get(h)
+    if data is None:
+        data = _thumb_db.get(h)
+        if data:
+            _RAW_THUMB_CACHE[h] = data
+            if len(_RAW_THUMB_CACHE) > _RAW_THUMB_CACHE_MAX:
+                evict = _RAW_THUMB_CACHE_MAX // 20
+                for k in list(_RAW_THUMB_CACHE.keys())[:evict]:
+                    del _RAW_THUMB_CACHE[k]
     if data:
         try: return Image.open(_io.BytesIO(data))
         except Exception: pass

@@ -913,6 +913,19 @@ class DB:
 
         return list(results.values())
 
+    def get_shorts_random(self, tag: str = None, limit: int = 50) -> list:
+        """쇼츠 모드용: 세로 영상(height > width, thumb_ok=1) 무작위 목록."""
+        wh = ["width > 0", "height > width", "thumb_ok = 1"]
+        pa = []
+        if tag:
+            wh.append("path IN (SELECT path FROM tags WHERE tag=?)")
+            pa.append(tag)
+        where = "WHERE " + " AND ".join(wh)
+        rows = self.conn.execute(
+            f"SELECT * FROM files {where} ORDER BY RANDOM() LIMIT ?",
+            pa + [limit]).fetchall()
+        return self._dicts(rows)
+
     def get_all_for_thumbs(self, folder=None):
         if folder:
             rows = self.conn.execute(
@@ -1857,6 +1870,8 @@ class VidSort(tk.Tk):
 
         ttk.Button(qa, text='👯 중복 파일 찾기', style='Acc.TButton',
                    command=self._find_duplicates_dlg).pack(fill='x', pady=(1, 0))
+        ttk.Button(qa, text='📱 쇼츠 모드', style='Acc.TButton',
+                   command=self._shorts_dlg).pack(fill='x', pady=(1, 0))
 
         # ── 🎯 AI 영상 추천 ───────────────────────
         ttk.Button(SB, text='🎯  AI 영상 추천', style='Acc.TButton',
@@ -5905,6 +5920,154 @@ class VidSort(tk.Tk):
         # ── 초기 로드 ────────────────────────────
         _load(path)
         win.after(150, lambda: _play(path))   # 창 그려진 후 재생 시작
+
+    def _shorts_dlg(self, tag=None):
+        """쇼츠 모드: 세로 영상 무작위 풀스크린 재생 (VLC 인라인, 웹 갤러리 미경유)."""
+        if not HAS_VLC:
+            messagebox.showerror('오류', '쇼츠 모드는 python-vlc가 필요합니다.')
+            return
+
+        BATCH = 20
+        _queue   = self.db.get_shorts_random(tag=tag, limit=BATCH)
+        if not _queue:
+            messagebox.showinfo('알림', '세로 영상(썸네일 생성됨)이 없습니다.')
+            return
+
+        _idx     = [0]
+        _mp      = [None]
+        _inst    = [None]
+        _muted   = [False]
+        _history = []   # 이전 곡으로 돌아가기용 인덱스 스택
+
+        win = tk.Toplevel(self)
+        win.title(f'쇼츠 모드' + (f' — #{tag}' if tag else ''))
+        win.configure(bg='#000000')
+        win.geometry('480x854')
+        win.attributes('-topmost', False)
+
+        player_frame = tk.Frame(win, bg='#000000')
+        player_frame.pack(fill='both', expand=True)
+
+        overlay = tk.Frame(win, bg='#000000')
+        overlay.place(relx=0, rely=1.0, anchor='sw', relwidth=1.0)
+        title_lbl = tk.Label(overlay, text='', bg='#000000', fg='#fff',
+                              font=('Consolas', 11, 'bold'), anchor='w',
+                              wraplength=440, justify='left')
+        title_lbl.pack(fill='x', padx=10, pady=(4, 0))
+        sub_lbl = tk.Label(overlay, text='', bg='#000000', fg='#999',
+                            font=('Consolas', 9), anchor='w')
+        sub_lbl.pack(fill='x', padx=10, pady=(0, 8))
+
+        hint_lbl = tk.Label(win, text='↑↓ 이동 · 스페이스 일시정지 · 클릭 음소거 · Esc 종료',
+                             bg='#000000', fg='#444', font=('Consolas', 8))
+        hint_lbl.place(relx=0.5, rely=0.0, anchor='n')
+
+        def _kill():
+            if _mp[0]:
+                try:
+                    _mp[0].stop()
+                    _mp[0].release()
+                except Exception:
+                    pass
+                _mp[0] = None
+            if _inst[0]:
+                try:
+                    _inst[0].release()
+                except Exception:
+                    pass
+                _inst[0] = None
+
+        def _on_end(event):
+            mp = _mp[0]
+            if mp:
+                mp.set_time(0)
+                mp.play()
+
+        def _play_current():
+            v = _queue[_idx[0]]
+            p = v['path']
+            _kill()
+            for w in player_frame.winfo_children():
+                w.destroy()
+            try:
+                if sys.platform == 'win32':
+                    uri = 'file:///' + p.replace('\\', '/').lstrip('/')
+                else:
+                    uri = p
+                inst = _vlc.Instance('--no-video-title-show', '--quiet', '--no-osd')
+                _inst[0] = inst
+                mp = inst.media_player_new()
+                _mp[0] = mp
+                mp.audio_set_mute(_muted[0])
+                media = inst.media_new(uri)
+                mp.set_media(media)
+                player_frame.update()
+                wid = player_frame.winfo_id()
+                if sys.platform == 'win32':
+                    mp.set_hwnd(wid)
+                elif sys.platform == 'darwin':
+                    mp.set_nsobject(wid)
+                else:
+                    mp.set_xwindow(wid)
+                ev = mp.event_manager()
+                ev.event_attach(_vlc.EventType.MediaPlayerEndReached, _on_end)
+                mp.play()
+            except Exception as e:
+                tk.Label(player_frame, text=f'⚠ 재생 오류:\n{e}',
+                         bg='#000', fg='#ff6666', font=('Consolas', 9),
+                         justify='center', wraplength=420
+                         ).place(relx=0.5, rely=0.5, anchor='center')
+
+            title_lbl.config(text=v.get('alias') or v.get('name') or '')
+            dur = v.get('duration') or 0
+            sub_lbl.config(text=fmt_dur(dur) if dur else '')
+            win.title(f'쇼츠 모드 ({_idx[0]+1}/{len(_queue)})' + (f' — #{tag}' if tag else ''))
+
+        def _maybe_extend():
+            if _idx[0] >= len(_queue) - 5:
+                _queue.extend(self.db.get_shorts_random(tag=tag, limit=BATCH))
+
+        def _next(_e=None):
+            if _idx[0] < len(_queue):
+                _history.append(_idx[0])
+            _idx[0] += 1
+            _maybe_extend()
+            if _idx[0] >= len(_queue):
+                _idx[0] = len(_queue) - 1
+                return
+            _play_current()
+
+        def _prev(_e=None):
+            if _history:
+                _idx[0] = _history.pop()
+                _play_current()
+
+        def _toggle_pause(_e=None):
+            mp = _mp[0]
+            if mp:
+                mp.pause()
+
+        def _toggle_mute(_e=None):
+            _muted[0] = not _muted[0]
+            mp = _mp[0]
+            if mp:
+                mp.audio_set_mute(_muted[0])
+
+        def _close():
+            _kill()
+            win.destroy()
+
+        win.bind('<Down>',    _next)
+        win.bind('<Up>',      _prev)
+        win.bind('<space>',   _toggle_pause)
+        win.bind('<Escape>',  lambda e: _close())
+        win.bind('<Button-1>', _toggle_mute)
+        win.bind('<MouseWheel>',
+                 lambda e: _next() if e.delta < 0 else _prev())
+        win.protocol('WM_DELETE_WINDOW', _close)
+
+        win.after(100, _play_current)
+        win.focus_force()
 
     # ── FILE OPS ────────────────────────────────
     def _open(self,path):

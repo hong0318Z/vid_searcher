@@ -518,6 +518,20 @@ a{color:inherit;text-decoration:none}
   font-size:13px;z-index:2000;opacity:0;transition:opacity .28s;
   pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.5)}
 #save-toast.show{opacity:1}
+/* 제목 링크에 밑줄이 생기지 않도록 방지 */
+.vid-card .vc-title {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; margin-bottom: 8px; color: #fff; min-height: 36px;
+  font-size: 13px; font-weight: 600; line-height: 1.4; text-decoration: none;
+}
+.vid-card .vc-title:hover {
+  text-decoration: underline; /* 제목 호버 시에만 밑줄 깔끔하게 */
+}
+
+/* 썸네일 영역 전체가 링크 블록으로 작동하도록 수정 */
+.vid-card .vc-thumb {
+  display: block; position: relative; aspect-ratio: 16/9; background: #000; overflow: hidden; flex-shrink: 0;
+}
 </style>
 </head>
 <body>
@@ -1293,23 +1307,29 @@ def _render(template, **ctx):
         desc  = v.get('description', '') or ''
         desc_html = (f'<div class="vc-desc">{escape(desc)}</div>' if desc else '')
         title = escape(v.get("alias") or v["name"])
+        
         # 프리뷰 클립 존재 여부 확인
         preview_dir = Path(_cfg['thumb_dir']).parent / '.previews'
         has_preview = (preview_dir / (v['id'] + '.mp4')).exists()
         preview_attr = f' data-preview="/preview/{v["id"]}"' if has_preview else ''
         cats_row = f'<div class="vc-cats">{cats_html}</div>' if cats_html else ''
+        
+        # 바깥쪽을 <div>로 바꾸고, 썸네일과 제목에만 각각 링크를 분리하여 제공 (중첩 방지)
         return Markup(f'''
-        <a href="/video/{v["id"]}" class="vid-card">
-          <div class="vc-thumb"{preview_attr}>{thumb}{dur}
+        <div class="vid-card">
+          <a href="/video/{v["id"]}" class="vc-thumb"{preview_attr}>
+            {thumb}
+            {dur}
             <div class="vc-play"><div class="vc-play-ico">▶</div></div>
-          </div>
+          </a>
           <div class="vc-info">
-            <div class="vc-title">{title}</div>
+            <a href="/video/{v["id"]}" class="vc-title">{title}</a>
             {desc_html}
             {cats_row}
             <div class="vc-tags">{tags_html}</div>
           </div>
-        </a>''')
+        </div>''')
+    
 
     def _pager(page, pages, base, **kw):
         if pages <= 1: return ''

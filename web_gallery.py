@@ -324,11 +324,15 @@ a{color:inherit;text-decoration:none}
 .vid-grid{display:grid;
   grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
   gap:16px;margin-bottom:36px}
+
+/* [수정] 카드가 늘어난 컨텐츠에 맞춰 유연하게 커지도록 flex 구조로 변경 */
 .vid-card{background:var(--card);border-radius:6px;overflow:hidden;
-  cursor:pointer;transition:transform .18s,box-shadow .18s}
+  cursor:pointer;transition:transform .18s,box-shadow .18s;
+  display:flex; flex-direction:column; height:100%;}
+
 .vid-card:hover{transform:translateY(-3px);
   box-shadow:0 6px 24px rgba(0,0,0,.6)}
-.vid-card .vc-thumb{position:relative;aspect-ratio:16/9;background:#000;overflow:hidden}
+.vid-card .vc-thumb{position:relative;aspect-ratio:16/9;background:#000;overflow:hidden;flex-shrink:0}
 .vid-card .vc-thumb img{width:100%;height:100%;object-fit:cover;
   transition:transform .3s,opacity .25s}
 .vid-card:hover .vc-thumb img{transform:scale(1.05)}
@@ -349,20 +353,32 @@ a{color:inherit;text-decoration:none}
 .vc-play-ico{width:52px;height:52px;border-radius:50%;
   background:rgba(255,144,0,.9);display:flex;align-items:center;
   justify-content:center;font-size:20px}
-.vid-card .vc-info{padding:10px 10px 12px}
+
+/* [수정] 패딩을 확보하고 자식들을 세로로 정렬하여 유연하게 늘어나도록 설정 */
+.vid-card .vc-info{padding:12px; display:flex; flex-direction:column; flex:1;}
+
+/* [수정] 제목이 차지하는 최소/최대 높이를 안정적으로 잡고 말줄임 처리 */
 .vid-card .vc-title{font-size:13px;font-weight:600;line-height:1.4;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
-  overflow:hidden;margin-bottom:6px;color:#fff}
-.vid-card .vc-cats{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:3px}
+  overflow:hidden;margin-bottom:8px;color:#fff;min-height:36px}
+
+/* [수정] 카테고리가 여러 줄로 넘어가도 깔끔하게 줄바꿈 간격 유지 */
+.vid-card .vc-cats{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+
 .vc-cat{background:#0d2a15;color:#4dcc78;font-size:10px;
   padding:2px 7px;border-radius:3px;cursor:pointer;transition:.15s;
-  border:1px solid #1a4a28;text-decoration:none}
+  border:1px solid #1a4a28;text-decoration:none;white-space:nowrap}
 .vc-cat:hover{background:#1a4a28;color:#6aff9a}
-.vid-card .vc-tags{display:flex;flex-wrap:wrap;gap:4px}
+
+/* [수정] 태그 영역을 항상 카드의 맨 밑바닥으로 밀어내고(margin-top:auto) 줄바꿈 대응 */
+.vid-card .vc-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:auto}
+
 .vc-tag{background:#2a2a2a;color:var(--acc);font-size:10px;
-  padding:2px 7px;border-radius:3px;cursor:pointer;transition:.15s}
+  padding:2px 7px;border-radius:3px;cursor:pointer;transition:.15s;white-space:nowrap}
 .vc-tag:hover{background:var(--acc);color:#000}
-.vc-desc{font-size:11px;color:#777;margin-top:5px;line-height:1.4;
+
+/* [수정] 설명글이 있을 때 레이아웃이 꼬이지 않도록 마진 및 줄바꿈 처리 */
+.vc-desc{font-size:11px;color:#777;margin-bottom:8px;line-height:1.4;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 /* 태그 그룹 섹션 */
 .tag-group{margin-bottom:40px}

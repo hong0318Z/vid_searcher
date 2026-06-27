@@ -89,7 +89,13 @@ class LocalLLMClient:
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                raise RuntimeError(f"{e} — 응답 본문: {resp.text[:500]}") from e
+                total_chars = sum(len(m.get('content', '')) for m in messages)
+                preview = (messages[-1].get('content', '') if messages else '')[:300]
+                raise RuntimeError(
+                    f"{e} — 응답 본문: {resp.text[:500]} "
+                    f"— 요청 정보: model={self.chat_model!r} max_tokens={max_tokens} "
+                    f"messages={len(messages)}개/{total_chars}자 마지막메시지미리보기={preview!r}"
+                ) from e
             data = resp.json()
             return (data.get('choices') or [{}])[0].get('message', {}).get('content', '').strip()
 

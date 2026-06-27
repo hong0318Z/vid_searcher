@@ -304,6 +304,17 @@ class DB:
             "CREATE INDEX IF NOT EXISTS ix_fc_cat  ON file_categories(category)")
         self.conn.commit()
 
+        # ── banned_files 테이블 (트래쉬/깨진 영상 — 재스캔 시 자동 제외) ──
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned_files(
+                path TEXT PRIMARY KEY,
+                name TEXT DEFAULT '',
+                banned_at REAL DEFAULT 0,
+                reason TEXT DEFAULT ''
+            )
+        """)
+        self.conn.commit()
+
         # ext 인덱스 (컬럼 확보 후 생성)
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS ix_ext ON files(ext)")
@@ -632,6 +643,35 @@ class DB:
             self.conn.execute("DELETE FROM files WHERE path=?",(path,))
             self.conn.execute("DELETE FROM tags  WHERE path=?",(path,))
             self.conn.commit()
+
+    # ── 차단 목록 (트래쉬/깨진 영상) ──────────────────
+    def ban_path(self, path, name='', reason=''):
+        """파일을 DB에서 제거하고 차단 목록에 등록 — 다음 스캔부터 자동 제외."""
+        with self.lock:
+            self.conn.execute("DELETE FROM files WHERE path=?", (path,))
+            self.conn.execute("DELETE FROM tags  WHERE path=?", (path,))
+            self.conn.execute("""
+                INSERT INTO banned_files(path,name,banned_at,reason)
+                VALUES(?,?,?,?)
+                ON CONFLICT(path) DO UPDATE SET
+                  name=excluded.name, banned_at=excluded.banned_at, reason=excluded.reason
+            """, (path, name, time.time(), reason))
+            self.conn.commit()
+
+    def unban_path(self, path):
+        with self.lock:
+            self.conn.execute("DELETE FROM banned_files WHERE path=?", (path,))
+            self.conn.commit()
+
+    def get_banned_paths(self):
+        """스캔 시 빠른 조회용 — set of path."""
+        return {r[0] for r in self.conn.execute("SELECT path FROM banned_files").fetchall()}
+
+    def get_banned_list(self):
+        rows = self.conn.execute(
+            "SELECT path,name,banned_at,reason FROM banned_files "
+            "ORDER BY banned_at DESC").fetchall()
+        return [{'path':r[0],'name':r[1],'banned_at':r[2],'reason':r[3]} for r in rows]
 
     def exists_folder(self,folder):
         return bool(self.conn.execute(
@@ -1744,6 +1784,7 @@ class VidSort(tk.Tk):
         ttk.Separator(tb, orient='vertical').pack(side='right', fill='y', padx=6, pady=4)
         ttk.Button(tb, text='📥 다운로더', command=self._open_downloader).pack(side='right', padx=4)
         ttk.Button(tb, text='🌐 갤러리', command=self._gallery_view).pack(side='right', padx=4)
+        ttk.Button(tb, text='🚫 차단 목록', command=self._ban_list_dlg).pack(side='right', padx=4)
 
         # ── 메인 영역 (PanedWindow로 사이드바 크기 조절 가능) ────
         main = tk.PanedWindow(self, orient='horizontal', bg='#0d0d14',
@@ -4996,10 +5037,12 @@ class VidSort(tk.Tk):
         db_rows  = self.db.get_all_for_thumbs(folder=folder)
         db_paths = {v['path'] for v in db_rows}
         existing = db_paths if incremental else set()
-        print(f"[scan_w] DB에 기존 {len(db_paths)}개", flush=True)
+        banned   = self.db.get_banned_paths()
+        print(f"[scan_w] DB에 기존 {len(db_paths)}개  차단 {len(banned)}개", flush=True)
 
         found = set()
         count = 0
+        skipped_banned = 0
         lp_folder = longpath(folder)
         for root,dirs,files in os.walk(lp_folder):
             if self._scan_stop.is_set(): return
@@ -5010,6 +5053,9 @@ class VidSort(tk.Tk):
                 fpath = str(Path(root)/fname)
                 # longpath 접두어만 제거, 슬래시는 변환 안 함
                 clean = fpath.replace('\\\\?\\', '')
+                if clean in banned:
+                    skipped_banned += 1
+                    continue
                 found.add(clean)
                 if clean in existing: continue
                 try:
@@ -5030,7 +5076,9 @@ class VidSort(tk.Tk):
             self.db.remove(p)
 
         self.after(0,lambda:(
-            self._set_status(f'스캔 완료 — 추가:{count}개  삭제:{len(deleted)}개'),
+            self._set_status(
+                f'스캔 완료 — 추가:{count}개  삭제:{len(deleted)}개'
+                + (f'  차단제외:{skipped_banned}개' if skipped_banned else '')),
             self._reload_sidebar(),
             self._reload(),
             self._start_thumbs(folder)
@@ -5214,6 +5262,7 @@ class VidSort(tk.Tk):
         m.add_command(label='🚫  웹 자동태그 제외',
                       command=lambda: self._jav_exclude(paths))
         m.add_command(label='🗑  DB에서 제거',      command=lambda:self._rm_db(paths))
+        m.add_command(label='🚫  차단 처리 (재스캔 제외)', command=lambda:self._ban_files(paths))
         m.add_command(label='❌  파일+DB 삭제',    command=lambda:self._delete_files(paths))
         m.tk_popup(e.x_root,e.y_root)
 
@@ -6221,6 +6270,52 @@ class VidSort(tk.Tk):
             f'{len(paths)}개를 DB에서 제거합니다.\n실제 파일은 유지됩니다.'): return
         for p in paths: self.db.remove(p)
         self._reload_sidebar(); self._reload()
+
+    def _ban_files(self, paths):
+        """트래쉬/깨진 영상 처리 — DB에서 제거 + 차단 목록 등록 (재스캔 시 자동 제외)"""
+        if not messagebox.askyesno('차단 처리',
+            f'{len(paths)}개를 DB에서 제거하고 차단 목록에 등록합니다.\n'
+            '실제 파일은 유지되지만, 같은 경로의 파일은 다음 스캔부터 자동으로 제외됩니다.'):
+            return
+        for p in paths:
+            name = Path(p).name
+            self.db.ban_path(p, name=name, reason='사용자 차단')
+        self._reload_sidebar(); self._reload()
+        messagebox.showinfo('차단 처리', f'{len(paths)}개를 차단 목록에 등록했습니다.')
+
+    def _ban_list_dlg(self):
+        """차단 목록 보기 / 해제 다이얼로그"""
+        win = tk.Toplevel(self); win.title('🚫 차단 목록')
+        win.configure(bg='#0d0d14'); win.geometry('640x420')
+
+        top = tk.Frame(win, bg='#0d0d14'); top.pack(fill='x', padx=10, pady=(10,4))
+        tk.Label(top, text='차단된 파일은 재스캔 시 자동으로 제외됩니다.',
+                 bg='#0d0d14', fg='#9a9ac0', font=('Consolas',9)).pack(side='left')
+
+        lb_frame = tk.Frame(win, bg='#0d0d14'); lb_frame.pack(fill='both', expand=True, padx=10, pady=4)
+        sb = tk.Scrollbar(lb_frame); sb.pack(side='right', fill='y')
+        lb = tk.Listbox(lb_frame, bg='#1a1a28', fg='#dcdcf0', selectmode='extended',
+                         font=('Consolas',9), yscrollcommand=sb.set)
+        lb.pack(side='left', fill='both', expand=True)
+        sb.config(command=lb.yview)
+
+        items = self.db.get_banned_list()
+        for it in items:
+            lb.insert('end', f"{it['name']}   ({it['path']})")
+
+        def _unban_sel():
+            sel = list(lb.curselection())
+            if not sel: return
+            for i in reversed(sel):
+                self.db.unban_path(items[i]['path'])
+                lb.delete(i); items.pop(i)
+            self._set_status('차단 해제됨 — 다음 스캔부터 다시 추가됩니다.')
+
+        btns = tk.Frame(win, bg='#0d0d14'); btns.pack(fill='x', padx=10, pady=(4,10))
+        tk.Button(btns, text='✅ 선택 항목 차단 해제', command=_unban_sel,
+                  bg='#7c6ff7', fg='#fff', relief='flat').pack(side='left')
+        tk.Button(btns, text='닫기', command=win.destroy,
+                  bg='#2a2a3a', fg='#dcdcf0', relief='flat').pack(side='right')
 
     def _delete_files(self, paths):
         if not messagebox.askyesno('파일 삭제',

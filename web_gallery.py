@@ -1601,14 +1601,17 @@ def stream_video(vid_id):
         length = b2 - b1 + 1
 
         def gen(start=b1, end=b2, fp=lp):
-            with open(fp, 'rb') as f:
-                f.seek(start)
-                rem = end - start + 1
-                while rem > 0:
-                    chunk = f.read(min(65536, rem))
-                    if not chunk: break
-                    yield chunk
-                    rem -= len(chunk)
+            try:
+                with open(fp, 'rb') as f:
+                    f.seek(start)
+                    rem = end - start + 1
+                    while rem > 0:
+                        chunk = f.read(min(1048576, rem))
+                        if not chunk: break
+                        yield chunk
+                        rem -= len(chunk)
+            except (OSError, IOError) as e:
+                print(f'[stream] read error {fp}: {e}')
 
         rv = Response(gen(), 206, mimetype=mime, direct_passthrough=True)
         rv.headers['Content-Range']  = f'bytes {b1}-{b2}/{size}'
@@ -1618,11 +1621,14 @@ def stream_video(vid_id):
 
     # 전체 파일 스트리밍
     def full_gen(fp=lp):
-        with open(fp, 'rb') as f:
-            while True:
-                chunk = f.read(65536)
-                if not chunk: break
-                yield chunk
+        try:
+            with open(fp, 'rb') as f:
+                while True:
+                    chunk = f.read(1048576)
+                    if not chunk: break
+                    yield chunk
+        except (OSError, IOError) as e:
+            print(f'[stream] read error {fp}: {e}')
 
     rv = Response(full_gen(), 200, mimetype=mime, direct_passthrough=True)
     rv.headers['Accept-Ranges']  = 'bytes'
@@ -1701,8 +1707,13 @@ def start(db_path, thumb_dir, port=8765):
         import logging
         log = logging.getLogger('werkzeug')
         log.setLevel(logging.ERROR)
-        app.run(host='127.0.0.1', port=port, threaded=True,
-                debug=False, use_reloader=False)
+        try:
+            from waitress import serve
+            serve(app, host='127.0.0.1', port=port, threads=16,
+                  channel_timeout=120)
+        except ImportError:
+            app.run(host='127.0.0.1', port=port, threaded=True,
+                    debug=False, use_reloader=False)
 
     _srv = threading.Thread(target=_run, daemon=True, name='vidsort-web')
     _srv.start()

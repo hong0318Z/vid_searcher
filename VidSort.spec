@@ -20,6 +20,7 @@ a = Analysis(
         'werkzeug.routing',
         'werkzeug.exceptions',
         'werkzeug.middleware.dispatcher',
+        'waitress',
         'jinja2',
         'jinja2.ext',
         'markupsafe',

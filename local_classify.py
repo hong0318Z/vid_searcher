@@ -122,6 +122,22 @@ class ClassifyWindow(tk.Toplevel):
 
         ttk.Separator(parent).pack(fill='x', padx=10, pady=10)
 
+        tk.Label(parent, text='🔍 키워드 검색 분류 (이름/폴더에 포함된 파일 찾기)',
+                 bg='#13131f', fg='#aaa').pack(anchor='w', padx=10)
+        kw_row = tk.Frame(parent, bg='#13131f')
+        kw_row.pack(fill='x', padx=10, pady=2)
+        self.keyword_var = tk.StringVar()
+        tk.Entry(kw_row, textvariable=self.keyword_var).pack(side='left', fill='x', expand=True)
+        ttk.Button(kw_row, text='검색', width=6, command=self._search_keyword).pack(side='left', padx=(4, 0))
+
+        self.keyword_count_lbl = tk.Label(parent, text='', bg='#13131f', fg='#888')
+        self.keyword_count_lbl.pack(anchor='w', padx=10)
+
+        ttk.Button(parent, text='▶ 키워드 분류 시작', style='Acc.TButton',
+                   command=self._start_classify_keyword).pack(fill='x', padx=10, pady=(4, 4))
+
+        ttk.Separator(parent).pack(fill='x', padx=10, pady=10)
+
         tk.Label(parent, text='대상 폴더', bg='#13131f', fg='#aaa').pack(anchor='w', padx=10)
         self.folder_var = tk.StringVar()
         self.folder_cb = ttk.Combobox(parent, textvariable=self.folder_var,
@@ -236,6 +252,94 @@ class ClassifyWindow(tk.Toplevel):
             self.after(0, apply)
         threading.Thread(target=worker, daemon=True).start()
 
+    # ── 키워드 검색 분류 ─────────────────────────
+    def _search_keyword(self):
+        keyword = self.keyword_var.get().strip()
+        if not keyword:
+            messagebox.showwarning('알림', '검색할 키워드를 입력하세요.')
+            return
+        items = self.db.search_files_by_keyword(keyword, limit=2000)
+        self._keyword_items = items
+        self.keyword_count_lbl.config(text=f'{len(items)}개 파일 발견 (이름/폴더에 "{keyword}" 포함)')
+
+    def _start_classify_keyword(self):
+        keyword = self.keyword_var.get().strip()
+        if not keyword:
+            messagebox.showwarning('알림', '검색할 키워드를 입력하세요.')
+            return
+        items = getattr(self, '_keyword_items', None)
+        if items is None or self.keyword_count_lbl.cget('text') == '':
+            items = self.db.search_files_by_keyword(keyword, limit=2000)
+            self._keyword_items = items
+        if not items:
+            messagebox.showinfo('알림', '검색 결과가 없습니다.')
+            return
+        self._save_settings()
+        self.client = self._make_client()
+        self._clear_grid()
+        self.status_lbl.config(text=f'키워드 "{keyword}" — {len(items)}개 분류 준비 중...')
+
+        custom_prompt = self.prompt_txt.get('1.0', 'end').strip()
+        threading.Thread(target=self._classify_keyword_worker,
+                          args=(items, keyword, custom_prompt), daemon=True).start()
+
+    def _classify_keyword_worker(self, items, keyword, custom_prompt):
+        # 키워드 검색은 여러 폴더에 흩어진 파일을 한 번에 다루므로 항목별 자체 folder 기준 상대경로 사용
+        names = [self._rel_path(it['path'], it.get('folder', '')) for it in items]
+        try:
+            vecs = self.client.embed_texts(names)
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror('임베딩 실패', str(e)))
+            return
+        if len(vecs) != len(items):
+            vecs = [[] for _ in items]
+
+        path_vec = list(zip([it['path'] for it in items], vecs))
+        chunks = cluster_by_similarity(path_vec, max_group=CLASSIFY_BATCH_MAX, threshold=0.55)
+        by_path = {it['path']: it for it in items}
+
+        forced_prompt = (
+            f"모든 항목의 category는 예외 없이 반드시 \"{keyword}\" 로 고정하세요.\n"
+            f"tags는 각 항목의 제목(파일명)에 어울리는 구체적인 소분류를 1~3개 제안하세요.\n"
+            + custom_prompt
+        )
+
+        for ci, chunk_paths in enumerate(chunks):
+            self.after(0, lambda ci=ci, n=len(chunks): self.status_lbl.config(
+                text=f'키워드 "{keyword}" 분류 중... ({ci+1}/{n} 그룹)'))
+            chunk_items = [by_path[p] for p in chunk_paths]
+            self._classify_chunk_keyword(chunk_items, keyword, forced_prompt)
+
+        self.after(0, lambda: self.status_lbl.config(text='키워드 분류 완료.'))
+
+    def _classify_chunk_keyword(self, chunk_items, keyword, forced_prompt):
+        filenames = [self._rel_path(it['path'], it.get('folder', '')) for it in chunk_items]
+        rejection_notes = {}
+        for it in chunk_items:
+            hist = self.db.get_rejections(it['path'])
+            if hist:
+                rejection_notes[self._rel_path(it['path'], it.get('folder', ''))] = [
+                    {'suggested': h['suggested'], 'comment': h['comment']} for h in hist]
+
+        folder_ctx = f'키워드 검색 결과: "{keyword}" 포함 파일들 (여러 폴더에 분산되어 있을 수 있음)'
+        try:
+            results = self.client.classify_videos(
+                filenames, folder_ctx=folder_ctx,
+                rejection_notes=rejection_notes, custom_prompt=forced_prompt,
+                on_debug=self._on_llm_debug)
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror('분류 실패', str(e)))
+            return
+
+        raw_tags = sorted({t for r in results for t in r.get('tags', [])})
+        final_map = self._normalize_raw_tags(raw_tags)
+
+        for it, res in zip(chunk_items, results):
+            final_tags = [final_map.get(t, t) for t in res.get('tags', [])]
+            category = res.get('category', '') or keyword
+            suggestion = {'category': category, 'tags': final_tags}
+            self.after(0, lambda it=it, s=suggestion: self._add_card(it, s, allow_existing_tags=True))
+
     # ── 분류 워크플로우 ──────────────────────────
     def _start_classify(self):
         folder = self.folder_var.get().strip()
@@ -344,10 +448,11 @@ class ClassifyWindow(tk.Toplevel):
             c.frame.destroy()
         self.cards = []
 
-    def _add_card(self, item, suggestion):
+    def _add_card(self, item, suggestion, allow_existing_tags=False):
         card = ClassifyCard(self.inner, item, suggestion, self.thumb_dir, self,
                             thumb_file=self._thumb_file_fn, make_thumb=self._make_thumb_fn,
-                            viewer_dlg=self._viewer_dlg_fn)
+                            viewer_dlg=self._viewer_dlg_fn,
+                            allow_existing_tags=allow_existing_tags)
         card.frame.grid(row=len(self.cards) // 4, column=len(self.cards) % 4,
                          padx=6, pady=6, sticky='n')
         self.cards.append(card)
@@ -357,7 +462,9 @@ class ClassifyWindow(tk.Toplevel):
         existing = self.db.get_file_categories(path)
         cur_tags = {t for t, in self.db.conn.execute(
             "SELECT tag FROM tags WHERE path=?", (path,)).fetchall()}
-        if cur_tags:
+        # 폴더 모드는 조회 시점에 태그 없는 파일만 대상으로 했으므로, 태그가 생겼다면 동시 편집으로 간주해 건너뜀.
+        # 키워드 검색 모드는 애초에 태그 보유 여부와 무관하게 대상으로 삼으므로 이 체크를 건너뛴다.
+        if cur_tags and not card.allow_existing_tags:
             messagebox.showinfo('알림', '이미 태그가 있는 영상입니다 — 메인 화면에서 동시에 편집된 것 같습니다. 건너뜁니다.')
             card.frame.destroy()
             if card in self.cards:
@@ -415,13 +522,15 @@ class ClassifyCard:
     THUMB = 140
 
     def __init__(self, parent, item, suggestion, thumb_dir, win,
-                 thumb_file=None, make_thumb=None, viewer_dlg=None):
+                 thumb_file=None, make_thumb=None, viewer_dlg=None,
+                 allow_existing_tags=False):
         self.item = item
         self.win = win
         self.thumb_dir = thumb_dir
         self._thumb_file_fn = thumb_file
         self._make_thumb_fn = make_thumb
         self._viewer_dlg_fn = viewer_dlg
+        self.allow_existing_tags = allow_existing_tags
         self.frame = tk.Frame(parent, bg='#13131f', bd=1, relief='solid')
 
         self.sel_var = tk.BooleanVar(value=False)

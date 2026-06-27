@@ -11,7 +11,7 @@ import json
 import httpx
 
 DEFAULT_ENDPOINT  = "http://127.0.0.1:8000/v1"
-MAX_OUTPUT_TOKENS  = 8000
+MAX_OUTPUT_TOKENS  = 32768
 CLASSIFY_BATCH_MAX = 25   # 폴더 클러스터당 LLM에 보낼 최대 영상 수
 
 DEFAULT_CLASSIFY_PROMPT = (
@@ -44,8 +44,9 @@ class LocalLLMClient:
         self.chat_model  = chat_model
         self.embed_model = embed_model
         self._headers = {"Content-Type": "application/json"}
-        if api_key:
-            self._headers["Authorization"] = f"Bearer {api_key}"
+        # API 키가 비어 있어도 더미 Bearer 토큰을 보냄 — 일부 로컬 서버(oMLX 등)는
+        # Authorization 헤더 자체가 없으면 401이 아니라 500을 내는 경우가 있음
+        self._headers["Authorization"] = f"Bearer {api_key or 'local'}"
 
     # ── 모델 목록 ────────────────────────────────
     def list_models(self) -> list:
@@ -82,10 +83,13 @@ class LocalLLMClient:
             "max_tokens": max_tokens,
             "stream":     False,
         }
-        with httpx.Client(timeout=httpx.Timeout(connect=15, read=120,
+        with httpx.Client(timeout=httpx.Timeout(connect=15, read=300,
                                                   write=30, pool=10)) as client:
             resp = client.post(url, json=payload, headers=self._headers)
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(f"{e} — 응답 본문: {resp.text[:500]}") from e
             data = resp.json()
             return (data.get('choices') or [{}])[0].get('message', {}).get('content', '').strip()
 
@@ -167,7 +171,7 @@ class LocalLLMClient:
                 }
             if on_debug:
                 on_debug('classify_videos', raw, None)
-        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as e:
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError, RuntimeError) as e:
             if on_debug:
                 on_debug('classify_videos', raw, e)
         return results
@@ -211,7 +215,7 @@ class LocalLLMClient:
                     result[rt] = final
             if on_debug:
                 on_debug('normalize_tags', raw, None)
-        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as e:
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError, RuntimeError) as e:
             if on_debug:
                 on_debug('normalize_tags', raw, e)
         return result

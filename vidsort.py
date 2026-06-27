@@ -1939,6 +1939,11 @@ class VidSort(tk.Tk):
         # ── 📁 폴더 ──────────────────────────────
         _, fold_body = self._make_collapsible(SB, '📁  폴더', True)
 
+        self.folder_filter_var = tk.StringVar()
+        ffe = ttk.Entry(fold_body, textvariable=self.folder_filter_var, font=('Consolas', 9))
+        ffe.pack(fill='x', padx=4, pady=(4, 2))
+        ffe.bind('<KeyRelease>', lambda e: self._populate_folder_list())
+
         self.fl = tk.Listbox(fold_body, bg=BG, fg='#999',
                              selectbackground='#7c6ff7', font=('Consolas', 9),
                              borderwidth=0, highlightthickness=0, activestyle='none',
@@ -2073,21 +2078,42 @@ class VidSort(tk.Tk):
 
         fmt_frame = tk.Frame(fmt_body, bg=BG)
         fmt_frame.pack(fill='x', padx=6, pady=(4, 2))
+        self._fmt_btns = {}
+        _FMT_ON_BG,  _FMT_ON_FG  = '#7c6ff7', '#ffffff'
+        _FMT_OFF_BG, _FMT_OFF_FG = BG,        '#666'
+
+        def _refresh_fmt_btn(ext):
+            btn = self._fmt_btns[ext]
+            on = self._fmt_vars[ext].get()
+            btn.configure(bg=_FMT_ON_BG if on else _FMT_OFF_BG,
+                          fg=_FMT_ON_FG if on else _FMT_OFF_FG)
+
+        def _toggle_fmt(ext):
+            self._fmt_vars[ext].set(not self._fmt_vars[ext].get())
+            _refresh_fmt_btn(ext)
+
         for i, (label, ext) in enumerate(FORMAT_LIST):
             r, c = i // 2, i % 2
-            tk.Checkbutton(fmt_frame, text=label, variable=self._fmt_vars[ext],
-                           bg=BG, fg='#999', selectcolor='#7c6ff7',
-                           activebackground=BG, activeforeground='#dcdcf0',
-                           font=('Consolas', 8), cursor='hand2'
-                           ).grid(row=r, column=c, sticky='w', padx=4, pady=1)
+            btn = tk.Label(fmt_frame, text=label, font=('Consolas', 8), cursor='hand2',
+                          relief='flat', padx=6, pady=2, borderwidth=1)
+            btn.bind('<Button-1>', lambda e, ext=ext: _toggle_fmt(ext))
+            btn.grid(row=r, column=c, sticky='we', padx=2, pady=2)
+            fmt_frame.grid_columnconfigure(c, weight=1)
+            self._fmt_btns[ext] = btn
+            _refresh_fmt_btn(ext)
+
+        def _set_all_fmt(val):
+            for ext, v in self._fmt_vars.items():
+                v.set(val)
+                _refresh_fmt_btn(ext)
 
         bf2 = tk.Frame(fmt_body, bg=BG)
         bf2.pack(fill='x', padx=6, pady=(2, 2))
         ttk.Button(bf2, text='전체 ON',
-                   command=lambda: [v.set(True) for v in self._fmt_vars.values()]
+                   command=lambda: _set_all_fmt(True)
                    ).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(bf2, text='전체 OFF',
-                   command=lambda: [v.set(False) for v in self._fmt_vars.values()]
+                   command=lambda: _set_all_fmt(False)
                    ).pack(side='left', fill='x', expand=True)
         ttk.Button(fmt_body, text='✅  포맷 적용', style='Acc.TButton',
                    command=self._apply_format).pack(fill='x', padx=6, pady=(2, 6))
@@ -2128,11 +2154,8 @@ class VidSort(tk.Tk):
 
     # ── SIDEBAR 이벤트 ──────────────────────────
     def _reload_sidebar(self):
-        folders=self.db.all_folders()
-        self._folder_paths=folders
-        self.fl.delete(0,'end')
-        for f in folders:
-            self.fl.insert('end','  '+(Path(f).name or f))
+        self._all_folders = self.db.all_folders()
+        self._populate_folder_list()
 
         # 카테고리 버튼 패널 갱신
         for w in self._cat_btn_frame.winfo_children():
@@ -2195,6 +2218,17 @@ class VidSort(tk.Tk):
             btn.bind('<Enter>', lambda e,b=btn: b.config(bg='#2a2a3d'))
             btn.bind('<Leave>', lambda e,b=btn: b.config(bg='#1a1a28'))
             _add_scroll(btn)
+
+    def _populate_folder_list(self):
+        """폴더 필터 입력값으로 self.fl을 다시 채움 (self._folder_paths를 표시된 항목과 1:1 정렬)."""
+        kw = self.folder_filter_var.get().strip().lower() if hasattr(self, 'folder_filter_var') else ''
+        folders = self._all_folders
+        if kw:
+            folders = [f for f in folders if kw in f.lower() or kw in (Path(f).name or '').lower()]
+        self._folder_paths = folders
+        self.fl.delete(0, 'end')
+        for f in folders:
+            self.fl.insert('end', '  ' + (Path(f).name or f))
 
     def _sb_folder(self,e):
         sel=self.fl.curselection()
@@ -5579,7 +5613,13 @@ class VidSort(tk.Tk):
 
         # 현재 목록에서 인덱스 찾기 (이전/다음 탐색용)
         _vlist   = list(self._videos)      # 스냅샷
-        _cur     = [next((i for i,v in enumerate(_vlist) if v['path']==path), 0)]
+        _idx = next((i for i, v in enumerate(_vlist) if v['path'] == path), None)
+        if _idx is None:
+            # 메인 그리드에 없는 영상(로컬 분류 등 외부에서 전달된 path) — 단독 1개짜리 목록으로 처리
+            _vlist = [{'path': path}]
+            _cur = [0]
+        else:
+            _cur = [_idx]
         _proc    = [None]   # mpv 프로세스
         _mp      = [None]   # vlc.MediaPlayer
         _inst    = [None]   # vlc.Instance

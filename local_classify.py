@@ -5,7 +5,7 @@ vidsort.py 의 메인 앱(self.db, self._reload)을 공유받아 별도 Toplevel
 같은 vidsort.db / 같은 DB 인스턴스(락 공유)를 사용 — 별도 SQLite 커넥션을 열지 않는다.
 """
 
-import json
+import time
 import threading
 import hashlib
 import tkinter as tk
@@ -22,26 +22,36 @@ CFG_KEYS = ('local_llm_endpoint', 'local_llm_api_key',
             'local_llm_custom_prompt')
 
 
-def open_window(app, db_path, thumb_dir, load_cfg=None, save_cfg=None):
+def open_window(app, db_path, thumb_dir, load_cfg=None, save_cfg=None,
+                 thumb_file=None, make_thumb=None, viewer_dlg=None):
     """app — 메인 VidSort 인스턴스 (app.db, app._reload 재사용)
-    load_cfg/save_cfg — vidsort.py 모듈의 vidsort_cfg.json 읽기/쓰기 함수 (공유)"""
-    win = ClassifyWindow(app, db_path, thumb_dir, load_cfg, save_cfg)
+    load_cfg/save_cfg — vidsort.py 모듈의 vidsort_cfg.json 읽기/쓰기 함수 (공유)
+    thumb_file/make_thumb — vidsort.py 의 썸네일 경로/온디맨드 생성 함수 (공유, 재사용)
+    viewer_dlg — vidsort.py VidSort._viewer_dlg 바운드 메서드 (카드 클릭 시 영상 미리보기)"""
+    win = ClassifyWindow(app, db_path, thumb_dir, load_cfg, save_cfg,
+                         thumb_file, make_thumb, viewer_dlg)
     return win
 
 
 class ClassifyWindow(tk.Toplevel):
     THUMB = 140
 
-    def __init__(self, app, db_path, thumb_dir, load_cfg=None, save_cfg=None):
+    def __init__(self, app, db_path, thumb_dir, load_cfg=None, save_cfg=None,
+                 thumb_file=None, make_thumb=None, viewer_dlg=None):
         super().__init__(app)
         self.app = app
         self.db = app.db          # 메인 앱과 동일한 DB 인스턴스 공유 (락 공유)
         self.thumb_dir = thumb_dir
         self._load_cfg_fn = load_cfg or (lambda: {})
         self._save_cfg_fn = save_cfg or (lambda cfg: None)
+        self._thumb_file_fn = thumb_file
+        self._make_thumb_fn = make_thumb
+        self._viewer_dlg_fn = viewer_dlg
         self.title('🧠 로컬 분류 시스템')
         self.geometry('1280x820')
         self.configure(bg='#0d0d14')
+
+        self._init_style()
 
         self.client = None
         self.cards = []           # CardWidget 리스트 (현재 화면)
@@ -50,6 +60,19 @@ class ClassifyWindow(tk.Toplevel):
         self._build_ui()
         self._load_settings()
         self.protocol('WM_DELETE_WINDOW', self._on_close)
+
+    def _init_style(self):
+        """다크 배경에서도 Combobox 선택값이 보이도록 로컬 스타일 적용."""
+        style = ttk.Style(self)
+        style.configure('Dark.TCombobox',
+                         fieldbackground='#0a0a14', background='#13131f',
+                         foreground='#eee', arrowcolor='#eee',
+                         selectbackground='#0a0a14', selectforeground='#eee')
+        style.map('Dark.TCombobox',
+                  fieldbackground=[('readonly', '#0a0a14')],
+                  foreground=[('readonly', '#eee')],
+                  selectbackground=[('readonly', '#0a0a14')],
+                  selectforeground=[('readonly', '#eee')])
 
     # ── UI 골격 ──────────────────────────────────
     def _build_ui(self):
@@ -86,13 +109,15 @@ class ClassifyWindow(tk.Toplevel):
         tk.Label(parent, text='채팅 모델', bg='#13131f', fg='#aaa').pack(anchor='w', padx=10)
         self.chat_model_var = tk.StringVar()
         self.chat_model_cb = ttk.Combobox(parent, textvariable=self.chat_model_var,
-                                           values=[], state='readonly')
+                                           values=[], state='readonly',
+                                           style='Dark.TCombobox')
         self.chat_model_cb.pack(fill='x', padx=10, pady=2)
 
         tk.Label(parent, text='임베딩 모델', bg='#13131f', fg='#aaa').pack(anchor='w', padx=10)
         self.embed_model_var = tk.StringVar()
         self.embed_model_cb = ttk.Combobox(parent, textvariable=self.embed_model_var,
-                                            values=[], state='readonly')
+                                            values=[], state='readonly',
+                                            style='Dark.TCombobox')
         self.embed_model_cb.pack(fill='x', padx=10, pady=2)
 
         ttk.Separator(parent).pack(fill='x', padx=10, pady=10)
@@ -100,7 +125,8 @@ class ClassifyWindow(tk.Toplevel):
         tk.Label(parent, text='대상 폴더', bg='#13131f', fg='#aaa').pack(anchor='w', padx=10)
         self.folder_var = tk.StringVar()
         self.folder_cb = ttk.Combobox(parent, textvariable=self.folder_var,
-                                       values=self.db.all_folders(), state='readonly')
+                                       values=self.db.all_folders(), state='readonly',
+                                       style='Dark.TCombobox')
         self.folder_cb.pack(fill='x', padx=10, pady=2)
 
         tk.Label(parent, text='커스텀 프롬프트 (지침)', bg='#13131f', fg='#aaa').pack(
@@ -117,6 +143,32 @@ class ClassifyWindow(tk.Toplevel):
         self.status_lbl = tk.Label(parent, text='', bg='#13131f', fg='#7c6ff7',
                                     wraplength=300, justify='left')
         self.status_lbl.pack(anchor='w', padx=10, pady=(10, 4))
+
+        ttk.Separator(parent).pack(fill='x', padx=10, pady=6)
+        tk.Label(parent, text='📋 LLM 응답 로그 (디버그)', bg='#13131f', fg='#aaa').pack(
+            anchor='w', padx=10)
+        log_frame = tk.Frame(parent, bg='#13131f')
+        log_frame.pack(fill='both', expand=True, padx=10, pady=(2, 8))
+        self.log_txt = tk.Text(log_frame, height=10, bg='#0a0a14', fg='#9f9',
+                                insertbackground='#9f9', wrap='word', state='disabled')
+        log_vsb = ttk.Scrollbar(log_frame, orient='vertical', command=self.log_txt.yview)
+        self.log_txt.configure(yscrollcommand=log_vsb.set)
+        self.log_txt.pack(side='left', fill='both', expand=True)
+        log_vsb.pack(side='right', fill='y')
+
+    # ── LLM 디버그 로그 ──────────────────────────
+    def _on_llm_debug(self, stage, raw_text, error):
+        ts = time.strftime('%H:%M:%S')
+        status = f'오류: {error}' if error else 'OK'
+        preview = (raw_text or '')[:800]
+        line = f'[{ts}] {stage} — {status}\n{preview}\n{"-"*40}\n'
+        self.after(0, lambda: self._append_log(line))
+
+    def _append_log(self, line):
+        self.log_txt.configure(state='normal')
+        self.log_txt.insert('end', line)
+        self.log_txt.see('end')
+        self.log_txt.configure(state='disabled')
 
     def _build_grid_panel(self, parent):
         top = tk.Frame(parent, bg='#0d0d14')
@@ -238,7 +290,8 @@ class ClassifyWindow(tk.Toplevel):
         try:
             results = self.client.classify_videos(
                 filenames, folder_ctx=folder,
-                rejection_notes=rejection_notes, custom_prompt=custom_prompt)
+                rejection_notes=rejection_notes, custom_prompt=custom_prompt,
+                on_debug=self._on_llm_debug)
         except Exception as e:
             self.after(0, lambda: messagebox.showerror('분류 실패', str(e)))
             return
@@ -264,7 +317,7 @@ class ClassifyWindow(tk.Toplevel):
         for rt, vec in zip(raw_tags, new_vecs):
             candidates[rt] = top_k_similar(vec, existing, k=5, threshold=0.75)
 
-        final_map = self.client.normalize_tags(raw_tags, candidates)
+        final_map = self.client.normalize_tags(raw_tags, candidates, on_debug=self._on_llm_debug)
 
         # 새로 채택된(후보 없이 그대로 쓰인) 태그는 임베딩 캐시에 즉시 저장
         for rt, vec in zip(raw_tags, new_vecs):
@@ -279,7 +332,9 @@ class ClassifyWindow(tk.Toplevel):
         self.cards = []
 
     def _add_card(self, item, suggestion):
-        card = ClassifyCard(self.inner, item, suggestion, self.thumb_dir, self)
+        card = ClassifyCard(self.inner, item, suggestion, self.thumb_dir, self,
+                            thumb_file=self._thumb_file_fn, make_thumb=self._make_thumb_fn,
+                            viewer_dlg=self._viewer_dlg_fn)
         card.frame.grid(row=len(self.cards) // 4, column=len(self.cards) % 4,
                          padx=6, pady=6, sticky='n')
         self.cards.append(card)
@@ -346,19 +401,27 @@ class ClassifyWindow(tk.Toplevel):
 class ClassifyCard:
     THUMB = 140
 
-    def __init__(self, parent, item, suggestion, thumb_dir, win):
+    def __init__(self, parent, item, suggestion, thumb_dir, win,
+                 thumb_file=None, make_thumb=None, viewer_dlg=None):
         self.item = item
         self.win = win
+        self.thumb_dir = thumb_dir
+        self._thumb_file_fn = thumb_file
+        self._make_thumb_fn = make_thumb
+        self._viewer_dlg_fn = viewer_dlg
         self.frame = tk.Frame(parent, bg='#13131f', bd=1, relief='solid')
 
         self.sel_var = tk.BooleanVar(value=False)
         tk.Checkbutton(self.frame, variable=self.sel_var, bg='#13131f').pack(anchor='w')
 
-        thumb_img = self._load_thumb(item['path'], thumb_dir)
-        lbl = tk.Label(self.frame, image=thumb_img, bg='#0a0a14',
-                        width=self.THUMB, height=self.THUMB)
-        lbl.image = thumb_img  # GC 방지
-        lbl.pack()
+        blank = Image.new('RGB', (self.THUMB, self.THUMB), '#0a0a14')
+        self._blank_img = ImageTk.PhotoImage(blank)
+        self.thumb_lbl = tk.Label(self.frame, image=self._blank_img, bg='#0a0a14',
+                                   width=self.THUMB, height=self.THUMB, cursor='hand2')
+        self.thumb_lbl.image = self._blank_img  # GC 방지
+        self.thumb_lbl.pack()
+        self.thumb_lbl.bind('<Button-1>', self._on_click_thumb)
+        self._load_thumb_async(item['path'])
 
         name = Path(item['path']).name
         tk.Label(self.frame, text=name[:30], bg='#13131f', fg='#ddd',
@@ -367,6 +430,8 @@ class ClassifyCard:
         self.cat_var = tk.StringVar(value=suggestion.get('category', ''))
         tk.Entry(self.frame, textvariable=self.cat_var, width=18).pack(pady=2)
 
+        tk.Label(self.frame, text='태그 (콤마로 구분, 여러 개 가능)', bg='#13131f', fg='#888',
+                 font=('Consolas', 6)).pack()
         self.tag_var = tk.StringVar(value=', '.join(suggestion.get('tags', [])))
         tk.Entry(self.frame, textvariable=self.tag_var, width=18).pack(pady=2)
 
@@ -381,16 +446,35 @@ class ClassifyCard:
         comment = CommentDialog(self.frame).result
         self.win.reject_card(self, comment or '')
 
-    def _load_thumb(self, path, thumb_dir):
-        h = hashlib.md5(path.encode()).hexdigest()
-        tf = Path(thumb_dir) / (h + '.jpg')
-        try:
-            img = Image.open(tf)
-            img.thumbnail((self.THUMB, self.THUMB))
-            return ImageTk.PhotoImage(img)
-        except Exception:
-            blank = Image.new('RGB', (self.THUMB, self.THUMB), '#0a0a14')
-            return ImageTk.PhotoImage(blank)
+    def _on_click_thumb(self, _evt=None):
+        if self._viewer_dlg_fn:
+            self._viewer_dlg_fn(self.item['path'])
+
+    def _load_thumb_async(self, path):
+        """캐시된 썸네일이 없으면 메인 앱의 make_thumb()로 온디맨드 생성 후 표시."""
+        def worker():
+            tf = self._thumb_file_fn(path) if self._thumb_file_fn else \
+                Path(self.thumb_dir) / (hashlib.md5(path.encode()).hexdigest() + '.jpg')
+            if not Path(tf).exists() and self._make_thumb_fn:
+                try:
+                    self._make_thumb_fn(path, tf)
+                except Exception:
+                    pass
+            try:
+                img = Image.open(tf)
+                img.thumbnail((self.THUMB, self.THUMB))
+                photo = ImageTk.PhotoImage(img)
+            except Exception:
+                photo = None
+            if photo:
+                self.win.after(0, lambda: self._apply_thumb(photo))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_thumb(self, photo):
+        if not self.thumb_lbl.winfo_exists():
+            return
+        self.thumb_lbl.configure(image=photo)
+        self.thumb_lbl.image = photo  # GC 방지
 
 
 class CommentDialog:

@@ -95,15 +95,34 @@ class LocalLLMClient:
                 raw = raw.lstrip()[4:]
         return raw.strip()
 
+    @staticmethod
+    def _parse_indexed_json(raw: str, n: int) -> list:
+        """{"1":{...},"2":{...}} 또는 [{...},{...}] 형태 모두 허용해 길이 n 리스트로 정규화."""
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [data[i] if i < len(data) and isinstance(data[i], dict) else {}
+                    for i in range(n)]
+        if isinstance(data, dict):
+            out = []
+            for i in range(n):
+                entry = data.get(str(i + 1))
+                if entry is None:
+                    entry = data.get(i + 1)   # 정수 키로 응답하는 모델 대응
+                out.append(entry if isinstance(entry, dict) else {})
+            return out
+        raise ValueError(f"unexpected JSON shape: {type(data)}")
+
     # ── 영상 분류 ────────────────────────────────
     def classify_videos(self, filenames: list, folder_ctx: str = "",
                         rejection_notes: dict = None,
-                        custom_prompt: str = "") -> list:
+                        custom_prompt: str = "",
+                        on_debug: callable = None) -> list:
         """
         filenames        — 파일명(혹은 상대경로) 리스트 (최대 CLASSIFY_BATCH_MAX 권장)
         folder_ctx        — 폴더 경로/맥락 설명 문자열
         rejection_notes   — {filename: [{"suggested":..., "comment":...}, ...]} (과거 거부 이력)
         custom_prompt     — 사용자 지정 지침 (시스템 프롬프트 뒤에 추가됨)
+        on_debug          — on_debug(stage, raw_text, error) 콜백 — 매 호출 후 raw 응답/에러 전달
 
         반환: filenames와 같은 순서의 [{"category": "...", "tags": [...]}, ...]
         """
@@ -131,27 +150,32 @@ class LocalLLMClient:
         )
 
         results = [{"category": "", "tags": []} for _ in filenames]
+        raw = ""
         try:
             raw = self._chat([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ])
-            data = json.loads(self._strip_json_fence(raw))
-            for i in range(len(filenames)):
-                entry = data.get(str(i + 1), {})
+            entries = self._parse_indexed_json(self._strip_json_fence(raw), len(filenames))
+            for i, entry in enumerate(entries):
                 results[i] = {
                     "category": entry.get("category", "") or "",
                     "tags": [t for t in (entry.get("tags") or []) if t],
                 }
-        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
-            pass
+            if on_debug:
+                on_debug('classify_videos', raw, None)
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as e:
+            if on_debug:
+                on_debug('classify_videos', raw, e)
         return results
 
     # ── 태그 정규화 (2단계: 임베딩 후보 → LLM 최종 판단) ──
-    def normalize_tags(self, raw_tags: list, candidates: dict) -> dict:
+    def normalize_tags(self, raw_tags: list, candidates: dict,
+                       on_debug: callable = None) -> dict:
         """
         raw_tags    — 새로 제안된 태그 문자열 리스트 (중복 제거된 set 권장)
         candidates  — {raw_tag: [기존 태그 후보, ...]} (임베딩 유사도로 미리 추린 목록)
+        on_debug    — on_debug(stage, raw_text, error) 콜백
 
         반환: {raw_tag: 최종_태그}  (후보 중 하나거나 raw_tag 그대로)
         """
@@ -171,6 +195,7 @@ class LocalLLMClient:
             "다음 신규 제안 태그와 기존 후보 목록을 비교해 최종 태그를 결정하세요.\n"
             f"{lines}"
         )
+        raw = ""
         try:
             raw = self._chat([
                 {"role": "system", "content": DEFAULT_NORMALIZE_PROMPT},
@@ -181,6 +206,9 @@ class LocalLLMClient:
                 final = data.get(rt)
                 if final and isinstance(final, str):
                     result[rt] = final
-        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
-            pass
+            if on_debug:
+                on_debug('normalize_tags', raw, None)
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError) as e:
+            if on_debug:
+                on_debug('normalize_tags', raw, e)
         return result

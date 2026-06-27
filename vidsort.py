@@ -3934,7 +3934,9 @@ class VidSort(tk.Tk):
             import importlib, local_classify
             importlib.reload(local_classify)
             local_classify.open_window(self, DB_PATH, THUMB_DIR,
-                                        load_cfg=load_cfg, save_cfg=save_cfg)
+                                        load_cfg=load_cfg, save_cfg=save_cfg,
+                                        thumb_file=thumb_file, make_thumb=make_thumb,
+                                        viewer_dlg=self._viewer_dlg)
         except ImportError:
             messagebox.showerror('오류',
                 'local_classify.py 를 찾을 수 없습니다.\n'

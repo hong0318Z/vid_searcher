@@ -204,8 +204,12 @@ class ClassifyWindow(tk.Toplevel):
                          lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         self.canvas.bind('<Configure>',
                           lambda e: self.canvas.itemconfigure(self._inner_id, width=e.width))
-        self.canvas.bind_all('<MouseWheel>',
-                              lambda e: self.canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+        def _on_wheel(e):
+            w = self.winfo_containing(e.x_root, e.y_root)
+            if w is not None and str(w).startswith(str(self.log_txt)):
+                return  # 로그 패널 위에서는 자체 스크롤만 동작
+            self.canvas.yview_scroll(-1 * (e.delta // 120), 'units')
+        self.canvas.bind_all('<MouseWheel>', _on_wheel)
 
     # ── 설정 로드/저장 ───────────────────────────
     def _load_settings(self):

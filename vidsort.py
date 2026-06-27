@@ -278,7 +278,7 @@ class DB:
         # ── tag_meta 컬럼 마이그레이션 ────────────────
         tm_cols = [r[1] for r in self.conn.execute(
             "PRAGMA table_info(tag_meta)").fetchall()]
-        for _col, _def in [('tag_type', ''), ('thumb_path', ''), ('extra_info', '')]:
+        for _col, _def in [('tag_type', ''), ('thumb_path', ''), ('extra_info', ''), ('embedding', '')]:
             if _col not in tm_cols:
                 self.conn.execute(
                     f"ALTER TABLE tag_meta ADD COLUMN {_col} TEXT DEFAULT ''")
@@ -313,6 +313,20 @@ class DB:
                 reason TEXT DEFAULT ''
             )
         """)
+        self.conn.commit()
+
+        # ── classify_rejections 테이블 (로컬 분류 시스템 — 거부 이력) ──
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS classify_rejections(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL,
+                suggested_json TEXT DEFAULT '',
+                comment TEXT DEFAULT '',
+                created_at REAL DEFAULT 0
+            )
+        """)
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_classify_rej_path ON classify_rejections(path)")
         self.conn.commit()
 
         # ext 인덱스 (컬럼 확보 후 생성)
@@ -546,6 +560,63 @@ class DB:
             LIMIT ?
         """, (limit,)).fetchall()
         return self._dicts(rows)
+
+    # ── 로컬 분류 시스템 ──────────────────────────────────
+    def get_untagged_in_folder(self, folder, limit=500):
+        """folder 하위(top-level folder 컬럼 기준) 태그 없는 파일 목록."""
+        rows = self.conn.execute("""
+            SELECT f.* FROM files f
+            WHERE f.folder = ?
+              AND f.path NOT IN (SELECT DISTINCT path FROM tags)
+            ORDER BY f.name
+            LIMIT ?
+        """, (folder, limit)).fetchall()
+        return self._dicts(rows)
+
+    def save_tag_embedding(self, tag, vec):
+        """tag_meta.embedding 에 JSON 직렬화된 벡터 캐시."""
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO tag_meta(tag, embedding) VALUES(?,?) "
+                "ON CONFLICT(tag) DO UPDATE SET embedding=excluded.embedding",
+                (tag, json.dumps(vec)))
+            self.conn.commit()
+
+    def get_tag_embeddings(self):
+        """{tag: [float,...]} — embedding 비어있지 않은 것만."""
+        rows = self.conn.execute(
+            "SELECT tag, embedding FROM tag_meta "
+            "WHERE embedding IS NOT NULL AND embedding != ''").fetchall()
+        out = {}
+        for tag, emb in rows:
+            try:
+                out[tag] = json.loads(emb)
+            except (ValueError, TypeError):
+                pass
+        return out
+
+    def add_rejection(self, path, suggested, comment=''):
+        """AI 제안 거부 + 코멘트 기록 (재시도 큐용, 누적)."""
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO classify_rejections(path, suggested_json, comment, created_at) "
+                "VALUES(?,?,?,?)",
+                (path, json.dumps(suggested, ensure_ascii=False), comment, time.time()))
+            self.conn.commit()
+
+    def get_rejections(self, path):
+        """해당 영상의 과거 거부 이력 (오래된 순)."""
+        rows = self.conn.execute(
+            "SELECT suggested_json, comment, created_at FROM classify_rejections "
+            "WHERE path=? ORDER BY created_at", (path,)).fetchall()
+        out = []
+        for sj, comment, created_at in rows:
+            try:
+                suggested = json.loads(sj) if sj else {}
+            except (ValueError, TypeError):
+                suggested = {}
+            out.append({'suggested': suggested, 'comment': comment, 'created_at': created_at})
+        return out
 
     def get_scraped_pending_jav(self, limit=200):
         """jav_raw 있고 jav_done=0 인 파일 (스크래핑 완료, LLM 대기)"""
@@ -1785,6 +1856,7 @@ class VidSort(tk.Tk):
         ttk.Button(tb, text='📥 다운로더', command=self._open_downloader).pack(side='right', padx=4)
         ttk.Button(tb, text='🌐 갤러리', command=self._gallery_view).pack(side='right', padx=4)
         ttk.Button(tb, text='🚫 차단 목록', command=self._ban_list_dlg).pack(side='right', padx=4)
+        ttk.Button(tb, text='🧠 로컬 분류', command=self._open_local_classify).pack(side='right', padx=4)
 
         # ── 메인 영역 (PanedWindow로 사이드바 크기 조절 가능) ────
         main = tk.PanedWindow(self, orient='horizontal', bg='#0d0d14',
@@ -3850,6 +3922,25 @@ class VidSort(tk.Tk):
                 f'아래 경로에 파일을 넣어주세요:\n{exe_dir}')
         except Exception as e:
             messagebox.showerror('웹 갤러리 오류', str(e))
+
+    # ── 로컬 분류 시스템 (별도 UI, web_gallery와 동일한 분리 패턴) ──
+    def _open_local_classify(self):
+        exe_dir = str(Path(sys.executable).parent
+                      if getattr(sys, 'frozen', False)
+                      else Path(__file__).parent)
+        if exe_dir not in sys.path:
+            sys.path.insert(0, exe_dir)
+        try:
+            import importlib, local_classify
+            importlib.reload(local_classify)
+            local_classify.open_window(self, DB_PATH, THUMB_DIR,
+                                        load_cfg=load_cfg, save_cfg=save_cfg)
+        except ImportError:
+            messagebox.showerror('오류',
+                'local_classify.py 를 찾을 수 없습니다.\n'
+                f'아래 경로에 파일을 넣어주세요:\n{exe_dir}')
+        except Exception as e:
+            messagebox.showerror('로컬 분류 오류', str(e))
 
 
     # ─────────────────────────────────────────────────────

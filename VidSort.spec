@@ -10,6 +10,9 @@ a = Analysis(
         'web_gallery',
         'jav_scraper',
         'llm_api',
+        'local_llm',
+        'local_classify',
+        'classify_util',
 
         # ── Flask / 웹 갤러리 ────────────────────────────────
         'flask',

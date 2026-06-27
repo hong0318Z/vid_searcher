@@ -251,13 +251,24 @@ class ClassifyWindow(tk.Toplevel):
         threading.Thread(target=self._classify_worker,
                           args=(folder, custom_prompt), daemon=True).start()
 
+    @staticmethod
+    def _rel_path(path, folder):
+        """최상위 folder 기준 하위경로 (예: 동물/BBC/아프리카/사자의왕국.mp4) — LLM에게
+        파일명만 보여주면 중간 서브폴더(분류 단서)가 통째로 사라지므로 항상 이 형태로 전달."""
+        try:
+            rel = Path(path).relative_to(folder)
+        except ValueError:
+            rel = Path(path).name
+        return str(rel).replace('\\', '/')
+
     def _classify_worker(self, folder, custom_prompt):
         items = self.db.get_untagged_in_folder(folder, limit=2000)
         if not items:
             self.after(0, lambda: self.status_lbl.config(text='미태그 영상이 없습니다.'))
             return
 
-        names = [Path(it['path']).stem for it in items]
+        # 파일명만 쓰면 서브폴더(분류 단서)가 사라지므로 상대경로 전체를 임베딩 입력으로 사용
+        names = [self._rel_path(it['path'], folder) for it in items]
         try:
             vecs = self.client.embed_texts(names)
         except Exception as e:
@@ -279,12 +290,14 @@ class ClassifyWindow(tk.Toplevel):
         self.after(0, lambda: self.status_lbl.config(text='분류 완료.'))
 
     def _classify_chunk(self, chunk_items, folder, custom_prompt):
-        filenames = [Path(it['path']).name for it in chunk_items]
+        # 파일명이 아니라 서브폴더 포함 상대경로를 전달 — LLM이 "동물/BBC/아프리카/사자의왕국.mp4"
+        # 형태로 받아야 폴더 구조(대분류/소분류 단서)를 인지할 수 있음
+        filenames = [self._rel_path(it['path'], folder) for it in chunk_items]
         rejection_notes = {}
         for it in chunk_items:
             hist = self.db.get_rejections(it['path'])
             if hist:
-                rejection_notes[Path(it['path']).name] = [
+                rejection_notes[self._rel_path(it['path'], folder)] = [
                     {'suggested': h['suggested'], 'comment': h['comment']} for h in hist]
 
         try:
@@ -423,6 +436,11 @@ class ClassifyCard:
         self.thumb_lbl.bind('<Button-1>', self._on_click_thumb)
         self._load_thumb_async(item['path'])
 
+        rel = ClassifyWindow._rel_path(item['path'], item.get('folder', ''))
+        sub = str(Path(rel).parent)
+        if sub and sub != '.':
+            tk.Label(self.frame, text=sub[:40], bg='#13131f', fg='#7c6ff7',
+                     font=('Consolas', 7), wraplength=self.THUMB).pack()
         name = Path(item['path']).name
         tk.Label(self.frame, text=name[:30], bg='#13131f', fg='#ddd',
                  font=('Consolas', 8), wraplength=self.THUMB).pack()

@@ -573,6 +573,18 @@ class DB:
         """, (folder, limit)).fetchall()
         return self._dicts(rows)
 
+    def search_files_by_keyword(self, keyword, limit=2000):
+        """경로(폴더+파일명) 어디든 keyword가 포함된 파일 — 태그 여부 무관하게 전체 검색.
+        '직캠'처럼 폴더/파일명에 흩어져 있는 항목을 한 번에 찾아 분류 대상으로 묶을 때 사용."""
+        like = f"%{keyword}%"
+        rows = self.conn.execute("""
+            SELECT * FROM files
+            WHERE path LIKE ? COLLATE NOCASE
+            ORDER BY path
+            LIMIT ?
+        """, (like, limit)).fetchall()
+        return self._dicts(rows)
+
     def save_tag_embedding(self, tag, vec):
         """tag_meta.embedding 에 JSON 직렬화된 벡터 캐시."""
         with self.lock:

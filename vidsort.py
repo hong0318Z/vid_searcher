@@ -220,14 +220,35 @@ def make_thumb(src, dst):
 # ─────────────────────────────────────────────────────
 class DB:
     def __init__(self):
-        self.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA cache_size=-1048576")   # 1GB (RAM 여유 시 상주 캐시 확대)
-        self.conn.execute("PRAGMA mmap_size=8589934592")  # 8GB mmap
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA temp_store=MEMORY")
+        # 스레드별 커넥션 — 같은 커넥션을 여러 스레드가 공유하면
+        # (UI 쿼리 + 스캔 upsert + 썸네일 update 동시 실행 시) fetch 도중
+        # commit이 끼어들 수 있다. WAL 모드는 다중 커넥션 동시 읽기를 지원하므로
+        # 스레드마다 커넥션을 분리한다. 기존 self.conn 호출부는 전부 그대로 호환.
+        self._local      = threading.local()
+        self._all_conns  = []
+        self._conns_lock = threading.Lock()
         self.lock = threading.Lock()
         self._init()
+
+    def _connect(self):
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA cache_size=-1048576")   # 1GB (RAM 여유 시 상주 캐시 확대)
+        conn.execute("PRAGMA mmap_size=8589934592")  # 8GB mmap
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @property
+    def conn(self):
+        conn = getattr(self._local, 'conn', None)
+        if conn is None:
+            conn = self._connect()
+            self._local.conn = conn
+            with self._conns_lock:
+                self._all_conns.append(conn)
+        return conn
 
     def _init(self):
         self.conn.executescript("""
@@ -355,11 +376,6 @@ class DB:
     def query_page(self, active_exts, folder, tag, sort, short_filter,
                    search, offset, limit, min_dur=0, folder_search=False,
                    sort_asc=None, only_missing_thumb=False, category=None):
-        import sys
-        print(f"[query_page] active_exts={active_exts} folder={folder} "
-              f"tag={tag} sort={sort} short={short_filter} "
-              f"search={search} offset={offset} limit={limit} min_dur={min_dur}",
-              flush=True, file=sys.stderr)
         """
         모든 필터/정렬/페이징을 SQL에서 처리.
         active_exts: 표시할 확장자 리스트 e.g. ['.mp4','.mkv']
@@ -468,24 +484,20 @@ class DB:
 
     def get_duplicates(self):
         """파일 용량(size)이 완전히 동일한 항목들을 찾아 반환"""
-        sizes = self.conn.execute("""
-            SELECT size FROM files 
-            WHERE size > 1048576 
-            GROUP BY size HAVING COUNT(*) > 1
+        rows = self.conn.execute("""
+            SELECT path, name, folder, duration, size FROM files
+            WHERE size IN (
+                SELECT size FROM files
+                WHERE size > 1048576
+                GROUP BY size HAVING COUNT(*) > 1
+            )
             ORDER BY size DESC
         """).fetchall()
-        
-        if not sizes:
-            return {}
 
         res = defaultdict(list)
-        for (sz,) in sizes:
-            rows = self.conn.execute("""
-                SELECT path, name, folder, duration, size 
-                FROM files WHERE size = ?
-            """, (sz,)).fetchall()
-            res[sz] = [{'path':r[0], 'name':r[1], 'folder':r[2], 
-                        'duration':r[3], 'size':r[4]} for r in rows]
+        for r in rows:
+            res[r[4]].append({'path':r[0], 'name':r[1], 'folder':r[2],
+                              'duration':r[3], 'size':r[4]})
         return dict(res)
 
     def get_tags_for_paths(self, paths):
@@ -520,6 +532,35 @@ class DB:
               height  =CASE WHEN excluded.height>0   THEN excluded.height   ELSE height   END,
               thumb_ok=excluded.thumb_ok
             """, row); self.conn.commit()
+
+    def upsert_many(self, rows):
+        """스캔용 배치 upsert — 파일당 commit 대신 배치당 commit 1회."""
+        if not rows: return
+        with self.lock:
+            for row in rows:
+                row['ext'] = Path(row['name']).suffix.lower()
+            self.conn.executemany("""
+            INSERT INTO files(path,name,alias,size,mtime,duration,width,height,
+                              thumb_ok,folder,added_at,ext)
+            VALUES(:path,:name,:alias,:size,:mtime,:duration,:width,:height,
+                   :thumb_ok,:folder,:added_at,:ext)
+            ON CONFLICT(path) DO UPDATE SET
+              name=excluded.name, size=excluded.size, mtime=excluded.mtime,
+              folder=excluded.folder, ext=excluded.ext,
+              duration=CASE WHEN excluded.duration>0 THEN excluded.duration ELSE duration END,
+              width   =CASE WHEN excluded.width>0    THEN excluded.width    ELSE width    END,
+              height  =CASE WHEN excluded.height>0   THEN excluded.height   ELSE height   END,
+              thumb_ok=excluded.thumb_ok
+            """, rows); self.conn.commit()
+
+    def remove_many(self, paths):
+        """배치 삭제 — 경로당 commit 대신 1회 commit."""
+        if not paths: return
+        with self.lock:
+            plist = [(p,) for p in paths]
+            self.conn.executemany("DELETE FROM files WHERE path=?", plist)
+            self.conn.executemany("DELETE FROM tags  WHERE path=?", plist)
+            self.conn.commit()
 
     def update_thumb(self,path,w,h,dur):
         with self.lock:
@@ -1101,7 +1142,12 @@ class DB:
         """).fetchall()
         return [{'folder':r[0],'count':r[1],'size':r[2],'thumbed':r[3]} for r in rows]
 
-    def close(self): self.conn.close()
+    def close(self):
+        with self._conns_lock:
+            for c in self._all_conns:
+                try: c.close()
+                except Exception: pass
+            self._all_conns.clear()
 
 # ─────────────────────────────────────────────────────
 #  THUMB DB — 썸네일 패키징 (SQLite blob 단일 파일)
@@ -1109,21 +1155,24 @@ class DB:
 class ThumbDB:
     """썸네일 이미지를 SQLite BLOB으로 저장하는 단일 파일 패키지."""
     def __init__(self, db_path: Path):
-        self._path = db_path
-        self._conn = None
-        self._lock = threading.Lock()
+        self._path  = db_path
+        self._local = threading.local()   # 스레드별 커넥션 (UI 읽기 + 워커 쓰기 동시 안전)
+        self._lock  = threading.Lock()
 
     def _c(self):
-        if self._conn is None:
-            self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA cache_size=-1048576")   # 1GB
-            self._conn.execute("PRAGMA mmap_size=8589934592")  # 8GB mmap — 썸네일 blob 상주
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute(
+        conn = getattr(self._local, 'conn', None)
+        if conn is None:
+            conn = sqlite3.connect(str(self._path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA cache_size=-1048576")   # 1GB
+            conn.execute("PRAGMA mmap_size=8589934592")  # 8GB mmap — 썸네일 blob 상주
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute(
                 "CREATE TABLE IF NOT EXISTS thumbs (hash TEXT PRIMARY KEY, data BLOB)")
-            self._conn.commit()
-        return self._conn
+            conn.commit()
+            self._local.conn = conn
+        return conn
 
     def has(self, h: str) -> bool:
         return bool(self._c().execute(
@@ -1175,6 +1224,12 @@ def _cache_put(cache: dict, key, value):
 # 다시 조회하지 않도록 한 번 읽은 blob을 메모리에 들고 있는다.
 _RAW_THUMB_CACHE: dict = {}
 _RAW_THUMB_CACHE_MAX = 100000
+
+# 프리페치 PIL 이미지 캐시 (디코드+리사이즈 완료 상태).
+# ImageTk.PhotoImage 는 Tcl 인터프리터에 묶여 있어 반드시 메인 스레드에서만
+# 생성해야 한다 — 백그라운드 프리페치는 여기까지만 준비하고,
+# PhotoImage 변환은 _draw_card(메인 스레드)에서 수행.
+_PIL_PREFETCH: dict = {}
 
 def open_thumb(path: str):
     """ThumbDB 또는 개별 파일에서 PIL Image 반환. 없으면 None."""
@@ -1448,18 +1503,27 @@ class CanvasGrid(tk.Frame):
         # 썸네일
         th_tag    = f't{ph_key}'
         cache_key = f'{path}_{tw}_{th}'
-        if cache_key not in self._img_cache and thumb_cached(path):
-            try:
-                img = open_thumb(path)
-                if img:
-                    iw,ih = img.size
-                    scale = min(tw/iw,th/ih) if iw and ih else 1
-                    nw,nh = max(1,int(iw*scale)),max(1,int(ih*scale))
-                    img = img.resize((nw,nh),Image.BILINEAR)
-                    ph  = ImageTk.PhotoImage(img)
+        if cache_key not in self._img_cache:
+            # 1) 프리페치가 준비해 둔 PIL 이미지 우선 사용 (디코드+리사이즈 생략)
+            img = _PIL_PREFETCH.pop(cache_key, None)
+            # 2) 없으면 직접 로드
+            if img is None and thumb_cached(path):
+                try:
+                    img = open_thumb(path)
+                    if img:
+                        iw,ih = img.size
+                        scale = min(tw/iw,th/ih) if iw and ih else 1
+                        nw,nh = max(1,int(iw*scale)),max(1,int(ih*scale))
+                        img = img.resize((nw,nh),Image.BILINEAR)
+                except Exception:
+                    img = None
+            if img is not None:
+                try:
+                    ph = ImageTk.PhotoImage(img)   # 반드시 메인 스레드
                     _cache_put(self._img_cache, cache_key, ph)
                     self._phs[path] = ph
-            except: pass
+                except Exception:
+                    pass
 
         cx=x+cw//2; cy=y+th//2+4
         if cache_key in self._img_cache:
@@ -1702,6 +1766,7 @@ class VidSort(tk.Tk):
 
         # 썸네일 큐/스레드/팝업
         self._thumb_queue  = []
+        self._thumb_qlock  = threading.Lock()   # 큐 extend/clear 경합 방지
         self._thumb_thread = None
         self._thumb_popup  = None
         self._thumb_pb     = None
@@ -4930,8 +4995,13 @@ class VidSort(tk.Tk):
             sort_asc=sort_asc, only_missing_thumb=only_missing_thumb,
             category=category or None)
 
-        # 현재 페이지에서 실제로 존재하지 않는 파일 제거
+        # 현재 페이지에서 실제로 존재하지 않는 파일 제거 + 자막 파일 확인.
+        # 파일별 stat(존재 3회 + 자막 6회 × 500개)은 특히 NAS에서 페이지 전환을
+        # 수 초씩 지연시킨다 — 폴더별 scandir 1회로 파일명 세트를 만들어 대체.
+        _SUB_EXTS = {'.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx'}
+
         def _exists(p):
+            """폴더 목록 조회 실패 시 파일별 폴백"""
             try:
                 if os.path.isfile(p): return True
             except (OSError, ValueError): pass
@@ -4945,29 +5015,47 @@ class VidSort(tk.Tk):
             except (OSError, ValueError): pass
             return False
 
-        missing = [v['path'] for v in rows if not _exists(v['path'])]
+        by_dir = defaultdict(list)
+        for v in rows:
+            by_dir[str(Path(v['path']).parent)].append(v['path'])
+
+        exists_set = set()
+        subs_set   = set()
+        for d, plist in by_dir.items():
+            names = None
+            for cand in dict.fromkeys((d, longpath(d))):   # 중복 제거, 순서 유지
+                try:
+                    with os.scandir(cand) as it:
+                        names = {os.path.normcase(e.name) for e in it}
+                    break
+                except (OSError, ValueError):
+                    continue
+            if names is None:
+                # 폴더 자체를 못 읽음 (NAS 순단 등) — 기존 파일별 확인으로 폴백
+                for p in plist:
+                    if _exists(p):
+                        exists_set.add(p)
+                        stem, parent = Path(p).stem, Path(p).parent
+                        if any((parent / (stem + ext)).is_file() for ext in _SUB_EXTS):
+                            subs_set.add(p)
+                continue
+            for p in plist:
+                if os.path.normcase(Path(p).name) in names:
+                    exists_set.add(p)
+                    stem = Path(p).stem
+                    if any(os.path.normcase(stem + ext) in names for ext in _SUB_EXTS):
+                        subs_set.add(p)
+
+        missing = [v['path'] for v in rows if v['path'] not in exists_set]
         if missing:
-            for p in missing:
-                self.db.remove(p)
-            rows  = [v for v in rows if v['path'] not in missing]
+            self.db.remove_many(missing)
+            miss_set = set(missing)
+            rows  = [v for v in rows if v['path'] not in miss_set]
             total = max(0, total - len(missing))
 
         paths    = [v['path'] for v in rows]
         tags_map = self.db.get_tags_for_paths(paths)
         cats_map = self.db.get_categories_for_paths(paths)
-
-        _SUB_EXTS = {'.srt', '.ass', '.ssa', '.vtt', '.sub', '.idx'}
-        def _has_sub(p):
-            try:
-                stem = Path(p).stem
-                parent = Path(p).parent
-                for ext in _SUB_EXTS:
-                    if (parent / (stem + ext)).is_file():
-                        return True
-            except Exception:
-                pass
-            return False
-        subs_set = {v['path'] for v in rows if _has_sub(v['path'])}
 
         self.after(0, lambda: self._on_query_done(rows, total, total_size, tags_map, cats_map, subs_set))
 
@@ -5116,7 +5204,8 @@ class VidSort(tk.Tk):
             if self._prefetch_stop.is_set(): return
             path      = v['path']
             cache_key = f'{path}_{tw}_{th}'
-            if cache_key in self._img_cache: continue
+            if cache_key in self._img_cache or cache_key in _PIL_PREFETCH:
+                continue
             if not thumb_cached(path): continue
             try:
                 img = open_thumb(path)
@@ -5125,9 +5214,10 @@ class VidSort(tk.Tk):
                     scale = min(tw/iw, th/ih) if iw and ih else 1
                     nw,nh = max(1,int(iw*scale)), max(1,int(ih*scale))
                     img = img.resize((nw,nh), Image.BILINEAR)
-                    ph  = ImageTk.PhotoImage(img)
-                    _cache_put(self._img_cache, cache_key, ph)
-            except: pass
+                    # PhotoImage 변환은 메인 스레드(_draw_card)에서 —
+                    # 워커 스레드에서 Tk 객체 생성 시 간헐적 크래시 발생
+                    _cache_put(_PIL_PREFETCH, cache_key, img)
+            except Exception: pass
 
     # ── SCAN ────────────────────────────────────
     def _add_folder(self):
@@ -5319,6 +5409,7 @@ class VidSort(tk.Tk):
         found = set()
         count = 0
         skipped_banned = 0
+        pending = []   # 배치 upsert 버퍼 — 파일당 commit(fsync) 대신 500개 단위 commit
         lp_folder = longpath(folder)
         for root,dirs,files in os.walk(lp_folder):
             if self._scan_stop.is_set(): return
@@ -5336,20 +5427,23 @@ class VidSort(tk.Tk):
                 if clean in existing: continue
                 try:
                     st=os.stat(fpath)
-                    self.db.upsert({
+                    pending.append({
                         'path':clean,'name':fname,'alias':'',
                         'size':st.st_size,'mtime':st.st_mtime,
                         'duration':0,'width':0,'height':0,
                         'thumb_ok':0,'folder':folder,'added_at':time.time()
                     })
                     count+=1
+                    if len(pending) >= 500:
+                        self.db.upsert_many(pending)
+                        pending = []
                     if count%200==0:
                         self.after(0,lambda c=count:self._set_status(f'스캔 중... {c}개'))
                 except: pass
+        self.db.upsert_many(pending)
 
         deleted = db_paths - found
-        for p in deleted:
-            self.db.remove(p)
+        self.db.remove_many(list(deleted))
 
         self.after(0,lambda:(
             self._set_status(
@@ -5371,13 +5465,16 @@ class VidSort(tk.Tk):
         # 이미 실행 중이면 큐에 추가
         if hasattr(self,'_thumb_thread') and self._thumb_thread and \
            self._thumb_thread.is_alive():
-            self._thumb_queue.extend(todo)
+            with self._thumb_qlock:
+                self._thumb_queue.extend(todo)
+                qlen = len(self._thumb_queue)
             self._set_status(
-                f'썸네일 대기 중 — 추가 {len(todo)}개 (전체 큐: {len(self._thumb_queue)}개)')
+                f'썸네일 대기 중 — 추가 {len(todo)}개 (전체 큐: {qlen}개)')
             return
 
         # 새로 시작
-        self._thumb_queue = list(todo)
+        with self._thumb_qlock:
+            self._thumb_queue = list(todo)
         self._thumb_stop.clear()
         w = self._nas_w(folder or (todo[0]['folder'] if todo else ''))
 
@@ -5424,10 +5521,12 @@ class VidSort(tk.Tk):
     def _thumb_w(self, workers):
         """큐 기반 썸네일 워커 — 큐가 빌 때까지 계속 처리"""
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            while self._thumb_queue:
-                # 현재 큐 스냅샷
-                batch = list(self._thumb_queue)
-                self._thumb_queue.clear()
+            while True:
+                # 현재 큐 스냅샷 — extend()와의 경합으로 항목이 유실되지 않게 락 보호
+                with self._thumb_qlock:
+                    if not self._thumb_queue: break
+                    batch = list(self._thumb_queue)
+                    self._thumb_queue.clear()
                 total = len(batch); done = 0
 
                 # 팝업 최대값 업데이트

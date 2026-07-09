@@ -48,6 +48,10 @@ class LLMClient:
             "Authorization": f"Bearer {token}",
             "Content-Type":  "application/json",
         }
+        # 공유 클라이언트 — 호출마다 새로 만들면 배치 작업에서
+        # TLS 핸드셰이크를 매번 반복하게 된다 (httpx.Client는 스레드 안전)
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(connect=30, read=60, write=30, pool=10))
 
     # ── 내부 호출 ────────────────────────────────
     def _chat(self, messages: list, max_tokens: int = MAX_OUTPUT_TOKENS) -> str:
@@ -66,38 +70,36 @@ class LLMClient:
             "stream":     True,
         }
         # 스트리밍: 청크 사이 60초 무응답이면 끊어짐 (전체 응답 대기 X)
-        with httpx.Client(timeout=httpx.Timeout(connect=30, read=60,
-                                                write=30, pool=10)) as client:
-            chunks   = []
-            tok_in   = 0
-            tok_out  = 0
-            with client.stream('POST', url, json=payload,
-                               headers=self._headers) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if not line or not line.startswith('data:'):
-                        continue
-                    data = line[5:].strip()
-                    if data == '[DONE]':
-                        break
-                    try:
-                        obj = json.loads(data)
-                    except Exception:
-                        continue
-                    # 사용량 (마지막 청크에 포함되는 경우)
-                    if 'usage' in obj:
-                        u = obj['usage']
-                        tok_in  = u.get('prompt_tokens', tok_in)
-                        tok_out = u.get('completion_tokens', tok_out)
-                    delta = (obj.get('choices') or [{}])[0].get('delta', {})
-                    piece = delta.get('content') or ''
-                    if piece:
-                        chunks.append(piece)
-                        tok_out += 1   # 청크별 카운트 (usage 없을 때 추정)
-                        if on_chunk:
-                            on_chunk(piece)
-            content = ''.join(chunks).strip()
-            return content, tok_in, tok_out
+        chunks   = []
+        tok_in   = 0
+        tok_out  = 0
+        with self._client.stream('POST', url, json=payload,
+                                 headers=self._headers) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line or not line.startswith('data:'):
+                    continue
+                data = line[5:].strip()
+                if data == '[DONE]':
+                    break
+                try:
+                    obj = json.loads(data)
+                except Exception:
+                    continue
+                # 사용량 (마지막 청크에 포함되는 경우)
+                if 'usage' in obj:
+                    u = obj['usage']
+                    tok_in  = u.get('prompt_tokens', tok_in)
+                    tok_out = u.get('completion_tokens', tok_out)
+                delta = (obj.get('choices') or [{}])[0].get('delta', {})
+                piece = delta.get('content') or ''
+                if piece:
+                    chunks.append(piece)
+                    tok_out += 1   # 청크별 카운트 (usage 없을 때 추정)
+                    if on_chunk:
+                        on_chunk(piece)
+        content = ''.join(chunks).strip()
+        return content, tok_in, tok_out
 
     # ── 연결 테스트 ──────────────────────────────
     def test_connection(self) -> str:

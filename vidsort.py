@@ -991,6 +991,37 @@ class DB:
                 (path,)).fetchall()
             return [r[0] for r in rows]
 
+    def remap_paths(self, pairs: list):
+        """(old_path, new_path, new_folder) 트리플 목록 — 경로만 일괄 변경.
+        tags / file_categories / classify_rejections / banned_files 모두 함께 갱신."""
+        with self.lock:
+            for old, new, new_folder in pairs:
+                self.conn.execute(
+                    "UPDATE files SET path=?, folder=? WHERE path=?",
+                    (new, new_folder, old))
+                self.conn.execute(
+                    "UPDATE tags SET path=? WHERE path=?", (new, old))
+                self.conn.execute(
+                    "UPDATE file_categories SET path=? WHERE path=?", (new, old))
+                self.conn.execute(
+                    "UPDATE classify_rejections SET path=? WHERE path=?", (new, old))
+                self.conn.execute(
+                    "UPDATE banned_files SET path=? WHERE path=?", (new, old))
+            self.conn.commit()
+
+    def find_name_size_index(self, folder: str = None) -> dict:
+        """DB 항목 중 (name, size) → path 역인덱스 반환.
+        folder 지정 시 해당 폴더 항목만, None이면 현재 디스크에 없는 항목(유령) 전체."""
+        if folder:
+            rows = self.conn.execute(
+                "SELECT path, name, size FROM files WHERE folder=?", (folder,)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT path, name, size FROM files").fetchall()
+        idx = {}
+        for path, name, size in rows:
+            idx[(name, size)] = path
+        return idx
+
     def recommend_search(self, tags: list, keywords: list,
                          active_exts: list, limit: int = 150) -> list:
         """AI 추천 전용 검색: 태그 OR 키워드 매칭, 랜덤 정렬.
@@ -2019,6 +2050,9 @@ class VidSort(tk.Tk):
                    command=self._rescan_all_folders).pack(side='left', fill='x', expand=True, padx=(0, 2))
         ttk.Button(r2, text='🔄 업데이트',
                    command=self._ask_update).pack(side='left', fill='x', expand=True)
+
+        ttk.Button(qa, text='🔗 경로 재연결', style='Acc.TButton',
+                   command=self._remap_folder_dlg).pack(fill='x', pady=(1, 0))
 
         ttk.Button(qa, text='👯 중복 파일 찾기', style='Acc.TButton',
                    command=self._find_duplicates_dlg).pack(fill='x', pady=(1, 0))
@@ -5170,6 +5204,109 @@ class VidSort(tk.Tk):
         self._set_status(f'스캔 중: {folder}')
         threading.Thread(target=self._scan_w,
                          args=(folder, incremental), daemon=True).start()
+
+    def _remap_folder_dlg(self):
+        """파일명+용량이 같은 항목을 같은 파일로 인식해 DB 경로만 변경.
+        폴더를 이동/이름 변경했을 때 재스캔 없이 태그·별칭·제외 설정을 유지."""
+        win = tk.Toplevel(self)
+        win.title('🔗 경로 재연결')
+        win.configure(bg='#0d0d14')
+        win.geometry('620x480')
+        win.grab_set()
+
+        BG = '#0d0d14'
+        tk.Label(win, text='파일명 + 용량이 같은 파일을 같은 파일로 인식해\nDB 경로만 바꿉니다 (재스캔 불필요).',
+                 bg=BG, fg='#aaa', font=('Consolas', 9)).pack(pady=(12, 6))
+
+        row_old = tk.Frame(win, bg=BG); row_old.pack(fill='x', padx=16, pady=2)
+        tk.Label(row_old, text='기존 폴더 (DB 기준, 이동 전):', bg=BG, fg='#ddd',
+                 font=('Consolas', 9)).pack(anchor='w')
+        old_var = tk.StringVar()
+        old_cb = ttk.Combobox(row_old, textvariable=old_var,
+                               values=self.db.all_folders(), state='readonly', width=70)
+        old_cb.pack(fill='x')
+
+        row_new = tk.Frame(win, bg=BG); row_new.pack(fill='x', padx=16, pady=2)
+        tk.Label(row_new, text='새 폴더 (실제 파일이 있는 위치, 이동 후):', bg=BG, fg='#ddd',
+                 font=('Consolas', 9)).pack(anchor='w')
+        new_var = tk.StringVar()
+        new_entry = ttk.Entry(row_new, textvariable=new_var, width=72)
+        new_entry.pack(side='left', fill='x', expand=True)
+        def browse_new():
+            p = filedialog.askdirectory(parent=win, title='새 폴더 선택')
+            if p: new_var.set(p)
+        ttk.Button(row_new, text='📁', command=browse_new).pack(side='left', padx=(4, 0))
+
+        preview_lbl = tk.Label(win, text='', bg=BG, fg='#7c6ff7', font=('Consolas', 9))
+        preview_lbl.pack(pady=(6, 2))
+
+        lb_frame = tk.Frame(win, bg=BG); lb_frame.pack(fill='both', expand=True, padx=16, pady=4)
+        lb = tk.Listbox(lb_frame, bg='#0a0a12', fg='#ccc', font=('Consolas', 8),
+                        selectmode='none', borderwidth=0, highlightthickness=0)
+        lb_sb = ttk.Scrollbar(lb_frame, command=lb.yview); lb.configure(yscrollcommand=lb_sb.set)
+        lb.pack(side='left', fill='both', expand=True)
+        lb_sb.pack(side='right', fill='y')
+
+        _pairs = []  # [(old, new, new_folder), ...]
+
+        def scan_matches():
+            nonlocal _pairs
+            old_folder = old_var.get().strip()
+            new_folder = new_var.get().strip()
+            if not old_folder or not new_folder:
+                messagebox.showwarning('알림', '기존 폴더와 새 폴더를 모두 선택하세요.', parent=win)
+                return
+            preview_lbl.config(text='검색 중...')
+            win.update_idletasks()
+
+            # DB 인덱스 (name, size) → old_path
+            db_idx = self.db.find_name_size_index(old_folder)
+
+            # 새 폴더 디스크 스캔
+            _pairs = []
+            lb.delete(0, 'end')
+            lp = longpath(new_folder)
+            for root, dirs, files in os.walk(lp):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for fname in files:
+                    if Path(fname).suffix.lower() not in VIDEO_EXTS:
+                        continue
+                    fpath = str(Path(root) / fname).replace('\\\\?\\', '')
+                    try:
+                        sz = os.stat(longpath(fpath)).st_size
+                    except OSError:
+                        continue
+                    key = (fname, sz)
+                    if key in db_idx:
+                        old_path = db_idx[key]
+                        if old_path != fpath:
+                            _pairs.append((old_path, fpath, new_folder))
+                            lb.insert('end', f'{Path(old_path).parent.name}/… → {fpath}')
+
+            if _pairs:
+                preview_lbl.config(text=f'{len(_pairs)}개 매칭 — 확인 후 [재연결] 클릭')
+            else:
+                preview_lbl.config(text='매칭되는 파일이 없습니다 (파일명·용량 기준)')
+
+        def apply():
+            if not _pairs:
+                messagebox.showinfo('알림', '먼저 [매칭 검색]을 실행하세요.', parent=win)
+                return
+            if not messagebox.askyesno('재연결 확인',
+                    f'{len(_pairs)}개 항목의 DB 경로를 변경합니다.\n'
+                    '태그·별칭·분류·제외 설정은 모두 유지됩니다.\n계속할까요?',
+                    parent=win):
+                return
+            self.db.remap_paths(_pairs)
+            messagebox.showinfo('완료', f'{len(_pairs)}개 항목의 경로가 변경됐습니다.', parent=win)
+            win.destroy()
+            self._reload_sidebar()
+            self._reload()
+
+        btn_row = tk.Frame(win, bg=BG); btn_row.pack(pady=8)
+        ttk.Button(btn_row, text='🔍 매칭 검색', command=scan_matches).pack(side='left', padx=4)
+        ttk.Button(btn_row, text='🔗 재연결', style='Acc.TButton', command=apply).pack(side='left', padx=4)
+        ttk.Button(btn_row, text='닫기', command=win.destroy).pack(side='left', padx=4)
 
     def _scan_w(self, folder, incremental):
         print(f"[scan_w] 시작 folder={folder!r} incremental={incremental}", flush=True)

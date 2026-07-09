@@ -18,8 +18,16 @@ _srv    = None
 # ─────────────────────────────────────────────────
 #  DB / 경로 헬퍼
 # ─────────────────────────────────────────────────
+_tlocal = threading.local()
+
 def _conn():
-    return sqlite3.connect(str(_cfg['db_path']), check_same_thread=False, timeout=10)
+    """스레드별 커넥션 재사용 — 요청마다 새 커넥션을 열고 GC에 맡기면
+    waitress 멀티스레드 환경에서 커넥션이 누적된다."""
+    c = getattr(_tlocal, 'conn', None)
+    if c is None:
+        c = sqlite3.connect(str(_cfg['db_path']), check_same_thread=False, timeout=10)
+        _tlocal.conn = c
+    return c
 
 def _build_cache():
     _pcache.clear()

@@ -56,6 +56,7 @@ class ClassifyWindow(tk.Toplevel):
         self.client = None
         self.cards = []           # CardWidget 리스트 (현재 화면)
         self.retry_queue = []     # 거부된 항목 (path, suggestion) 재시도 대기
+        self._grid_cols = 4       # 캔버스 너비에 따라 동적으로 재계산됨
 
         self._build_ui()
         self._load_settings()
@@ -188,9 +189,23 @@ class ClassifyWindow(tk.Toplevel):
 
     def _build_grid_panel(self, parent):
         top = tk.Frame(parent, bg='#0d0d14')
-        top.pack(fill='x', padx=8, pady=6)
+        top.pack(fill='x', padx=8, pady=(6, 2))
         ttk.Button(top, text='✅ 선택 일괄 적용', command=self._apply_selected)\
             .pack(side='left', padx=4)
+        ttk.Button(top, text='☑ 전체 선택', command=lambda: self._set_all_selected(True))\
+            .pack(side='left', padx=4)
+        ttk.Button(top, text='☐ 전체 해제', command=lambda: self._set_all_selected(False))\
+            .pack(side='left', padx=4)
+
+        bulk = tk.Frame(parent, bg='#0d0d14')
+        bulk.pack(fill='x', padx=8, pady=(0, 6))
+        tk.Label(bulk, text='일괄 분류:', bg='#0d0d14', fg='#aaa').pack(side='left')
+        self.bulk_cat_var = tk.StringVar()
+        tk.Entry(bulk, textvariable=self.bulk_cat_var, width=14).pack(side='left', padx=(2, 8))
+        tk.Label(bulk, text='일괄 태그:', bg='#0d0d14', fg='#aaa').pack(side='left')
+        self.bulk_tag_var = tk.StringVar()
+        tk.Entry(bulk, textvariable=self.bulk_tag_var, width=20).pack(side='left', padx=(2, 8))
+        ttk.Button(bulk, text='선택 카드에 적용', command=self._bulk_set_selected).pack(side='left')
 
         self.canvas = tk.Canvas(parent, bg='#0d0d14', highlightthickness=0)
         vsb = ttk.Scrollbar(parent, orient='vertical', command=self.canvas.yview)
@@ -202,14 +217,52 @@ class ClassifyWindow(tk.Toplevel):
         self._inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor='nw')
         self.inner.bind('<Configure>',
                          lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.bind('<Configure>',
-                          lambda e: self.canvas.itemconfigure(self._inner_id, width=e.width))
+
+        def _on_canvas_configure(e):
+            self.canvas.itemconfigure(self._inner_id, width=e.width)
+            cols = max(1, e.width // self.ClassifyCardWidth())
+            if cols != self._grid_cols:
+                self._grid_cols = cols
+                self._relayout_cards()
+        self.canvas.bind('<Configure>', _on_canvas_configure)
+
         def _on_wheel(e):
             w = self.winfo_containing(e.x_root, e.y_root)
             if w is not None and str(w).startswith(str(self.log_txt)):
                 return  # 로그 패널 위에서는 자체 스크롤만 동작
             self.canvas.yview_scroll(-1 * (e.delta // 120), 'units')
         self.canvas.bind_all('<MouseWheel>', _on_wheel)
+
+    @staticmethod
+    def ClassifyCardWidth():
+        """카드 한 칸의 대략적인 폭(썸네일+패딩) — 캔버스 너비로 열 수를 계산할 때 사용."""
+        return ClassifyCard.THUMB + 36
+
+    def _relayout_cards(self):
+        for i, c in enumerate(self.cards):
+            c.frame.grid(row=i // self._grid_cols, column=i % self._grid_cols,
+                         padx=6, pady=6, sticky='n')
+
+    def _set_all_selected(self, val):
+        for card in self.cards:
+            card.sel_var.set(val)
+
+    def _bulk_set_selected(self):
+        cat = self.bulk_cat_var.get().strip()
+        tags = self.bulk_tag_var.get().strip()
+        if not cat and not tags:
+            messagebox.showinfo('알림', '일괄 분류 또는 일괄 태그 중 하나는 입력하세요.')
+            return
+        n = 0
+        for card in self.cards:
+            if card.sel_var.get():
+                if cat:
+                    card.cat_var.set(cat)
+                if tags:
+                    card.tag_var.set(tags)
+                n += 1
+        if n == 0:
+            messagebox.showinfo('알림', '선택된 카드가 없습니다 (카드 체크박스를 먼저 선택하세요).')
 
     # ── 설정 로드/저장 ───────────────────────────
     def _load_settings(self):
@@ -326,10 +379,12 @@ class ClassifyWindow(tk.Toplevel):
                     {'suggested': h['suggested'], 'comment': h['comment']} for h in hist]
 
         folder_ctx = f'키워드 검색 결과: "{keyword}" 포함 파일들 (여러 폴더에 분산되어 있을 수 있음)'
+        existing_ctx = self._existing_context_prompt()
+        combined_prompt = (existing_ctx + '\n\n' + forced_prompt).strip() if existing_ctx else forced_prompt
         try:
             results = self.client.classify_videos(
                 filenames, folder_ctx=folder_ctx,
-                rejection_notes=rejection_notes, custom_prompt=forced_prompt,
+                rejection_notes=rejection_notes, custom_prompt=combined_prompt,
                 on_debug=self._on_llm_debug)
         except Exception as e:
             self.after(0, lambda: messagebox.showerror('분류 실패', str(e)))
@@ -358,6 +413,20 @@ class ClassifyWindow(tk.Toplevel):
         custom_prompt = self.prompt_txt.get('1.0', 'end').strip()
         threading.Thread(target=self._classify_worker,
                           args=(folder, custom_prompt), daemon=True).start()
+
+    def _existing_context_prompt(self):
+        """기존 분류/태그를 LLM에게 알려줘서, 매번 새 이름을 만들지 않고 가능하면
+        기존 것을 그대로 재사용하도록 유도."""
+        cats = [c for c, _ in self.db.all_categories()]
+        tags = self.db.all_tags()
+        parts = []
+        if cats:
+            parts.append('기존 분류(category) 목록 — 의미가 맞으면 새로 만들지 말고 이 중 하나를 '
+                         '그대로 사용하세요: ' + ', '.join(cats[:200]))
+        if tags:
+            parts.append('기존 태그 목록 일부 — 비슷한 의미의 태그가 있으면 새로 만들지 말고 '
+                         '이 중 하나를 그대로 사용하세요: ' + ', '.join(tags[:200]))
+        return '\n'.join(parts)
 
     @staticmethod
     def _rel_path(path, folder):
@@ -408,10 +477,12 @@ class ClassifyWindow(tk.Toplevel):
                 rejection_notes[self._rel_path(it['path'], folder)] = [
                     {'suggested': h['suggested'], 'comment': h['comment']} for h in hist]
 
+        existing_ctx = self._existing_context_prompt()
+        combined_prompt = (existing_ctx + '\n\n' + custom_prompt).strip() if existing_ctx else custom_prompt
         try:
             results = self.client.classify_videos(
                 filenames, folder_ctx=folder,
-                rejection_notes=rejection_notes, custom_prompt=custom_prompt,
+                rejection_notes=rejection_notes, custom_prompt=combined_prompt,
                 on_debug=self._on_llm_debug)
         except Exception as e:
             self.after(0, lambda: messagebox.showerror('분류 실패', str(e)))
@@ -457,7 +528,8 @@ class ClassifyWindow(tk.Toplevel):
                             thumb_file=self._thumb_file_fn, make_thumb=self._make_thumb_fn,
                             viewer_dlg=self._viewer_dlg_fn,
                             allow_existing_tags=allow_existing_tags)
-        card.frame.grid(row=len(self.cards) // 4, column=len(self.cards) % 4,
+        card.frame.grid(row=len(self.cards) // self._grid_cols,
+                         column=len(self.cards) % self._grid_cols,
                          padx=6, pady=6, sticky='n')
         self.cards.append(card)
 
